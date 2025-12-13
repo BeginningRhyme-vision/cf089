@@ -1,0 +1,18 @@
+app:
+  name: "Unbound Future Admin"
+  env: "development"
+  host: "0.0.0.0"
+  port: 8000
+
+database:
+  url: "postgresql://unbound_future:Unbound_future618@172.19.0.12:5432/unbound_future_db"
+
+feishu:
+  app_id: "cli_a9b795eee2799cbd"
+  app_secret: "kRjygCLAlUZ4YiC0oCS7lhOWaFKeUSU1"
+  redirect_uri: "http://43.135.37.109:5173/auth/callback"
+
+security:
+  jwt_secret: "unbound_future_admin"
+  jwt_algorithm: "HS256"
+  access_token_expire_minutes: 1200

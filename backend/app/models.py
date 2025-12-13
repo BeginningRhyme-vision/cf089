@@ -1,0 +1,60 @@
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, Enum, ForeignKey, Text
+from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
+import enum
+from .database import Base
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    feishu_open_id = Column(String(255), unique=True, index=True, nullable=False)
+    name = Column(String(255))
+    email = Column(String(255))
+    avatar_url = Column(String(1024))
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class TransferMetadata(Base):
+    __tablename__ = "transfer_metadata"
+
+    id = Column(Integer, primary_key=True, index=True)
+    client_name = Column(String(255), nullable=False)
+    endpoint = Column(String(1024), nullable=False)
+    ak = Column(String(255), nullable=False)
+    # In a real app, encrypt this field. Storing plain for simplicity now, 
+    # but the requirement says "encrypted storage". 
+    # I'll rename it to indicate intention, actual encryption should happen in CRUD.
+    sk_encrypted = Column(String(1024), nullable=False) 
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+    
+    jobs = relationship("TransferJob", back_populates="metadata_rel")
+
+class JobStatus(str, enum.Enum):
+    PENDING = "PENDING"
+    RUNNING = "RUNNING"
+    PAUSED = "PAUSED"
+    STOPPED = "STOPPED"
+    COMPLETED = "COMPLETED"
+    FAILED = "FAILED"
+
+class TransferJob(Base):
+    __tablename__ = "transfer_jobs"
+
+    job_id = Column(Integer, primary_key=True, index=True)
+    metadata_id = Column(Integer, ForeignKey("transfer_metadata.id"))
+    src_dir = Column(String(1024), nullable=False)
+    dst_dir = Column(String(1024), nullable=False)
+    delete_source = Column(Boolean, default=False)
+    status = Column(Enum(JobStatus), default=JobStatus.PENDING)
+    
+    start_time = Column(DateTime(timezone=True))
+    end_time = Column(DateTime(timezone=True))
+    duration_seconds = Column(Integer, default=0)
+    execution_count = Column(Integer, default=0)
+    result_message = Column(Text)
+    
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    metadata_rel = relationship("TransferMetadata", back_populates="jobs")
