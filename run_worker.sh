@@ -32,6 +32,38 @@ install_service() {
     echo "Backend Dir:  $BACKEND_DIR"
     echo "User:         $CURRENT_USER"
 
+    # 1. Stop Python Process (Service and any stray processes)
+    echo "Stopping existing service if running..."
+    sudo systemctl stop $SERVICE_NAME 2>/dev/null || true
+    
+    echo "Ensuring python worker processes are stopped..."
+    pkill -f "worker_transfer/worker.py" || true
+
+    # 2. Kill r2s3 service/process
+    echo "Killing any running r2s3 processes..."
+    sudo pkill r2s3 || true
+
+    # 3. Recompile r2s3 if Go exists
+    if command -v go &> /dev/null; then
+        echo "Go is installed. Rebuilding r2s3..."
+        if [ -d "$BACKEND_DIR/worker_transfer" ]; then
+            pushd "$BACKEND_DIR/worker_transfer" > /dev/null
+            rm -f r2s3
+            if go build -o r2s3 .; then
+                echo "r2s3 build successful."
+            else
+                echo "Error: r2s3 build failed."
+                exit 1
+            fi
+            popd > /dev/null
+        else
+            echo "Error: Directory $BACKEND_DIR/worker_transfer not found."
+            exit 1
+        fi
+    else
+        echo "Go is not installed. Skipping rebuild of r2s3."
+    fi
+
     # Install r2s3 binary to /usr/local/bin
     if [ -f "$BACKEND_DIR/worker_transfer/r2s3" ]; then
         echo "Installing r2s3 binary to /usr/local/bin..."

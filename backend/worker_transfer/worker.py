@@ -104,6 +104,17 @@ class JobWorker:
                 except Exception:
                     pass
 
+    async def _monitor_stderr(self, stream):
+        buffer = []
+        async for line in stream:
+            decoded_line = line.decode().strip()
+            if decoded_line:
+                logger.info(f"Job {self.job_id} [r2s3]: {decoded_line}")
+                buffer.append(decoded_line)
+                if len(buffer) > 50:
+                    buffer.pop(0)
+        return "\n".join(buffer)
+
     async def run_r2s3(self, binary_path, trans_src, trans_dest, src_ak, src_sk, dst_ak, dst_sk, job_config):
         env = os.environ.copy()
         env.update({
@@ -138,6 +149,8 @@ class JobWorker:
             env=env
         )
 
+        stderr_task = asyncio.create_task(self._monitor_stderr(self.process.stderr))
+
         stats = {'total': 0, 'transferred': 0, 'skipped': 0, 'deleted': 0, 'failed': 0}
 
         # Read stdout line by line
@@ -167,10 +180,10 @@ class JobWorker:
                 pass # Ignore non-JSON output
 
         await self.process.wait()
+        stderr_tail = await stderr_task
 
         if self.process.returncode != 0 and not self.stopped:
-            stderr_output = await self.process.stderr.read()
-            raise Exception(f"r2s3 process failed with code {self.process.returncode}: {stderr_output.decode()}")
+            raise Exception(f"r2s3 process failed with code {self.process.returncode}: {stderr_tail}")
 
         return stats
 
