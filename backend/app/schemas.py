@@ -50,6 +50,7 @@ class JobBase(BaseModel):
     src_dir: str
     dst_dir: str
     delete_source: bool = False
+    is_incremental: bool = False
 
 class JobCreate(JobBase):
     pass

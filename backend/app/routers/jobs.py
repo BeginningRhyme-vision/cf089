@@ -24,6 +24,11 @@ def mock_transfer_process(job_id: int, db_session_factory):
         if not job:
             return
 
+        # Check if it was stopped immediately after start was called
+        if job.status == models.JobStatus.STOPPED:
+            return
+
+        # Ensure status is RUNNING (should be set by start_job) and set start time
         job.status = models.JobStatus.RUNNING
         job.start_time = datetime.utcnow()
         db.commit()
@@ -103,6 +108,10 @@ def start_job(
     
     if job.status == models.JobStatus.RUNNING:
         raise HTTPException(status_code=400, detail="Job is already running")
+
+    # Set status to RUNNING immediately to avoid race conditions with stop_job
+    job.status = models.JobStatus.RUNNING
+    db.commit()
 
     # Pass the session factory to the background task so it can create its own thread-safe session
     background_tasks.add_task(mock_transfer_process, job_id, database.SessionLocal)

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { Table, Button, Modal, Form, Input, Select, Checkbox, Tag, message, Space } from 'antd';
-import { PlayCircleOutlined, PauseCircleOutlined, StopOutlined, ReloadOutlined, PlusOutlined } from '@ant-design/icons';
+import { Table, Button, Modal, Form, Input, Select, Checkbox, Tag, message, Space, Popconfirm, Descriptions } from 'antd';
+import { PlayCircleOutlined, PauseCircleOutlined, StopOutlined, ReloadOutlined, PlusOutlined, DeleteOutlined, EyeOutlined } from '@ant-design/icons';
 import api from '../api';
 
 const { Option } = Select;
@@ -10,6 +10,8 @@ const JobList = () => {
   const [metadataList, setMetadataList] = useState([]);
   const [loading, setLoading] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [detailVisible, setDetailVisible] = useState(false);
+  const [selectedJob, setSelectedJob] = useState(null);
   const [form] = Form.useForm();
 
   const fetchJobs = async () => {
@@ -60,6 +62,16 @@ const JobList = () => {
     }
   };
 
+  const handleDelete = async (jobId) => {
+    try {
+      await api.delete(`/jobs/${jobId}`);
+      message.success('Job deleted');
+      fetchJobs();
+    } catch (error) {
+      message.error('Failed to delete job');
+    }
+  };
+
   const statusColors = {
     PENDING: 'default',
     RUNNING: 'processing',
@@ -85,12 +97,27 @@ const JobList = () => {
       key: 'action',
       render: (_, record) => (
         <Space>
+          <Button 
+            icon={<EyeOutlined />} 
+            size="small" 
+            onClick={() => { setSelectedJob(record); setDetailVisible(true); }}
+          >
+            Details
+          </Button>
           {(record.status === 'PENDING' || record.status === 'PAUSED' || record.status === 'STOPPED' || record.status === 'FAILED') && (
             <Button icon={<PlayCircleOutlined />} size="small" onClick={() => handleAction(record.job_id, 'start')}>Start</Button>
           )}
           {record.status === 'RUNNING' && (
             <Button icon={<StopOutlined />} size="small" danger onClick={() => handleAction(record.job_id, 'stop')}>Stop</Button>
           )}
+          <Popconfirm 
+            title="Are you sure delete this job?" 
+            onConfirm={() => handleDelete(record.job_id)} 
+            okText="Yes" 
+            cancelText="No"
+          >
+             <Button icon={<DeleteOutlined />} size="small" danger>Delete</Button>
+          </Popconfirm>
         </Space>
       ),
     },
@@ -130,7 +157,38 @@ const JobList = () => {
           <Form.Item name="delete_source" valuePropName="checked">
             <Checkbox>Delete source files after transfer</Checkbox>
           </Form.Item>
+          <Form.Item name="is_incremental" valuePropName="checked">
+            <Checkbox>Incremental Transfer (Continuous Sync)</Checkbox>
+          </Form.Item>
         </Form>
+      </Modal>
+
+      <Modal
+        title="Job Details"
+        open={detailVisible}
+        onCancel={() => setDetailVisible(false)}
+        footer={[<Button key="close" onClick={() => setDetailVisible(false)}>Close</Button>]}
+        width={700}
+      >
+        {selectedJob && (
+          <Descriptions column={1} bordered>
+            <Descriptions.Item label="Job ID">{selectedJob.job_id}</Descriptions.Item>
+            <Descriptions.Item label="Client/Metadata ID">{selectedJob.metadata_id}</Descriptions.Item>
+            <Descriptions.Item label="Source">{selectedJob.src_dir}</Descriptions.Item>
+            <Descriptions.Item label="Destination">{selectedJob.dst_dir}</Descriptions.Item>
+            <Descriptions.Item label="Delete Source">{selectedJob.delete_source ? 'Yes' : 'No'}</Descriptions.Item>
+            <Descriptions.Item label="Incremental">{selectedJob.is_incremental ? 'Yes' : 'No'}</Descriptions.Item>
+            <Descriptions.Item label="Status">
+              <Tag color={statusColors[selectedJob.status]}>{selectedJob.status}</Tag>
+            </Descriptions.Item>
+            <Descriptions.Item label="Start Time">{selectedJob.start_time || '-'}</Descriptions.Item>
+            <Descriptions.Item label="End Time">{selectedJob.end_time || '-'}</Descriptions.Item>
+            <Descriptions.Item label="Duration">{selectedJob.duration_seconds} seconds</Descriptions.Item>
+            <Descriptions.Item label="Execution Count">{selectedJob.execution_count}</Descriptions.Item>
+            <Descriptions.Item label="Result Message">{selectedJob.result_message || '-'}</Descriptions.Item>
+            <Descriptions.Item label="Created At">{selectedJob.created_at}</Descriptions.Item>
+          </Descriptions>
+        )}
       </Modal>
     </div>
   );

@@ -8,10 +8,20 @@ const AuthCallback = () => {
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
   const setAuth = useAuthStore((state) => state.setAuth);
+  const token = useAuthStore((state) => state.token);
+  const calledRef = React.useRef(false);
 
   useEffect(() => {
+    if (token) {
+        navigate('/');
+        return;
+    }
+    
     const code = searchParams.get('code');
     if (code) {
+      if (calledRef.current) return;
+      calledRef.current = true;
+
       api.post(`/auth/feishu/callback?code=${code}`)
         .then((response) => {
           const { access_token, user } = response.data;
@@ -27,7 +37,7 @@ const AuthCallback = () => {
     } else {
       navigate('/login');
     }
-  }, [searchParams, navigate, setAuth]);
+  }, [searchParams, navigate, setAuth, token]);
 
   return (
     <div style={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100vh' }}>

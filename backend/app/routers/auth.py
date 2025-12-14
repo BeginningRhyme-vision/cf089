@@ -38,62 +38,88 @@ def feishu_callback(code: str, db: Session = Depends(database.get_db)):
     Exchanges the auth code for a user token, retrieves user info, 
     and issues a JWT for the app.
     """
-    
-    # 1. Get App Access Token (Tenant Access Token) - usually needed for some APIs, 
-    # but for simple login 'user_access_token' via code exchange is direct.
-    
-    # 2. Get User Access Token
     app_id = config.settings.feishu_app_id
     app_secret = config.settings.feishu_app_secret
-    
-    # --- MOCKING FOR DEMO IF CREDENTIALS ARE INVALID ---
-    if app_id == "YOUR_APP_ID":
-        # Create a mock user
-        user = db.query(models.User).filter(models.User.feishu_open_id == "mock_open_id").first()
-        if not user:
-            user = models.User(
-                feishu_open_id="mock_open_id",
-                name="Mock User",
-                email="mock@example.com",
-                avatar_url=""
-            )
-            db.add(user)
-            db.commit()
-            db.refresh(user)
-        
-        access_token_expires = timedelta(minutes=config.settings.access_token_expire_minutes)
-        access_token = create_access_token(
-            data={"sub": user.feishu_open_id}, expires_delta=access_token_expires
-        )
-        return {"access_token": access_token, "token_type": "bearer", "user": user}
-    # ---------------------------------------------------
 
-    token_url = "https://open.feishu.cn/open-apis/authen/v1/access_token"
-    headers = {"Content-Type": "application/json; charset=utf-8"}
+    # 1. Get App Access Token (Tenant Access Token)
+    app_token_url = "https://open.feishu.cn/open-apis/auth/v3/app_access_token/internal"
+    app_token_res = requests.post(app_token_url, json={
+        "app_id": app_id,
+        "app_secret": app_secret
+    })
+    
+    if app_token_res.status_code != 200:
+        raise HTTPException(status_code=400, detail="Failed to get app access token from Feishu")
+    
+    app_access_token = app_token_res.json().get("tenant_access_token")
+    if not app_access_token:
+        raise HTTPException(status_code=400, detail="Invalid app access token response")
+
+    # 2. Get User Access Token
+    token_url = "https://open.feishu.cn/open-apis/authen/v1/oidc/access_token"
+    headers = {
+        "Authorization": f"Bearer {app_access_token}",
+        "Content-Type": "application/json; charset=utf-8"
+    }
     payload = {
-        "app_access_token": "", # not always needed for this endpoint depending on version, 
-        # but let's assume standard flow: code -> user_access_token
         "grant_type": "authorization_code",
         "code": code
     }
     
-    # Note: Real Feishu implementation needs 'app_access_token' to get 'user_access_token' 
-    # OR uses the newer identity APIs. 
-    # Simplifying for this exercise to the standard OAuth2 conceptual flow.
+    token_res = requests.post(token_url, json=payload, headers=headers)
+    if token_res.status_code != 200:
+        raise HTTPException(status_code=400, detail="Failed to get user access token from Feishu")
+        
+    token_data = token_res.json()
+    if token_data.get("code") != 0: # Feishu error code
+         raise HTTPException(status_code=400, detail=f"Feishu Error: {token_data.get('msg')}")
+
+    user_access_token = token_data.get("data", {}).get("access_token")
+    if not user_access_token:
+        raise HTTPException(status_code=400, detail="Failed to retrieve user access token")
+
+    # 3. Get User Info
+    user_info_url = "https://open.feishu.cn/open-apis/authen/v1/user_info"
+    user_info_headers = {
+        "Authorization": f"Bearer {user_access_token}",
+        "Content-Type": "application/json; charset=utf-8"
+    }
     
-    # Let's assume we get user info directly for now or handling the error.
-    # In a real scenario, you'd post to Feishu API.
+    user_info_res = requests.get(user_info_url, headers=user_info_headers)
+    if user_info_res.status_code != 200:
+        raise HTTPException(status_code=400, detail="Failed to get user info from Feishu")
     
-    # Simulating a call (replace with actual requests.post logic)
-    # resp = requests.post(token_url, json=payload, headers=headers)
-    # data = resp.json()
+    user_info_data = user_info_res.json()
+    if user_info_data.get("code") != 0:
+        raise HTTPException(status_code=400, detail=f"Feishu Error: {user_info_data.get('msg')}")
+        
+    feishu_user = user_info_data.get("data", {})
+    open_id = feishu_user.get("open_id")
     
-    # For now, since we can't hit real Feishu without keys, I'll fallback to the mock logic 
-    # if the code is "mock_code" or just always for this prototype to work.
+    if not open_id:
+        raise HTTPException(status_code=400, detail="Incomplete user info from Feishu")
+
+    # 4. Check/Create User in DB
+    user = db.query(models.User).filter(models.User.feishu_open_id == open_id).first()
     
-    # ... (Actual Feishu logic would go here) ...
+    if not user:
+        user = models.User(
+            feishu_open_id=open_id,
+            name=feishu_user.get("name"),
+            email=feishu_user.get("email") or feishu_user.get("enterprise_email"), # Try both
+            avatar_url=feishu_user.get("avatar_url")
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
     
-    raise HTTPException(status_code=400, detail="Real Feishu integration requires valid keys in config.yaml")
+    # 5. Issue Local JWT
+    access_token_expires = timedelta(minutes=config.settings.access_token_expire_minutes)
+    access_token = create_access_token(
+        data={"sub": user.feishu_open_id}, expires_delta=access_token_expires
+    )
+    
+    return {"access_token": access_token, "token_type": "bearer", "user": user}
 
 @router.get("/me", response_model=schemas.User)
 def read_users_me(token: str = Depends(lambda x: x), db: Session = Depends(database.get_db)):

@@ -11,6 +11,13 @@ class Settings(BaseSettings):
     jwt_secret: str
     jwt_algorithm: str
     access_token_expire_minutes: int
+    
+    storage_transfer_service_url: str
+    storage_src_endpoint: str
+    storage_src_access_key: str
+    storage_src_secret_key: str
+    storage_src_region: str = "auto"
+    max_worker_threads: int = 32
 
     class Config:
         env_file = ".env"
@@ -32,7 +39,13 @@ def load_config() -> Settings:
         feishu_redirect_uri=config_data["feishu"]["redirect_uri"],
         jwt_secret=config_data["security"]["jwt_secret"],
         jwt_algorithm=config_data["security"]["jwt_algorithm"],
-        access_token_expire_minutes=config_data["security"]["access_token_expire_minutes"]
+        access_token_expire_minutes=config_data["security"]["access_token_expire_minutes"],
+        storage_transfer_service_url=config_data.get("storage", {}).get("transfer_service_url", "http://localhost:8787/initiate-copy"),
+        storage_src_endpoint=config_data.get("storage", {}).get("src", {}).get("endpoint", ""),
+        storage_src_access_key=config_data.get("storage", {}).get("src", {}).get("access_key", ""),
+        storage_src_secret_key=config_data.get("storage", {}).get("src", {}).get("secret_key", ""),
+        storage_src_region=config_data.get("storage", {}).get("src", {}).get("region", "auto"),
+        max_worker_threads=config_data.get("worker", {}).get("max_threads", 32)
     )
 
 settings = load_config()

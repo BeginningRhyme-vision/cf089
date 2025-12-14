@@ -46,6 +46,7 @@ class TransferJob(Base):
     src_dir = Column(String(1024), nullable=False)
     dst_dir = Column(String(1024), nullable=False)
     delete_source = Column(Boolean, default=False)
+    is_incremental = Column(Boolean, default=False)
     status = Column(Enum(JobStatus), default=JobStatus.PENDING)
     
     start_time = Column(DateTime(timezone=True))
