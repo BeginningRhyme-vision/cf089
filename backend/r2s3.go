@@ -34,6 +34,7 @@ var (
 	statsTransferred int64
 	statsSkipped     int64
 	statsDeleted     int64
+	statsFailed      int64
 	statsBytes       int64
 )
 
@@ -59,6 +60,7 @@ type ProgressReport struct {
 	Transferred int64  `json:"transferred"`
 	Skipped     int64  `json:"skipped"`
 	Deleted     int64  `json:"deleted"`
+	Failed      int64  `json:"failed"`
 	Bytes       int64  `json:"bytes"`
 }
 
@@ -114,6 +116,7 @@ func main() {
 				Transferred: atomic.LoadInt64(&statsTransferred),
 				Skipped:     atomic.LoadInt64(&statsSkipped),
 				Deleted:     atomic.LoadInt64(&statsDeleted),
+				Failed:      atomic.LoadInt64(&statsFailed),
 				Bytes:       atomic.LoadInt64(&statsBytes),
 			}
 			jsonBytes, _ := json.Marshal(report)
@@ -206,6 +209,7 @@ func main() {
 			err := processObject(srcClient, dstClient, srcCfg, dstCfg, o, limitCh, deleteSrc)
 			if err != nil {
 				logger.Errorf("Failed to process %s: %v", o.Key, err)
+				atomic.AddInt64(&statsFailed, 1)
 			} else {
 				atomic.AddInt64(&statsTransferred, 1)
 				atomic.AddInt64(&statsBytes, o.Size)

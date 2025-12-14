@@ -32,3 +32,4 @@ backend/r2s3
 
 # Logs
 *.log
+nohup.out

@@ -127,7 +127,7 @@ class JobWorker:
             env=env
         )
 
-        stats = {'total': 0, 'transferred': 0, 'skipped': 0, 'deleted': 0}
+        stats = {'total': 0, 'transferred': 0, 'skipped': 0, 'deleted': 0, 'failed': 0}
 
         # Read stdout line by line
         async for line in self.process.stdout:
@@ -141,6 +141,7 @@ class JobWorker:
                     stats['transferred'] = data.get('transferred', 0)
                     stats['skipped'] = data.get('skipped', 0)
                     stats['deleted'] = data.get('deleted', 0)
+                    stats['failed'] = data.get('failed', 0)
                     # Update DB periodically (could be throttled, but for now we trust the binary reports 1/sec)
                     await asyncio.to_thread(self._update_stats_db, stats)
             except json.JSONDecodeError:
@@ -198,7 +199,7 @@ class JobWorker:
             job.execution_count += 1
             job.duration_seconds = self.calculate_duration(job.start_time)
             
-            msg = f"Completed. Total: {stats.get('total', 0)}, Transferred: {stats['transferred']}, Skipped: {stats['skipped']}, Deleted: {stats['deleted']}."
+            msg = f"Completed. Total: {stats.get('total', 0)}, Transferred: {stats['transferred']}, Skipped: {stats['skipped']}, Deleted: {stats['deleted']}, Failed: {stats.get('failed', 0)}."
             
             if job.is_incremental:
                 job.result_message = "Cycle " + msg
@@ -224,7 +225,7 @@ class JobWorker:
          with SessionLocal() as db:
             job = db.query(TransferJob).filter(TransferJob.job_id == self.job_id).first()
             if job:
-                job.result_message = f"In Progress. Total: {stats.get('total', 0)}, Transferred: {stats['transferred']}, Skipped: {stats['skipped']}, Deleted: {stats['deleted']}."
+                job.result_message = f"In Progress. Total: {stats.get('total', 0)}, Transferred: {stats['transferred']}, Skipped: {stats['skipped']}, Deleted: {stats['deleted']}, Failed: {stats.get('failed', 0)}."
                 job.duration_seconds = self.calculate_duration(job.start_time)
                 db.commit()
 
