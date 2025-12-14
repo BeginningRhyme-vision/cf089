@@ -567,12 +567,18 @@ func callExternalService(r2Key, s3Url string, size, offset int64, uploadID strin
 func shouldInclude(key string) bool {
 	if excludePattern != "" {
 		matched, _ := path.Match(excludePattern, key)
+		if !matched && !strings.Contains(excludePattern, "/") {
+			matched, _ = path.Match(excludePattern, path.Base(key))
+		}
 		if matched {
 			return false
 		}
 	}
 	if includePattern != "" {
 		matched, _ := path.Match(includePattern, key)
+		if !matched && !strings.Contains(includePattern, "/") {
+			matched, _ = path.Match(includePattern, path.Base(key))
+		}
 		if !matched {
 			return false
 		}

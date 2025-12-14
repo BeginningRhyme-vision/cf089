@@ -60,9 +60,11 @@ class JobWorker:
             trans_dest = f"{dst_endpoint}/{job.dst_dir}"
 
             # Check binary existence
-            binary_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'r2s3')
+            binary_path = '/usr/local/bin/r2s3'
             if not os.path.exists(binary_path):
-                 raise Exception(f"r2s3 binary not found at {binary_path}")
+                binary_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'r2s3')
+                if not os.path.exists(binary_path):
+                     raise Exception(f"r2s3 binary not found at /usr/local/bin/r2s3 or {binary_path}")
 
             while not self.stopped:
                 logger.info(f"Job {self.job_id}: Starting sync cycle using r2s3")

@@ -32,6 +32,15 @@ install_service() {
     echo "Backend Dir:  $BACKEND_DIR"
     echo "User:         $CURRENT_USER"
 
+    # Install r2s3 binary to /usr/local/bin
+    if [ -f "$BACKEND_DIR/worker_transfer/r2s3" ]; then
+        echo "Installing r2s3 binary to /usr/local/bin..."
+        sudo cp "$BACKEND_DIR/worker_transfer/r2s3" /usr/local/bin/
+        sudo chmod +x /usr/local/bin/r2s3
+    else
+        echo "Warning: r2s3 binary not found in $BACKEND_DIR/worker_transfer/"
+    fi
+
     # Generate Service File Content
     sudo bash -c "cat > $SERVICE_FILE" <<EOF
 [Unit]
