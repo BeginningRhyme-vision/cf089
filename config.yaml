@@ -21,7 +21,7 @@ worker:
   max_threads: 512
 
 storage:
-  transfer_service_url: "http://r2-worker.xinglong940713.workers.dev/initiate-copy"
+  transfer_service_url: "http://r2-worker.cf022.workers.dev/initiate-copy"
   src:
     endpoint: "https://6d18700b4bd3fff2b330035c35b0bbeb.r2.cloudflarestorage.com/tmp-transfer2"
     access_key: "6e17dce5e6699ec405f7ec07deecf321"

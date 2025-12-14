@@ -14,15 +14,15 @@ const JobList = () => {
   const [selectedJob, setSelectedJob] = useState(null);
   const [form] = Form.useForm();
 
-  const fetchJobs = async () => {
-    setLoading(true);
+  const fetchJobs = async (background = false) => {
+    if (!background) setLoading(true);
     try {
       const res = await api.get('/jobs/');
       setJobs(res.data);
     } catch (error) {
-      message.error('Failed to load jobs');
+      if (!background) message.error('Failed to load jobs');
     } finally {
-      setLoading(false);
+      if (!background) setLoading(false);
     }
   };
 
@@ -38,12 +38,23 @@ const JobList = () => {
   useEffect(() => {
     fetchJobs();
     fetchMetadata();
+    
+    const interval = setInterval(() => {
+      fetchJobs(true);
+    }, 5000);
+
+    return () => clearInterval(interval);
   }, []);
 
   const handleCreate = async () => {
     try {
       const values = await form.validateFields();
-      await api.post('/jobs/', values);
+      const payload = {
+        ...values,
+        delete_source: !!values.delete_source,
+        is_incremental: !!values.is_incremental
+      };
+      await api.post('/jobs/', payload);
       message.success('Job created');
       setIsModalOpen(false);
       fetchJobs();
@@ -129,7 +140,7 @@ const JobList = () => {
         <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); setIsModalOpen(true); }}>
           New Transfer Job
         </Button>
-        <Button icon={<ReloadOutlined />} onClick={fetchJobs}>Refresh</Button>
+        <Button icon={<ReloadOutlined />} onClick={() => fetchJobs(false)}>Refresh</Button>
       </div>
       
       <Table columns={columns} dataSource={jobs} rowKey="job_id" loading={loading} />
@@ -140,7 +151,7 @@ const JobList = () => {
         onOk={handleCreate} 
         onCancel={() => setIsModalOpen(false)}
       >
-        <Form form={form} layout="vertical">
+        <Form form={form} layout="vertical" initialValues={{ delete_source: false, is_incremental: false }}>
           <Form.Item name="metadata_id" label="Client/Metadata" rules={[{ required: true }]}>
             <Select>
               {metadataList.map(m => (
