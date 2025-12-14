@@ -78,6 +78,9 @@ class JobWorker:
                     job_config
                 )
                 
+                if self.stopped:
+                    break
+
                 # Update job completion
                 should_break = await asyncio.to_thread(self._finish_cycle, stats)
                 if should_break:
@@ -152,12 +155,20 @@ class JobWorker:
                     stats['failed'] = data.get('failed', 0)
                     # Update DB periodically (could be throttled, but for now we trust the binary reports 1/sec)
                     await asyncio.to_thread(self._update_stats_db, stats)
+                
+                # Check for stop signal during execution
+                if await asyncio.to_thread(self._check_stop_status):
+                    logger.info(f"Job {self.job_id}: Stop signal received. Terminating r2s3 process...")
+                    self.stopped = True
+                    self.process.terminate()
+                    break
+
             except json.JSONDecodeError:
                 pass # Ignore non-JSON output
 
         await self.process.wait()
 
-        if self.process.returncode != 0:
+        if self.process.returncode != 0 and not self.stopped:
             stderr_output = await self.process.stderr.read()
             raise Exception(f"r2s3 process failed with code {self.process.returncode}: {stderr_output.decode()}")
 
