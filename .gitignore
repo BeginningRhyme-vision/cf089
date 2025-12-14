@@ -28,6 +28,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+backend/r2s3
 
 # Logs
 *.log

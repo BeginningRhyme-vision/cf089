@@ -18,12 +18,12 @@ security:
   access_token_expire_minutes: 1200
 
 worker:
-  max_threads: 1024
+  max_threads: 512
 
 storage:
   transfer_service_url: "http://r2-worker.xinglong940713.workers.dev/initiate-copy"
   src:
-    endpoint: "https://tmp-transfer2.6d18700b4bd3fff2b330035c35b0bbeb.r2.cloudflarestorage.com"
+    endpoint: "https://6d18700b4bd3fff2b330035c35b0bbeb.r2.cloudflarestorage.com/tmp-transfer2"
     access_key: "6e17dce5e6699ec405f7ec07deecf321"
     secret_key: "4916026eb627351979f06b898b4f8f67137caba46c39bab83934eb29a97f92ad"
     region: "auto"
