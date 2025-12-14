@@ -165,6 +165,12 @@ const JobList = () => {
           <Form.Item name="dst_dir" label="Destination Directory" rules={[{ required: true }]}>
             <Input />
           </Form.Item>
+          <Form.Item name="include" label="Include Pattern (Glob)" tooltip="Example: *.jpg">
+            <Input placeholder="*.jpg" />
+          </Form.Item>
+          <Form.Item name="exclude" label="Exclude Pattern (Glob)" tooltip="Example: temp/*">
+            <Input placeholder="temp/*" />
+          </Form.Item>
           <Form.Item name="delete_source" valuePropName="checked">
             <Checkbox>Delete source files after transfer</Checkbox>
           </Form.Item>
@@ -187,6 +193,8 @@ const JobList = () => {
             <Descriptions.Item label="Client/Metadata ID">{selectedJob.metadata_id}</Descriptions.Item>
             <Descriptions.Item label="Source">{selectedJob.src_dir}</Descriptions.Item>
             <Descriptions.Item label="Destination">{selectedJob.dst_dir}</Descriptions.Item>
+            <Descriptions.Item label="Include">{selectedJob.include || '-'}</Descriptions.Item>
+            <Descriptions.Item label="Exclude">{selectedJob.exclude || '-'}</Descriptions.Item>
             <Descriptions.Item label="Delete Source">{selectedJob.delete_source ? 'Yes' : 'No'}</Descriptions.Item>
             <Descriptions.Item label="Incremental">{selectedJob.is_incremental ? 'Yes' : 'No'}</Descriptions.Item>
             <Descriptions.Item label="Status">

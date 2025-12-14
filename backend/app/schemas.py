@@ -49,6 +49,8 @@ class JobBase(BaseModel):
     metadata_id: int
     src_dir: str
     dst_dir: str
+    include: Optional[str] = None
+    exclude: Optional[str] = None
     delete_source: bool = False
     is_incremental: bool = False
 

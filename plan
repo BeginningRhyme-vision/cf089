@@ -1,0 +1,4 @@
+我需要对 job 增加 include/exclude 选项 : 
+1. 前端创建/查看任务时需要增加这两个字段
+2. 后端需要将该字段存入数据库中并在创建与查看时正常返回给前端
+3. 修改 @backend/worker_transfer/worker.py 与 @backend/worker_transfer/r2s3.go 中的代码，将该字段透传给 r2s3, 并在处理时 skip 掉命中规则的数据

@@ -4,7 +4,7 @@
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BACKEND_DIR="$PROJECT_ROOT/backend"
 VENV_PYTHON="$BACKEND_DIR/venv/bin/python"
-WORKER_SCRIPT="$BACKEND_DIR/worker.py"
+WORKER_SCRIPT="$BACKEND_DIR/worker_transfer/worker.py"
 SERVICE_NAME="unbound-future-worker"
 SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
 

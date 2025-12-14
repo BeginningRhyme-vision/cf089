@@ -67,7 +67,10 @@ def create_job(job: schemas.JobCreate, db: Session = Depends(database.get_db)):
         metadata_id=job.metadata_id,
         src_dir=job.src_dir,
         dst_dir=job.dst_dir,
+        include=job.include,
+        exclude=job.exclude,
         delete_source=job.delete_source,
+        is_incremental=job.is_incremental,
         status=models.JobStatus.PENDING
     )
     db.add(db_job)

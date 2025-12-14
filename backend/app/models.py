@@ -45,6 +45,8 @@ class TransferJob(Base):
     metadata_id = Column(Integer, ForeignKey("transfer_metadata.id"))
     src_dir = Column(String(1024), nullable=False)
     dst_dir = Column(String(1024), nullable=False)
+    include = Column(String(1024), nullable=True)
+    exclude = Column(String(1024), nullable=True)
     delete_source = Column(Boolean, default=False)
     is_incremental = Column(Boolean, default=False)
     status = Column(Enum(JobStatus), default=JobStatus.PENDING)
