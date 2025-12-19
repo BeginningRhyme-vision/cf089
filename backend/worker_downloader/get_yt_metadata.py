@@ -42,7 +42,7 @@ CHUNK_SIZE = 6 * 1024 * 1024  # 6MB
 ssl_context = ssl._create_unverified_context()
 
 # R2 Configuration
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), 'config.yaml')
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'config.yaml')
 
 if not os.path.exists(CONFIG_PATH):
     print(f"Error: Config file not found at {CONFIG_PATH}")
@@ -388,12 +388,13 @@ def process_video_record(record_id, url, r2_prefix, ydl_opts):
         db.close()
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python get_yt_metadata.py <job_id>")
+    if len(sys.argv) < 2 or len(sys.argv) > 3:
+        print("Usage: python get_yt_metadata.py <job_id> [proxy_address]")
         sys.exit(1)
 
     try:
         job_id = int(sys.argv[1])
+        proxy_address = sys.argv[2] if len(sys.argv) == 3 else None
     except ValueError:
         print("Job ID must be an integer.")
         sys.exit(1)
@@ -438,6 +439,9 @@ def main():
         'skip_download': True,
         'nocheckcertificate': True,
     }
+    
+    if proxy_address:
+        ydl_opts['proxy'] = proxy_address
 
     max_parallel_videos = 256
     print(f"Starting parallel processing with max {max_parallel_videos} concurrent videos...")

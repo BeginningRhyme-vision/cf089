@@ -30,6 +30,9 @@ wheels/
 *.egg
 backend/worker_transfer/r2s3
 
+backend.pid
+frontend.pid
+
 # Logs
 *.log
 nohup.out
