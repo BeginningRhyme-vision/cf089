@@ -10,7 +10,7 @@ import concurrent.futures
 import threading
 import os
 from datetime import datetime
-from sqlalchemy import or_, not_
+from sqlalchemy import or_, not_, and_
 
 try:
     import yaml
@@ -423,7 +423,10 @@ def main():
         YoutubeRecord.status.in_([JobStatus.PENDING, JobStatus.FAILED]),
         or_(
             YoutubeRecord.error_message == None,
-            not_(YoutubeRecord.error_message.contains("Video unavailable"), not_(YoutubeRecord.error_message.contains("This video is private")))
+            and_(
+                not_(YoutubeRecord.error_message.contains("Video unavailable")),
+                not_(YoutubeRecord.error_message.contains("This video is private"))
+            )
         )
     ).all()
     
