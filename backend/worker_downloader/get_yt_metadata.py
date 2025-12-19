@@ -148,7 +148,6 @@ def process_upload(source_url, filename, filesize, r2_prefix):
 
     print(f"Source URL: {source_url}")
     print(f"Total Size: {filesize} bytes")
-    print(f"Worker URL: {WORKER_UPLOAD_URL}")
 
     # Construct Key with R2 Prefix
     # Ensure r2_prefix ends with / if it's a folder, or handle it smartly
@@ -253,6 +252,13 @@ class HostLockManager:
 
 host_lock_manager = HostLockManager()
 
+def check_file_exists(key):
+    try:
+        s3_client.head_object(Bucket=R2_BUCKET_NAME, Key=key)
+        return True
+    except Exception:
+        return False
+
 def update_record_metadata(record_id, title, video_id):
     db = SessionLocal()
     try:
@@ -283,6 +289,11 @@ def process_video_record(record_id, url, r2_prefix, ydl_opts):
         max_retries = 3
         success = False
         last_error = None
+        
+        # Ensure prefix ends with /
+        prefix = r2_prefix.strip()
+        if prefix and not prefix.endswith('/'):
+            prefix += '/'
 
         for attempt in range(max_retries):
             try:
@@ -305,45 +316,53 @@ def process_video_record(record_id, url, r2_prefix, ydl_opts):
                                        if f.get('vcodec') != 'none' and f.get('acodec') == 'none'), None)
 
                     if best_audio:
-                        print(f"\n[Audio] Best found: {best_audio.get('format_id')} ({best_audio.get('ext')})")
+                        # print(f"\n[Audio] Best found: {best_audio.get('format_id')} ({best_audio.get('ext')})")
                         audio_filename = f"{video_id}_audio.{best_audio.get('ext')}"
                         audio_url = best_audio.get('url')
                         
-                        lock = host_lock_manager.get_lock(audio_url)
-                        with lock:
-                            try:
-                                process_upload(
-                                    audio_url, 
-                                    audio_filename, 
-                                    best_audio.get('filesize'),
-                                    r2_prefix
-                                )
-                            except Exception as e:
-                                print(f"Error uploading audio {audio_filename}: {e}")
-                                # Throttle
-                                time.sleep(10)
-                                raise e
+                        audio_key = prefix + audio_filename
+                        if check_file_exists(audio_key):
+                            print(f"Audio file {audio_filename} already exists in R2, skipping upload.")
+                        else:
+                            lock = host_lock_manager.get_lock(audio_url)
+                            with lock:
+                                try:
+                                    process_upload(
+                                        audio_url, 
+                                        audio_filename, 
+                                        best_audio.get('filesize'),
+                                        r2_prefix
+                                    )
+                                except Exception as e:
+                                    print(f"Error uploading audio {audio_filename}: {e}")
+                                    # Throttle
+                                    time.sleep(10)
+                                    raise e
                     else:
                         print(f"No audio format found for {url}.")
 
                     if best_video:
-                        print(f"\n[Video] Best found: {best_video.get('format_id')} ({best_video.get('ext')})")
+                        # print(f"\n[Video] Best found: {best_video.get('format_id')} ({best_video.get('ext')})")
                         video_filename = f"{video_id}_video.{best_video.get('ext')}"
                         video_url = best_video.get('url')
 
-                        lock = host_lock_manager.get_lock(video_url)
-                        with lock:
-                            try:
-                                process_upload(
-                                    video_url, 
-                                    video_filename, 
-                                    best_video.get('filesize'),
-                                    r2_prefix
-                                )
-                            except Exception as e:
-                                print(f"Error uploading video {video_filename}: {e}")
-                                time.sleep(10)
-                                raise e
+                        video_key = prefix + video_filename
+                        if check_file_exists(video_key):
+                            print(f"Video file {video_filename} already exists in R2, skipping upload.")
+                        else:
+                            lock = host_lock_manager.get_lock(video_url)
+                            with lock:
+                                try:
+                                    process_upload(
+                                        video_url, 
+                                        video_filename, 
+                                        best_video.get('filesize'),
+                                        r2_prefix
+                                    )
+                                except Exception as e:
+                                    print(f"Error uploading video {video_filename}: {e}")
+                                    time.sleep(10)
+                                    raise e
                     else:
                         print(f"No video format found for {url}.")
                 
@@ -354,7 +373,7 @@ def process_video_record(record_id, url, r2_prefix, ydl_opts):
                 last_error = e
                 print(f"Error processing {url} (Attempt {attempt+1}/{max_retries}): {e}")
                 
-                if "Video unavailable" in str(e):
+                if "Video unavailable" in str(e) or "This video is private" in str(e):
                     print(f"Video unavailable for {url}, skipping retries.")
                     break
                 
@@ -404,7 +423,7 @@ def main():
         YoutubeRecord.status.in_([JobStatus.PENDING, JobStatus.FAILED]),
         or_(
             YoutubeRecord.error_message == None,
-            not_(YoutubeRecord.error_message.contains("Video unavailable"))
+            not_(YoutubeRecord.error_message.contains("Video unavailable"), not_(YoutubeRecord.error_message.contains("This video is private")))
         )
     ).all()
     
