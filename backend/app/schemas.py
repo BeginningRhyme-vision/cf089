@@ -1,5 +1,5 @@
 from pydantic import BaseModel
-from typing import Optional
+from typing import Optional, List
 from datetime import datetime
 from .models import JobStatus
 
@@ -75,3 +75,42 @@ class Token(BaseModel):
     access_token: str
     token_type: str
     user: User
+
+# Youtube Job Schemas
+class YoutubeRecordBase(BaseModel):
+    url: str
+    status: JobStatus = JobStatus.PENDING
+    title: Optional[str] = None
+    video_id: Optional[str] = None
+    error_message: Optional[str] = None
+
+class YoutubeRecord(YoutubeRecordBase):
+    id: int
+    job_id: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+class YoutubeJobCreate(BaseModel):
+    r2_prefix: str
+    urls: List[str] # List of URLs to process
+
+class YoutubeJob(BaseModel):
+    id: int
+    r2_prefix: str
+    status: JobStatus
+    created_at: datetime
+    # We might not want to return all records by default in list view, but for detail view it's useful.
+    # For now, let's keep it simple.
+    
+    # helper fields for UI
+    total_count: int = 0
+    success_count: int = 0
+    failed_count: int = 0
+    pending_count: int = 0
+
+    class Config:
+        from_attributes = True
+

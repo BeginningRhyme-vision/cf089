@@ -9,6 +9,7 @@ import ssl
 import concurrent.futures
 import threading
 import os
+from datetime import datetime
 
 try:
     import yaml
@@ -23,13 +24,25 @@ except ImportError:
     print("Error: boto3 is required. Please install it with `pip install boto3`.")
     sys.exit(1)
 
+# Add backend directory to sys.path to allow importing app modules
+current_dir = os.path.dirname(os.path.abspath(__file__))
+backend_dir = os.path.dirname(current_dir)
+sys.path.append(backend_dir)
+
+try:
+    from app.database import SessionLocal
+    from app.models import YoutubeJob, YoutubeRecord, JobStatus
+except ImportError as e:
+    print(f"Error importing app modules: {e}")
+    sys.exit(1)
+
 CHUNK_SIZE = 6 * 1024 * 1024  # 6MB
 
 # Bypass SSL verification
 ssl_context = ssl._create_unverified_context()
 
 # R2 Configuration
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'config.yaml')
+CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))), 'config.yaml')
 
 if not os.path.exists(CONFIG_PATH):
     print(f"Error: Config file not found at {CONFIG_PATH}")
@@ -65,18 +78,16 @@ s3_client = boto3.client(
     aws_access_key_id=R2_ACCESS_KEY_ID,
     aws_secret_access_key=R2_SECRET_ACCESS_KEY,
     config=Config(signature_version='s3v4', s3={'addressing_style': 'virtual'}),
-    region_name='auto' # R2 usually ignores region, but 'auto' is common
+    region_name='auto'
 )
 
 def get_content_length(url):
     try:
         req = urllib.request.Request(url, method='HEAD')
-        # Add user agent to avoid 403
         req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
         with urllib.request.urlopen(req, context=ssl_context) as response:
             return int(response.headers.get('Content-Length', 0))
     except Exception as e:
-        # print(f"Error getting content length: {e}")
         return 0
 
 def send_json_request(url, data):
@@ -109,12 +120,10 @@ def upload_chunk(task_data):
 
     for attempt in range(3):
         try:
-            # print(f"Uploading part {part_number} (Attempt {attempt + 1})...")
             res = send_json_request(WORKER_UPLOAD_URL, payload)
-            # print(f"Part {part_number} success.")
             return {"PartNumber": part_number, "ETag": res['etag']}
         except Exception as e:
-            print(f"Part {part_number} failed attempt {attempt + 1}: {e}")
+            # print(f"Part {part_number} failed attempt {attempt + 1}: {e}")
             time.sleep(1)
     
     raise Exception(f"Part {part_number} failed after 3 attempts")
@@ -127,7 +136,7 @@ def abort_upload(key, upload_id):
     except Exception as e:
         print(f"Failed to abort upload: {e}")
 
-def process_upload(source_url, filename, filesize):
+def process_upload(source_url, filename, filesize, r2_prefix):
     print(f"\n--- Starting upload for {filename} ---")
     
     if not filesize:
@@ -140,12 +149,19 @@ def process_upload(source_url, filename, filesize):
     print(f"Total Size: {filesize} bytes")
     print(f"Worker URL: {WORKER_UPLOAD_URL}")
 
+    # Construct Key with R2 Prefix
+    # Ensure r2_prefix ends with / if it's a folder, or handle it smartly
+    prefix = r2_prefix.strip()
+    if prefix and not prefix.endswith('/'):
+        prefix += '/'
+    
+    key = prefix + filename
+
     # 1. Initiate (Local S3)
     try:
-        key = "ytb-test/" + filename
         mpu = s3_client.create_multipart_upload(Bucket=R2_BUCKET_NAME, Key=key)
         upload_id = mpu['UploadId']
-        print(f"Initiated upload. Upload ID: {upload_id}")
+        print(f"Initiated upload. Key: {key}, Upload ID: {upload_id}")
     except Exception as e:
         raise Exception(f"Failed to initiate upload: {e}")
 
@@ -187,16 +203,15 @@ def process_upload(source_url, filename, filesize):
                 result = future.result()
                 parts.append(result)
                 success_count += 1
-                sys.stdout.write(f"\rProgress: {success_count}/{len(tasks)} parts uploaded")
-                sys.stdout.flush()
+                # sys.stdout.write(f"\rProgress: {success_count}/{len(tasks)} parts uploaded")
+                # sys.stdout.flush()
             except Exception as e:
                 print(f"\nFailed to upload a part: {e}")
                 raise e
 
-        print("\nAll parts uploaded. Completing multipart upload...")
+        # print("\nAll parts uploaded. Completing multipart upload...")
 
         # 3. Complete (Local S3)
-        # Sort parts by PartNumber just in case
         parts.sort(key=lambda x: x['PartNumber'])
         
         res = s3_client.complete_multipart_upload(
@@ -237,102 +252,185 @@ class HostLockManager:
 
 host_lock_manager = HostLockManager()
 
-def process_video_url(url, ydl_opts):
-    print(f"Processing URL: {url}")
-    while True:
-        try:
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=False)
-                
-                print(f"\n--- Parsed Download Links & Uploading ({url}) ---")
+def process_video_record(record_id, url, r2_prefix, ydl_opts):
+    print(f"Processing Record ID {record_id} - URL: {url}")
+    
+    # Create a new session for this thread
+    db = SessionLocal()
+    record = db.query(YoutubeRecord).filter(YoutubeRecord.id == record_id).first()
+    
+    if not record:
+        print(f"Record {record_id} not found in DB.")
+        db.close()
+        return
 
-                formats = info.get('formats', [])
-                video_id = info.get('id', 'video')
-                
-                # Filter for Audio: highest m4a container AAC encoding, excluding DRC
-                audio_formats = [
-                    f for f in formats 
-                    if f.get('vcodec') == 'none' 
-                    and f.get('acodec') != 'none' 
-                    and f.get('ext') == 'webm'
-                    and (f.get('acodec') or '').startswith('opus')
-                    and 'drc' not in (f.get('format_note') or '').lower()
-                    and 'drc' not in (f.get('format_id') or '').lower()
-                ]
-                best_audio = None
-                if audio_formats:
-                    best_audio = max(audio_formats, key=lambda f: f.get('abr') or 0)
+    try:
+        # Mark as RUNNING (optional, but good for UI)
+        # record.status = JobStatus.RUNNING 
+        # db.commit() # Commit immediately
 
-                # Filter for Video: highest quality mp4 format H.264 encoding
-                video_formats = [
-                    f for f in formats 
-                    if f.get('vcodec') != 'none' 
-                    and f.get('acodec') == 'none' 
-                    and f.get('ext') == 'webm'
-                    and (f.get('vcodec') or '').startswith('vp9')
-                ]
-                
-                best_video = None
-                if video_formats:
-                    # Sort by height, then tbr
-                    best_video = max(video_formats, key=lambda f: (f.get('height') or 0, f.get('tbr') or 0))
+        # Retry loop for stability within a single run
+        # We don't want infinite loop here because we want to update DB eventually if it persistently fails
+        max_retries = 3
+        success = False
+        last_error = None
 
-                if best_audio:
-                    print(f"\n[Audio] Best found: {best_audio.get('format_id')} ({best_audio.get('ext')})")
-                    audio_filename = f"{video_id}_audio.{best_audio.get('ext')}"
-                    audio_url = best_audio.get('url')
+        for attempt in range(max_retries):
+            try:
+                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                    info = ydl.extract_info(url, download=False)
                     
-                    lock = host_lock_manager.get_lock(audio_url)
-                    with lock:
-                        try:
-                            process_upload(
-                                audio_url, 
-                                audio_filename, 
-                                best_audio.get('filesize')
-                            )
-                        except Exception as e:
-                            print(f"Error uploading audio {audio_filename}: {e}")
-                            print("Sleeping 60s inside host lock to throttle...")
-                            time.sleep(60)
-                            raise e
-                else:
-                    print(f"No audio format found for {url}.")
+                    # Update Title/ID if available
+                    record.title = info.get('title', record.title)
+                    record.video_id = info.get('id', record.video_id)
+                    db.commit()
 
-                if best_video:
-                    print(f"\n[Video] Best found: {best_video.get('format_id')} ({best_video.get('ext')})")
-                    video_filename = f"{video_id}_video.{best_video.get('ext')}"
-                    video_url = best_video.get('url')
+                    print(f"\n--- Parsed Download Links & Uploading ({url}) ---")
 
-                    lock = host_lock_manager.get_lock(video_url)
-                    with lock:
-                        try:
-                            process_upload(
-                                video_url, 
-                                video_filename, 
-                                best_video.get('filesize')
-                            )
-                        except Exception as e:
-                            print(f"Error uploading video {video_filename}: {e}")
-                            print("Sleeping 60s inside host lock to throttle...")
-                            time.sleep(60)
-                            raise e
-                else:
-                    print(f"No video format found for {url}.")
-            
-            # Success, break retry loop and continue
-            break
+                    formats = info.get('formats', [])
+                    video_id = info.get('id', 'video')
+                    
+                    # Audio Filter
+                    audio_formats = [
+                        f for f in formats 
+                        if f.get('vcodec') == 'none' 
+                        and f.get('acodec') != 'none' 
+                        and f.get('ext') == 'webm'
+                        and (f.get('acodec') or '').startswith('opus')
+                        and 'drc' not in (f.get('format_note') or '').lower()
+                        and 'drc' not in (f.get('format_id') or '').lower()
+                    ]
+                    best_audio = None
+                    if audio_formats:
+                        best_audio = max(audio_formats, key=lambda f: f.get('abr') or 0)
 
-        except Exception as e:
-            print(f"Error processing {url}: {e}")
+                    # Video Filter
+                    video_formats = [
+                        f for f in formats 
+                        if f.get('vcodec') != 'none' 
+                        and f.get('acodec') == 'none' 
+                        and f.get('ext') == 'webm'
+                        and (f.get('vcodec') or '').startswith('vp9')
+                    ]
+                    best_video = None
+                    if video_formats:
+                        best_video = max(video_formats, key=lambda f: (f.get('height') or 0, f.get('tbr') or 0))
+
+                    if best_audio:
+                        print(f"\n[Audio] Best found: {best_audio.get('format_id')} ({best_audio.get('ext')})")
+                        audio_filename = f"{video_id}_audio.{best_audio.get('ext')}"
+                        audio_url = best_audio.get('url')
+                        
+                        lock = host_lock_manager.get_lock(audio_url)
+                        with lock:
+                            try:
+                                process_upload(
+                                    audio_url, 
+                                    audio_filename, 
+                                    best_audio.get('filesize'),
+                                    r2_prefix
+                                )
+                            except Exception as e:
+                                print(f"Error uploading audio {audio_filename}: {e}")
+                                # Throttle
+                                time.sleep(10)
+                                raise e
+                    else:
+                        print(f"No audio format found for {url}.")
+
+                    if best_video:
+                        print(f"\n[Video] Best found: {best_video.get('format_id')} ({best_video.get('ext')})")
+                        video_filename = f"{video_id}_video.{best_video.get('ext')}"
+                        video_url = best_video.get('url')
+
+                        lock = host_lock_manager.get_lock(video_url)
+                        with lock:
+                            try:
+                                process_upload(
+                                    video_url, 
+                                    video_filename, 
+                                    best_video.get('filesize'),
+                                    r2_prefix
+                                )
+                            except Exception as e:
+                                print(f"Error uploading video {video_filename}: {e}")
+                                time.sleep(10)
+                                raise e
+                    else:
+                        print(f"No video format found for {url}.")
+                
+                success = True
+                break # Success
+
+            except Exception as e:
+                last_error = e
+                print(f"Error processing {url} (Attempt {attempt+1}/{max_retries}): {e}")
+                time.sleep(5)
+
+        if success:
+            record.status = JobStatus.COMPLETED
+            record.error_message = None
+        else:
+            record.status = JobStatus.FAILED
+            record.error_message = str(last_error)
+        
+        db.commit()
+
+    except Exception as e:
+        print(f"Critical error for record {record_id}: {e}")
+        try:
+            record.status = JobStatus.FAILED
+            record.error_message = f"Critical: {str(e)}"
+            db.commit()
+        except:
+            pass
+    finally:
+        db.close()
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python get_yt_metadata.py <url_list_file>")
+        print("Usage: python get_yt_metadata.py <job_id>")
         sys.exit(1)
 
-    url_list_file = sys.argv[1]
+    try:
+        job_id = int(sys.argv[1])
+    except ValueError:
+        print("Job ID must be an integer.")
+        sys.exit(1)
 
-    # Options to simulate --dump-json and getting metadata
+    print(f"Starting worker for Job ID: {job_id}")
+
+    db = SessionLocal()
+    job = db.query(YoutubeJob).filter(YoutubeJob.id == job_id).first()
+    
+    if not job:
+        print(f"Job {job_id} not found.")
+        db.close()
+        sys.exit(1)
+    
+    # Update Job status
+    job.status = JobStatus.RUNNING
+    db.commit()
+
+    r2_prefix = job.r2_prefix
+
+    # Fetch pending or failed records
+    # We want to retry failed ones too
+    records = db.query(YoutubeRecord).filter(
+        YoutubeRecord.job_id == job_id,
+        YoutubeRecord.status.in_([JobStatus.PENDING, JobStatus.FAILED])
+    ).all()
+    
+    # Detach objects so we can close session or pass data to threads safely
+    # Actually, we will just pass IDs and let threads open their own sessions
+    record_ids = [r.id for r in records]
+    record_urls = {r.id: r.url for r in records}
+    
+    db.close() # Close main session
+
+    print(f"Found {len(records)} records to process.")
+    
+    # yt-dlp options
     ydl_opts = {
         'quiet': True,
         'no_warnings': True,
@@ -341,31 +439,51 @@ def main():
         'nocheckcertificate': True,
     }
 
-    try:
-        with open(url_list_file, 'r') as f:
-            urls = [line.strip() for line in f if line.strip()]
-    except Exception as e:
-        print(f"Error reading file {url_list_file}: {e}")
-        sys.exit(1)
-
-    print(f"Found {len(urls)} URLs to process.")
-    
-    # Use ThreadPoolExecutor for parallel processing of videos
-    # Adjust max_workers as needed to balance load
-    max_parallel_videos = 1
+    max_parallel_videos = 256
     print(f"Starting parallel processing with max {max_parallel_videos} concurrent videos...")
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel_videos) as executor:
-        future_to_url = {executor.submit(process_video_url, url, ydl_opts): url for url in urls}
+        future_to_id = {
+            executor.submit(process_video_record, rid, record_urls[rid], r2_prefix, ydl_opts): rid 
+            for rid in record_ids
+        }
         
-        for future in concurrent.futures.as_completed(future_to_url):
-            url = future_to_url[future]
+        for future in concurrent.futures.as_completed(future_to_id):
+            rid = future_to_id[future]
             try:
                 future.result()
             except Exception as e:
-                # This should theoretically not be reached because process_video_url has an infinite retry loop
-                # but good to catch unexpected errors
-                print(f"CRITICAL: Thread for {url} exited with error: {e}")
+                print(f"CRITICAL: Thread for record {rid} exited with error: {e}")
+
+    # Check if all completed
+    db = SessionLocal()
+    pending_count = db.query(YoutubeRecord).filter(
+        YoutubeRecord.job_id == job_id,
+        YoutubeRecord.status.in_([JobStatus.PENDING, JobStatus.RUNNING])
+    ).count()
+    
+    failed_count = db.query(YoutubeRecord).filter(
+        YoutubeRecord.job_id == job_id,
+        YoutubeRecord.status == JobStatus.FAILED
+    ).count()
+
+    job = db.query(YoutubeJob).filter(YoutubeJob.id == job_id).first()
+    if pending_count == 0:
+        if failed_count > 0:
+             # If some failed, maybe keep job as RUNNING or PARTIAL? 
+             # Or set to COMPLETED/FAILED based on threshold?
+             # For now, if no pending, we mark job as COMPLETED (with errors) or FAILED.
+             # Let's say COMPLETED means "Done trying". Users can see failed count.
+             job.status = JobStatus.COMPLETED 
+        else:
+             job.status = JobStatus.COMPLETED
+    else:
+        # If script finishes but pending remain (shouldn't happen with wait), something wrong
+        pass
+
+    db.commit()
+    db.close()
+    print("Job processing finished.")
 
 if __name__ == "__main__":
     main()

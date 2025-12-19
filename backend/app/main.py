@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from .routers import auth, metadata, jobs
+from .routers import auth, metadata, jobs, youtube_jobs
 from .database import engine, Base
 
 # Create tables
@@ -25,6 +25,7 @@ app.add_middleware(
 app.include_router(auth.router)
 app.include_router(metadata.router)
 app.include_router(jobs.router)
+app.include_router(youtube_jobs.router)
 
 @app.get("/")
 def root():

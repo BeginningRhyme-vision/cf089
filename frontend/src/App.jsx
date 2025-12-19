@@ -5,6 +5,8 @@ import AuthCallback from './pages/AuthCallback';
 import Dashboard from './pages/Dashboard';
 import MetadataList from './pages/MetadataList';
 import JobList from './pages/JobList';
+import YoutubeJobList from './pages/YoutubeJobList';
+import YoutubeJobDetail from './pages/YoutubeJobDetail';
 import { useAuthStore } from './store';
 
 const PrivateRoute = ({ children }) => {
@@ -22,6 +24,8 @@ function App() {
         <Route index element={<Navigate to="/jobs" replace />} />
         <Route path="metadata" element={<MetadataList />} />
         <Route path="jobs" element={<JobList />} />
+        <Route path="youtube-jobs" element={<YoutubeJobList />} />
+        <Route path="youtube-jobs/:jobId" element={<YoutubeJobDetail />} />
       </Route>
     </Routes>
   );

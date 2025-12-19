@@ -61,3 +61,28 @@ class TransferJob(Base):
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
     metadata_rel = relationship("TransferMetadata", back_populates="jobs")
+
+class YoutubeJob(Base):
+    __tablename__ = "youtube_jobs"
+
+    id = Column(Integer, primary_key=True, index=True)
+    r2_prefix = Column(String(1024), nullable=False)
+    status = Column(Enum(JobStatus), default=JobStatus.PENDING)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    
+    records = relationship("YoutubeRecord", back_populates="job", cascade="all, delete-orphan")
+
+class YoutubeRecord(Base):
+    __tablename__ = "youtube_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    job_id = Column(Integer, ForeignKey("youtube_jobs.id"), nullable=False)
+    url = Column(String(2048), nullable=False)
+    status = Column(Enum(JobStatus), default=JobStatus.PENDING)
+    title = Column(String(1024), nullable=True)
+    video_id = Column(String(255), nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), onupdate=func.now())
+
+    job = relationship("YoutubeJob", back_populates="records")

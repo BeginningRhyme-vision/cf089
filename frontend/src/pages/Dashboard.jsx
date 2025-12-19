@@ -6,7 +6,8 @@ import {
   UserOutlined, 
   LogoutOutlined,
   MenuUnfoldOutlined,
-  MenuFoldOutlined
+  MenuFoldOutlined,
+  VideoCameraOutlined
 } from '@ant-design/icons';
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { useAuthStore } from '../store';
@@ -42,6 +43,11 @@ const Dashboard = () => {
       key: '/jobs',
       icon: <RocketOutlined />,
       label: 'Transfer Jobs',
+    },
+    {
+      key: '/youtube-jobs',
+      icon: <VideoCameraOutlined />,
+      label: 'Youtube Jobs',
     },
   ];
 
