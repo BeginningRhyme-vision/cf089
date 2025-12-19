@@ -10,6 +10,7 @@ import concurrent.futures
 import threading
 import os
 from datetime import datetime
+from sqlalchemy import or_, not_
 
 try:
     import yaml
@@ -252,25 +253,33 @@ class HostLockManager:
 
 host_lock_manager = HostLockManager()
 
+def update_record_metadata(record_id, title, video_id):
+    db = SessionLocal()
+    try:
+        record = db.query(YoutubeRecord).filter(YoutubeRecord.id == record_id).first()
+        if record:
+            if title: record.title = title
+            if video_id: record.video_id = video_id
+            db.commit()
+    finally:
+        db.close()
+
+def update_record_status(record_id, status, error_message=None):
+    db = SessionLocal()
+    try:
+        record = db.query(YoutubeRecord).filter(YoutubeRecord.id == record_id).first()
+        if record:
+            record.status = status
+            record.error_message = error_message
+            db.commit()
+    finally:
+        db.close()
+
 def process_video_record(record_id, url, r2_prefix, ydl_opts):
     print(f"Processing Record ID {record_id} - URL: {url}")
     
-    # Create a new session for this thread
-    db = SessionLocal()
-    record = db.query(YoutubeRecord).filter(YoutubeRecord.id == record_id).first()
-    
-    if not record:
-        print(f"Record {record_id} not found in DB.")
-        db.close()
-        return
-
     try:
-        # Mark as RUNNING (optional, but good for UI)
-        # record.status = JobStatus.RUNNING 
-        # db.commit() # Commit immediately
-
         # Retry loop for stability within a single run
-        # We don't want infinite loop here because we want to update DB eventually if it persistently fails
         max_retries = 3
         success = False
         last_error = None
@@ -281,9 +290,7 @@ def process_video_record(record_id, url, r2_prefix, ydl_opts):
                     info = ydl.extract_info(url, download=False)
                     
                     # Update Title/ID if available
-                    record.title = info.get('title', record.title)
-                    record.video_id = info.get('id', record.video_id)
-                    db.commit()
+                    update_record_metadata(record_id, info.get('title'), info.get('id'))
 
                     print(f"\n--- Parsed Download Links & Uploading ({url}) ---")
 
@@ -346,27 +353,21 @@ def process_video_record(record_id, url, r2_prefix, ydl_opts):
             except Exception as e:
                 last_error = e
                 print(f"Error processing {url} (Attempt {attempt+1}/{max_retries}): {e}")
+                
+                if "Video unavailable" in str(e):
+                    print(f"Video unavailable for {url}, skipping retries.")
+                    break
+                
                 time.sleep(5)
 
         if success:
-            record.status = JobStatus.COMPLETED
-            record.error_message = None
+            update_record_status(record_id, JobStatus.COMPLETED)
         else:
-            record.status = JobStatus.FAILED
-            record.error_message = str(last_error)
-        
-        db.commit()
+            update_record_status(record_id, JobStatus.FAILED, str(last_error))
 
     except Exception as e:
         print(f"Critical error for record {record_id}: {e}")
-        try:
-            record.status = JobStatus.FAILED
-            record.error_message = f"Critical: {str(e)}"
-            db.commit()
-        except:
-            pass
-    finally:
-        db.close()
+        update_record_status(record_id, JobStatus.FAILED, f"Critical: {str(e)}")
 
 def main():
     if len(sys.argv) < 2 or len(sys.argv) > 3:
@@ -397,10 +398,14 @@ def main():
     r2_prefix = job.r2_prefix
 
     # Fetch pending or failed records
-    # We want to retry failed ones too
+    # We want to retry failed ones too, but skip those that are definitely unavailable
     records = db.query(YoutubeRecord).filter(
         YoutubeRecord.job_id == job_id,
-        YoutubeRecord.status.in_([JobStatus.PENDING, JobStatus.FAILED])
+        YoutubeRecord.status.in_([JobStatus.PENDING, JobStatus.FAILED]),
+        or_(
+            YoutubeRecord.error_message == None,
+            not_(YoutubeRecord.error_message.contains("Video unavailable"))
+        )
     ).all()
     
     # Detach objects so we can close session or pass data to threads safely
