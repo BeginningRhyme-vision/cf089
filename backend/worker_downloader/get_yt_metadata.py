@@ -290,31 +290,12 @@ def process_video_record(record_id, url, r2_prefix, ydl_opts):
                     formats = info.get('formats', [])
                     video_id = info.get('id', 'video')
                     
-                    # Audio Filter
-                    audio_formats = [
-                        f for f in formats 
-                        if f.get('vcodec') == 'none' 
-                        and f.get('acodec') != 'none' 
-                        and f.get('ext') == 'webm'
-                        and (f.get('acodec') or '').startswith('opus')
-                        and 'drc' not in (f.get('format_note') or '').lower()
-                        and 'drc' not in (f.get('format_id') or '').lower()
-                    ]
-                    best_audio = None
-                    if audio_formats:
-                        best_audio = max(audio_formats, key=lambda f: f.get('abr') or 0)
+                    # Select best video/audio based on yt-dlp's default sorting (worst to best)
+                    best_audio = next((f for f in reversed(formats) 
+                                       if f.get('vcodec') == 'none' and f.get('acodec') != 'none'), None)
 
-                    # Video Filter
-                    video_formats = [
-                        f for f in formats 
-                        if f.get('vcodec') != 'none' 
-                        and f.get('acodec') == 'none' 
-                        and f.get('ext') == 'webm'
-                        and (f.get('vcodec') or '').startswith('vp9')
-                    ]
-                    best_video = None
-                    if video_formats:
-                        best_video = max(video_formats, key=lambda f: (f.get('height') or 0, f.get('tbr') or 0))
+                    best_video = next((f for f in reversed(formats) 
+                                       if f.get('vcodec') != 'none' and f.get('acodec') == 'none'), None)
 
                     if best_audio:
                         print(f"\n[Audio] Best found: {best_audio.get('format_id')} ({best_audio.get('ext')})")
