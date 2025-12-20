@@ -17,20 +17,15 @@ def create_job(job_in: schemas.YoutubeJobCreate, db: Session = Depends(database.
     if not unique_urls:
         raise HTTPException(status_code=400, detail="No valid URLs provided")
 
-    MAX_URLS_PER_JOB = 1000
+    MAX_URLS_PER_JOB = 100000
     chunks = [unique_urls[i:i + MAX_URLS_PER_JOB] for i in range(0, len(unique_urls), MAX_URLS_PER_JOB)]
     
     created_jobs = []
 
     for i, chunk in enumerate(chunks):
-        current_prefix = job_in.r2_prefix
-        if len(chunks) > 1:
-            base_prefix = current_prefix.rstrip('/')
-            current_prefix = f"{base_prefix}_part_{i+1}/"
-
         # Create Job
         db_job = models.YoutubeJob(
-            r2_prefix=current_prefix,
+            r2_prefix=job_in.r2_prefix,
             status=models.JobStatus.PENDING
         )
         db.add(db_job)

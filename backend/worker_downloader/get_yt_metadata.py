@@ -388,18 +388,7 @@ def process_video_record(record_id, url, r2_prefix, ydl_opts):
         print(f"Critical error for record {record_id}: {e}")
         update_record_status(record_id, JobStatus.FAILED, f"Critical: {str(e)}")
 
-def main():
-    if len(sys.argv) < 2 or len(sys.argv) > 3:
-        print("Usage: python get_yt_metadata.py <job_id> [proxy_address]")
-        sys.exit(1)
-
-    try:
-        job_id = int(sys.argv[1])
-        proxy_address = sys.argv[2] if len(sys.argv) == 3 else None
-    except ValueError:
-        print("Job ID must be an integer.")
-        sys.exit(1)
-
+def process_job(job_id, proxy_address=None):
     print(f"Starting worker for Job ID: {job_id}")
 
     db = SessionLocal()
@@ -408,7 +397,7 @@ def main():
     if not job:
         print(f"Job {job_id} not found.")
         db.close()
-        sys.exit(1)
+        return
     
     # Update Job status
     job.status = JobStatus.RUNNING
@@ -496,6 +485,56 @@ def main():
     db.commit()
     db.close()
     print("Job processing finished.")
+
+def main():
+    if len(sys.argv) < 2 or len(sys.argv) > 3:
+        print("Usage: python get_yt_metadata.py <job_id|all> [proxy_address]")
+        sys.exit(1)
+
+    job_arg = sys.argv[1]
+    proxy_address = sys.argv[2] if len(sys.argv) == 3 else None
+
+    if job_arg == "all":
+        while True:
+            db = SessionLocal()
+            try:
+                # Fetch one job that is Pending or Running
+                # We prioritize Pending, then Running.
+                # Actually, if we pick a RUNNING job, we assume it's abandoned or we are taking over.
+                # To avoid picking the same job if we fail to complete it (e.g. exceptions), we might need care.
+                # But the instructions say "Pending, Running".
+                
+                # Note: if I pick a RUNNING job, process it, and it stays RUNNING (due to some error logic or partial),
+                # I might pick it again.
+                # However, process_job sets it to COMPLETED if pending_count == 0.
+                
+                # Fetch only ID to be minimal
+                job_candidate = db.query(YoutubeJob.id).filter(
+                    YoutubeJob.status.in_([JobStatus.PENDING, JobStatus.RUNNING])
+                ).first()
+                
+                if not job_candidate:
+                    print("No more Pending or Running jobs found.")
+                    break
+                
+                job_id = job_candidate.id
+                
+            finally:
+                db.close()
+            
+            # Process outside the DB session
+            process_job(job_id, proxy_address)
+            
+            # small pause
+            time.sleep(1)
+            
+    else:
+        try:
+            job_id = int(job_arg)
+            process_job(job_id, proxy_address)
+        except ValueError:
+            print("Job ID must be an integer or 'all'.")
+            sys.exit(1)
 
 if __name__ == "__main__":
     main()
