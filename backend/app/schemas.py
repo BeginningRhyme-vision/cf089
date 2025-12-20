@@ -77,29 +77,32 @@ class Token(BaseModel):
     user: User
 
 # Youtube Job Schemas
-class YoutubeRecordBase(BaseModel):
+class YoutubeTaskBase(BaseModel):
     url: str
     status: JobStatus = JobStatus.PENDING
     title: Optional[str] = None
     video_id: Optional[str] = None
     error_message: Optional[str] = None
 
-class YoutubeRecord(YoutubeRecordBase):
+class YoutubeTask(YoutubeTaskBase):
     id: int
     job_id: int
+    worker_id: Optional[str] = None
+    started_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 
     class Config:
         from_attributes = True
 
-class YoutubeRecordPage(BaseModel):
-    items: List[YoutubeRecord]
+class YoutubeTaskPage(BaseModel):
+    items: List[YoutubeTask]
     total: int
     page: int
     size: int
 
-class YoutubeRecordUpdate(BaseModel):
+class YoutubeTaskUpdate(BaseModel):
     status: Optional[JobStatus] = None
     title: Optional[str] = None
     video_id: Optional[str] = None
@@ -117,14 +120,12 @@ class YoutubeJob(BaseModel):
     r2_prefix: str
     status: JobStatus
     created_at: datetime
-    # We might not want to return all records by default in list view, but for detail view it's useful.
-    # For now, let's keep it simple.
     
-    # helper fields for UI
     total_count: int = 0
+    pending_count: int = 0
+    running_count: int = 0
     success_count: int = 0
     failed_count: int = 0
-    pending_count: int = 0
 
     class Config:
         from_attributes = True

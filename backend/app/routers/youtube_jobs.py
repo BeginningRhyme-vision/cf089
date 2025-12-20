@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Body
 from sqlalchemy.orm import Session
-from typing import List
+from typing import List, Optional
 from sqlalchemy import func, or_, not_, and_
+from datetime import datetime
 from .. import schemas, models, database
 from ..cache import cache
 
@@ -10,65 +11,136 @@ router = APIRouter(
     tags=["youtube-jobs"]
 )
 
-@router.post("/acquire", response_model=schemas.YoutubeJob)
-def acquire_job(db: Session = Depends(database.get_db)):
-    # Find a PENDING job first
-    job = db.query(models.YoutubeJob).filter(
-        models.YoutubeJob.status == models.JobStatus.PENDING
-    ).order_by(models.YoutubeJob.created_at.asc()).first() 
-
-    if not job:
-         # Fallback to RUNNING job (if restarting or taking over)
-         job = db.query(models.YoutubeJob).filter(
-             models.YoutubeJob.status == models.JobStatus.RUNNING
-         ).first()
+@router.post("/tasks/acquire", response_model=List[schemas.YoutubeTask])
+def acquire_tasks(
+    worker_id: str = Body(..., embed=True), 
+    limit: int = Body(10, embed=True), 
+    db: Session = Depends(database.get_db)
+):
+    # Find pending tasks
+    # Prioritize by job creation time (FIFO)
+    # We join with YoutubeJob to order by job creation, but simplest is just order by task id if they are inserted in order.
+    # To prevent race conditions, we use simple update-returning or select-for-update if possible.
+    # For now, simplistic approach:
     
-    if not job:
-        raise HTTPException(status_code=404, detail="No pending or running jobs found")
+    tasks = db.query(models.YoutubeTask).filter(
+        models.YoutubeTask.status == models.JobStatus.PENDING
+    ).limit(limit).with_for_update(skip_locked=True).all()
     
-    # Lock it
-    job.status = models.JobStatus.RUNNING
+    if not tasks:
+        # Retry with FAILED tasks if needed? Or just return empty. 
+        # Usually workers ask for PENDING. Retry logic is separate.
+        return []
+        
+    task_ids = [t.id for t in tasks]
+    now = datetime.now()
+    
+    # Bulk update tasks
+    # We can't do bulk update easily with SQLAlchemy ORM + tracking changes for counters
+    # So we iterate. Optimization: Group by job_id to update job counters once.
+    
+    job_counts = {} # job_id -> count
+    
+    for task in tasks:
+        task.status = models.JobStatus.RUNNING
+        task.worker_id = worker_id
+        task.started_at = now
+        
+        job_counts[task.job_id] = job_counts.get(task.job_id, 0) + 1
+        
+    # Commit tasks update
     db.commit()
-    db.refresh(job)
     
-    cache.delete(f"youtube_job:{job.id}")
+    # Update Job Counters
+    for job_id, count in job_counts.items():
+        job = db.query(models.YoutubeJob).filter(models.YoutubeJob.id == job_id).first()
+        if job:
+            job.pending_count = models.YoutubeJob.pending_count - count
+            job.running_count = models.YoutubeJob.running_count + count
+            db.add(job)
+            
+            # Invalidate cache for this job
+            cache.delete(f"youtube_job:{job_id}")
+
+    db.commit()
+    
+    # Refresh tasks to return
+    for t in tasks:
+        db.refresh(t)
+        
     cache.invalidate_prefix("youtube_jobs_list")
     
-    return job
+    return tasks
 
-@router.get("/{job_id}/tasks", response_model=List[schemas.YoutubeRecord])
+@router.get("/{job_id}/tasks", response_model=List[schemas.YoutubeTask])
 def read_job_tasks(job_id: int, db: Session = Depends(database.get_db)):
-    records = db.query(models.YoutubeRecord).filter(
-        models.YoutubeRecord.job_id == job_id,
-        models.YoutubeRecord.status.in_([models.JobStatus.PENDING, models.JobStatus.FAILED]),
-        or_(
-            models.YoutubeRecord.error_message == None,
-            and_(
-                not_(models.YoutubeRecord.error_message.contains("Video unavailable")),
-                not_(models.YoutubeRecord.error_message.contains("This video is private"))
-            )
-        )
+    # Return tasks that need attention or all? 
+    # Original logic: PENDING or FAILED, excluding certain errors.
+    # Since worker now acquires via /tasks/acquire, this might be for UI or debugging?
+    # Or maybe the worker still uses this for specific job processing?
+    # Let's keep it compatible but pointing to tasks table.
+    
+    tasks = db.query(models.YoutubeTask).filter(
+        models.YoutubeTask.job_id == job_id
     ).all()
-    return records
+    return tasks
 
-@router.patch("/records/{record_id}", response_model=schemas.YoutubeRecord)
-def update_record(record_id: int, update: schemas.YoutubeRecordUpdate, db: Session = Depends(database.get_db)):
-    record = db.query(models.YoutubeRecord).filter(models.YoutubeRecord.id == record_id).first()
-    if not record:
-        raise HTTPException(status_code=404, detail="Record not found")
+@router.patch("/tasks/{task_id}", response_model=schemas.YoutubeTask)
+def update_task(task_id: int, update: schemas.YoutubeTaskUpdate, db: Session = Depends(database.get_db)):
+    task = db.query(models.YoutubeTask).filter(models.YoutubeTask.id == task_id).first()
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    
+    old_status = task.status
+    job_id = task.job_id
     
     if update.status:
-        record.status = update.status
+        task.status = update.status
+        if update.status in [models.JobStatus.COMPLETED, models.JobStatus.FAILED]:
+            task.completed_at = datetime.now()
+            
     if update.title:
-        record.title = update.title
+        task.title = update.title
     if update.video_id:
-        record.video_id = update.video_id
-    if update.error_message is not None: # Allow clearing error message if passed as empty string or distinct value
-        record.error_message = update.error_message
+        task.video_id = update.video_id
+    if update.error_message is not None:
+        task.error_message = update.error_message
         
     db.commit()
-    db.refresh(record)
-    return record
+    db.refresh(task)
+    
+    # Update Job Counters if status changed
+    if update.status and update.status != old_status:
+        job = db.query(models.YoutubeJob).filter(models.YoutubeJob.id == job_id).first()
+        if job:
+            # Decrement old
+            if old_status == models.JobStatus.PENDING:
+                job.pending_count -= 1
+            elif old_status == models.JobStatus.RUNNING:
+                job.running_count -= 1
+            elif old_status == models.JobStatus.COMPLETED:
+                job.success_count -= 1
+            elif old_status == models.JobStatus.FAILED:
+                job.failed_count -= 1
+                
+            # Increment new
+            if update.status == models.JobStatus.PENDING:
+                job.pending_count += 1
+            elif update.status == models.JobStatus.RUNNING:
+                job.running_count += 1
+            elif update.status == models.JobStatus.COMPLETED:
+                job.success_count += 1
+            elif update.status == models.JobStatus.FAILED:
+                job.failed_count += 1
+            
+            # Recalculate total logic if needed, but total shouldn't change here usually
+            # job.total_count is fixed unless we delete tasks
+            
+            db.commit()
+            cache.delete(f"youtube_job:{job_id}")
+            cache.invalidate_prefix("youtube_jobs_list")
+
+    return task
 
 @router.patch("/{job_id}/status", response_model=schemas.YoutubeJob)
 def update_job_status(job_id: int, update: schemas.YoutubeJobStatusUpdate, db: Session = Depends(database.get_db)):
@@ -87,7 +159,6 @@ def update_job_status(job_id: int, update: schemas.YoutubeJobStatusUpdate, db: S
 
 @router.post("/", response_model=List[schemas.YoutubeJob])
 def create_job(job_in: schemas.YoutubeJobCreate, db: Session = Depends(database.get_db)):
-    # Deduplicate URLs
     unique_urls = list(set(url.strip() for url in job_in.urls if url.strip()))
     
     if not unique_urls:
@@ -99,76 +170,53 @@ def create_job(job_in: schemas.YoutubeJobCreate, db: Session = Depends(database.
     created_jobs = []
 
     for i, chunk in enumerate(chunks):
-        # Create Job
+        count = len(chunk)
+        
+        # Create Job with initialized counters
         db_job = models.YoutubeJob(
             r2_prefix=job_in.r2_prefix,
-            status=models.JobStatus.PENDING
+            status=models.JobStatus.PENDING,
+            total_count=count,
+            pending_count=count,
+            running_count=0,
+            success_count=0,
+            failed_count=0
         )
         db.add(db_job)
         db.flush() # Get ID
 
-        # Create Records
-        records = []
-        
+        # Create Tasks
+        tasks = []
         for url in chunk:
-            records.append(models.YoutubeRecord(
+            tasks.append(models.YoutubeTask(
                 job_id=db_job.id,
                 url=url,
                 status=models.JobStatus.PENDING
             ))
         
-        if records:
-            db.add_all(records)
+        if tasks:
+            db.add_all(tasks)
         
         db.commit()
         db.refresh(db_job)
-        
-        # Manually populate counts for response
-        db_job.total_count = len(records)
-        db_job.pending_count = len(records)
-        db_job.success_count = 0
-        db_job.failed_count = 0
-        
         created_jobs.append(db_job)
     
     cache.invalidate_prefix("youtube_jobs_list")
     
-    # Cache the new jobs
-    for job in created_jobs:
-        data = schemas.YoutubeJob.model_validate(job).model_dump(mode='json')
-        cache.set(f"youtube_job:{job.id}", data, expire=600)
-    
     return created_jobs
 
 @router.get("/", response_model=List[schemas.YoutubeJob])
-def read_jobs(skip: int = 0, limit: int = 100, db: Session = Depends(database.get_db)):
-    cache_key = f"youtube_jobs_list:{skip}:{limit}"
-    cached = cache.get(cache_key)
-    if cached:
-        return cached
-
-    jobs = db.query(models.YoutubeJob).order_by(models.YoutubeJob.created_at.desc()).offset(skip).limit(limit).all()
+def read_jobs(skip: int = 0, limit: int = 10, db: Session = Depends(database.get_db)):
+    # No caching needed for list anymore, it's fast
+    # But user might want it cached if high traffic? 
+    # Let's remove list caching for now to avoid stale counters which are now real-time in DB
     
-    # Enrich with counts
-    for job in jobs:
-        counts = db.query(
-            models.YoutubeRecord.status, func.count(models.YoutubeRecord.id)
-        ).filter(models.YoutubeRecord.job_id == job.id).group_by(models.YoutubeRecord.status).all()
-        
-        count_map = {status: count for status, count in counts}
-        job.total_count = sum(count_map.values())
-        job.success_count = count_map.get(models.JobStatus.COMPLETED, 0)
-        job.failed_count = count_map.get(models.JobStatus.FAILED, 0)
-        # Pending + Running + Paused = Pending for simplicity or just explicit Pending
-        job.pending_count = count_map.get(models.JobStatus.PENDING, 0) + count_map.get(models.JobStatus.RUNNING, 0)
-
-    data = [schemas.YoutubeJob.model_validate(j).model_dump(mode='json') for j in jobs]
-    cache.set(cache_key, data, expire=600)
-
+    jobs = db.query(models.YoutubeJob).order_by(models.YoutubeJob.created_at.desc()).offset(skip).limit(limit).all()
     return jobs
 
 @router.get("/{job_id}", response_model=schemas.YoutubeJob)
 def read_job(job_id: int, db: Session = Depends(database.get_db)):
+    # Caching single job is fine, but invalidate on task updates
     cache_key = f"youtube_job:{job_id}"
     cached = cache.get(cache_key)
     if cached:
@@ -178,30 +226,21 @@ def read_job(job_id: int, db: Session = Depends(database.get_db)):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
         
-    counts = db.query(
-        models.YoutubeRecord.status, func.count(models.YoutubeRecord.id)
-    ).filter(models.YoutubeRecord.job_id == job.id).group_by(models.YoutubeRecord.status).all()
-    
-    count_map = {status: count for status, count in counts}
-    job.total_count = sum(count_map.values())
-    job.success_count = count_map.get(models.JobStatus.COMPLETED, 0)
-    job.failed_count = count_map.get(models.JobStatus.FAILED, 0)
-    job.pending_count = count_map.get(models.JobStatus.PENDING, 0) + count_map.get(models.JobStatus.RUNNING, 0)
-    
     data = schemas.YoutubeJob.model_validate(job).model_dump(mode='json')
     cache.set(cache_key, data, expire=600)
     
     return job
 
-@router.get("/{job_id}/records", response_model=schemas.YoutubeRecordPage)
+@router.get("/{job_id}/records", response_model=schemas.YoutubeTaskPage)
 def read_job_records(job_id: int, page: int = 1, size: int = 50, db: Session = Depends(database.get_db)):
+    # Kept endpoint name /records for frontend compatibility if possible, but returning TaskPage
     skip = (page - 1) * size
-    query = db.query(models.YoutubeRecord).filter(models.YoutubeRecord.job_id == job_id)
+    query = db.query(models.YoutubeTask).filter(models.YoutubeTask.job_id == job_id)
     total = query.count()
-    records = query.offset(skip).limit(size).all()
+    tasks = query.offset(skip).limit(size).all()
     
-    return schemas.YoutubeRecordPage(
-        items=records,
+    return schemas.YoutubeTaskPage(
+        items=tasks,
         total=total,
         page=page,
         size=size
@@ -209,7 +248,6 @@ def read_job_records(job_id: int, page: int = 1, size: int = 50, db: Session = D
 
 @router.delete("/pending")
 def delete_pending_jobs(db: Session = Depends(database.get_db)):
-    # Find Pending Jobs
     pending_jobs = db.query(models.YoutubeJob).filter(models.YoutubeJob.status == models.JobStatus.PENDING).all()
     
     if not pending_jobs:
@@ -217,8 +255,8 @@ def delete_pending_jobs(db: Session = Depends(database.get_db)):
     
     ids = [job.id for job in pending_jobs]
     
-    # Delete Records first (safe approach if cascade isn't fully trusted/configured)
-    db.query(models.YoutubeRecord).filter(models.YoutubeRecord.job_id.in_(ids)).delete(synchronize_session=False)
+    # Delete Tasks first
+    db.query(models.YoutubeTask).filter(models.YoutubeTask.job_id.in_(ids)).delete(synchronize_session=False)
     
     # Delete Jobs
     db.query(models.YoutubeJob).filter(models.YoutubeJob.id.in_(ids)).delete(synchronize_session=False)

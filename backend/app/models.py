@@ -68,12 +68,19 @@ class YoutubeJob(Base):
     id = Column(Integer, primary_key=True, index=True)
     r2_prefix = Column(String(1024), nullable=False)
     status = Column(Enum(JobStatus), default=JobStatus.PENDING)
+    
+    total_count = Column(Integer, default=0)
+    pending_count = Column(Integer, default=0)
+    running_count = Column(Integer, default=0)
+    success_count = Column(Integer, default=0)
+    failed_count = Column(Integer, default=0)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
-    records = relationship("YoutubeRecord", back_populates="job", cascade="all, delete-orphan")
+    tasks = relationship("YoutubeTask", back_populates="job", cascade="all, delete-orphan")
 
-class YoutubeRecord(Base):
-    __tablename__ = "youtube_records"
+class YoutubeTask(Base):
+    __tablename__ = "youtube_tasks"
 
     id = Column(Integer, primary_key=True, index=True)
     job_id = Column(Integer, ForeignKey("youtube_jobs.id"), nullable=False)
@@ -82,7 +89,12 @@ class YoutubeRecord(Base):
     title = Column(String(1024), nullable=True)
     video_id = Column(String(255), nullable=True)
     error_message = Column(Text, nullable=True)
+    
+    worker_id = Column(String(255), nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
 
-    job = relationship("YoutubeJob", back_populates="records")
+    job = relationship("YoutubeJob", back_populates="tasks")
