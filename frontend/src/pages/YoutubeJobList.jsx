@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { Table, Button, Modal, Form, Input, Tag, message, Space, Card, Row, Col, Statistic } from 'antd';
-import { ReloadOutlined, PlusOutlined, EyeOutlined } from '@ant-design/icons';
+import { Table, Button, Modal, Form, Input, Tag, message, Space, Upload } from 'antd';
+import { ReloadOutlined, PlusOutlined, EyeOutlined, UploadOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import api from '../api';
 
@@ -10,6 +10,7 @@ const YoutubeJobList = () => {
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
+  const [fileList, setFileList] = useState([]);
   const [form] = Form.useForm();
   const navigate = useNavigate();
 
@@ -36,23 +37,49 @@ const YoutubeJobList = () => {
   const handleCreate = async () => {
     try {
       const values = await form.validateFields();
-      // Split URLs by newline
-      const urls = values.urls.split('\n').filter(line => line.trim() !== '');
+      let urls = values.urls ? values.urls.split('\n').filter(line => line.trim() !== '') : [];
       
+      // Read files
+      for (const file of fileList) {
+        const text = await file.text();
+        const fileUrls = text.split('\n').filter(line => line.trim() !== '');
+        urls = urls.concat(fileUrls);
+      }
+      
+      if (urls.length === 0) {
+        message.error('Please enter URLs or upload a file');
+        return;
+      }
+
       const payload = {
         r2_prefix: values.r2_prefix,
         urls: urls
       };
 
       await api.post('/youtube-jobs/', payload);
-      message.success('Job created');
+      message.success('Job(s) created');
       setIsModalOpen(false);
       form.resetFields();
+      setFileList([]);
       fetchJobs();
     } catch (error) {
       console.error(error);
       message.error('Failed to create job');
     }
+  };
+
+  const uploadProps = {
+    onRemove: (file) => {
+      const index = fileList.indexOf(file);
+      const newFileList = fileList.slice();
+      newFileList.splice(index, 1);
+      setFileList(newFileList);
+    },
+    beforeUpload: (file) => {
+      setFileList([...fileList, file]);
+      return false;
+    },
+    fileList,
   };
 
   const statusColors = {
@@ -133,10 +160,14 @@ const YoutubeJobList = () => {
           <Form.Item 
             name="urls" 
             label="Youtube URLs" 
-            rules={[{ required: true, message: 'Please enter at least one URL'}]}
             help="One URL per line"
           >
             <TextArea rows={10} placeholder="https://www.youtube.com/watch?v=...\nhttps://www.youtube.com/watch?v=..." />
+          </Form.Item>
+          <Form.Item label="Upload File (Optional)">
+            <Upload {...uploadProps} maxCount={1} accept=".txt,.csv">
+                <Button icon={<UploadOutlined />}>Select File (txt/csv)</Button>
+            </Upload>
           </Form.Item>
         </Form>
       </Modal>

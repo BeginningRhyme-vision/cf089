@@ -9,41 +9,58 @@ router = APIRouter(
     tags=["youtube-jobs"]
 )
 
-@router.post("/", response_model=schemas.YoutubeJob)
+@router.post("/", response_model=List[schemas.YoutubeJob])
 def create_job(job_in: schemas.YoutubeJobCreate, db: Session = Depends(database.get_db)):
-    # Create Job
-    db_job = models.YoutubeJob(
-        r2_prefix=job_in.r2_prefix,
-        status=models.JobStatus.PENDING
-    )
-    db.add(db_job)
-    db.flush() # Get ID
-
-    # Create Records
-    records = []
     # Deduplicate URLs
     unique_urls = list(set(url.strip() for url in job_in.urls if url.strip()))
     
-    for url in unique_urls:
-        records.append(models.YoutubeRecord(
-            job_id=db_job.id,
-            url=url,
+    if not unique_urls:
+        raise HTTPException(status_code=400, detail="No valid URLs provided")
+
+    MAX_URLS_PER_JOB = 1000
+    chunks = [unique_urls[i:i + MAX_URLS_PER_JOB] for i in range(0, len(unique_urls), MAX_URLS_PER_JOB)]
+    
+    created_jobs = []
+
+    for i, chunk in enumerate(chunks):
+        current_prefix = job_in.r2_prefix
+        if len(chunks) > 1:
+            base_prefix = current_prefix.rstrip('/')
+            current_prefix = f"{base_prefix}_part_{i+1}/"
+
+        # Create Job
+        db_job = models.YoutubeJob(
+            r2_prefix=current_prefix,
             status=models.JobStatus.PENDING
-        ))
+        )
+        db.add(db_job)
+        db.flush() # Get ID
+
+        # Create Records
+        records = []
+        
+        for url in chunk:
+            records.append(models.YoutubeRecord(
+                job_id=db_job.id,
+                url=url,
+                status=models.JobStatus.PENDING
+            ))
+        
+        if records:
+            db.add_all(records)
+        
+        db.commit()
+        db.refresh(db_job)
+        
+        # Manually populate counts for response
+        db_job.total_count = len(records)
+        db_job.pending_count = len(records)
+        db_job.success_count = 0
+        db_job.failed_count = 0
+        
+        created_jobs.append(db_job)
     
-    if records:
-        db.add_all(records)
-    
-    db.commit()
-    db.refresh(db_job)
-    
-    # Manually populate counts for response
-    db_job.total_count = len(records)
-    db_job.pending_count = len(records)
-    db_job.success_count = 0
-    db_job.failed_count = 0
-    
-    return db_job
+    return created_jobs
 
 @router.get("/", response_model=List[schemas.YoutubeJob])
 def read_jobs(skip: int = 0, limit: int = 100, db: Session = Depends(database.get_db)):
@@ -82,7 +99,16 @@ def read_job(job_id: int, db: Session = Depends(database.get_db)):
     
     return job
 
-@router.get("/{job_id}/records", response_model=List[schemas.YoutubeRecord])
-def read_job_records(job_id: int, db: Session = Depends(database.get_db)):
-    records = db.query(models.YoutubeRecord).filter(models.YoutubeRecord.job_id == job_id).all()
-    return records
+@router.get("/{job_id}/records", response_model=schemas.YoutubeRecordPage)
+def read_job_records(job_id: int, page: int = 1, size: int = 50, db: Session = Depends(database.get_db)):
+    skip = (page - 1) * size
+    query = db.query(models.YoutubeRecord).filter(models.YoutubeRecord.job_id == job_id)
+    total = query.count()
+    records = query.offset(skip).limit(size).all()
+    
+    return schemas.YoutubeRecordPage(
+        items=records,
+        total=total,
+        page=page,
+        size=size
+    )

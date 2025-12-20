@@ -93,6 +93,12 @@ class YoutubeRecord(YoutubeRecordBase):
     class Config:
         from_attributes = True
 
+class YoutubeRecordPage(BaseModel):
+    items: List[YoutubeRecord]
+    total: int
+    page: int
+    size: int
+
 class YoutubeJobCreate(BaseModel):
     r2_prefix: str
     urls: List[str] # List of URLs to process
