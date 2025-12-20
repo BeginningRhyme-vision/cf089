@@ -183,8 +183,8 @@ def update_job_status(job_id: int, update: schemas.YoutubeJobStatusUpdate, db: S
 
 @router.post("/", response_model=List[schemas.YoutubeJob])
 async def create_job(
-    r2_prefix: str = Form(...),
     background_tasks: BackgroundTasks,
+    r2_prefix: str = Form(...),
     urls: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
     db: Session = Depends(database.get_db)
