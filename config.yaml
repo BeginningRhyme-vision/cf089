@@ -4,6 +4,9 @@ app:
   host: "0.0.0.0"
   port: 8000
 
+redis:
+  url: "redis://172.19.0.14:6379/0"
+
 database:
   url: "postgresql://unbound_future:Unbound_future618@172.19.0.12:5432/unbound_future_db"
 

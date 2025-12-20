@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from datetime import datetime
 from .. import schemas, models, database
+from ..cache import cache
 
 router = APIRouter(
     prefix="/jobs",
@@ -76,6 +77,13 @@ def create_job(job: schemas.JobCreate, db: Session = Depends(database.get_db)):
     db.add(db_job)
     db.commit()
     db.refresh(db_job)
+    
+    cache.invalidate_prefix("jobs_list")
+    
+    # Cache the new job
+    data = schemas.Job.model_validate(db_job).model_dump(mode='json')
+    cache.set(f"job:{db_job.job_id}", data, expire=5)
+    
     return db_job
 
 @router.get("/", response_model=List[schemas.Job])
@@ -85,18 +93,37 @@ def read_jobs(
     status: Optional[models.JobStatus] = None, 
     db: Session = Depends(database.get_db)
 ):
+    status_str = status.value if status else "all"
+    cache_key = f"jobs_list:{skip}:{limit}:{status_str}"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+
     query = db.query(models.TransferJob)
     if status:
         query = query.filter(models.TransferJob.status == status)
     
     jobs = query.order_by(models.TransferJob.created_at.desc()).offset(skip).limit(limit).all()
+    
+    data = [schemas.Job.model_validate(j).model_dump(mode='json') for j in jobs]
+    cache.set(cache_key, data, expire=5) # Short TTL due to frequent updates
+    
     return jobs
 
 @router.get("/{job_id}", response_model=schemas.Job)
 def read_job(job_id: int, db: Session = Depends(database.get_db)):
+    cache_key = f"job:{job_id}"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+
     job = db.query(models.TransferJob).filter(models.TransferJob.job_id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
+        
+    data = schemas.Job.model_validate(job).model_dump(mode='json')
+    cache.set(cache_key, data, expire=5)
+    
     return job
 
 @router.post("/{job_id}/start")
@@ -115,6 +142,9 @@ def start_job(
     # Set status to RUNNING immediately to avoid race conditions with stop_job
     job.status = models.JobStatus.RUNNING
     db.commit()
+    
+    cache.delete(f"job:{job_id}")
+    cache.invalidate_prefix("jobs_list")
 
     # Pass the session factory to the background task so it can create its own thread-safe session
     background_tasks.add_task(mock_transfer_process, job_id, database.SessionLocal)
@@ -132,6 +162,10 @@ def stop_job(job_id: int, db: Session = Depends(database.get_db)):
 
     job.status = models.JobStatus.STOPPED
     db.commit()
+    
+    cache.delete(f"job:{job_id}")
+    cache.invalidate_prefix("jobs_list")
+    
     return {"message": "Job stopped"}
 
 @router.delete("/{job_id}")
@@ -142,4 +176,8 @@ def delete_job(job_id: int, db: Session = Depends(database.get_db)):
     
     db.delete(job)
     db.commit()
+    
+    cache.delete(f"job:{job_id}")
+    cache.invalidate_prefix("jobs_list")
+    
     return {"ok": True}

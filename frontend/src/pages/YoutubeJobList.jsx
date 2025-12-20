@@ -28,10 +28,6 @@ const YoutubeJobList = () => {
 
   useEffect(() => {
     fetchJobs();
-    const interval = setInterval(() => {
-        fetchJobs(); // Polling for updates
-    }, 5000);
-    return () => clearInterval(interval);
   }, []);
 
   const handleCreate = async () => {

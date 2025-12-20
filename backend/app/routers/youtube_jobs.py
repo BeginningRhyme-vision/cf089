@@ -3,6 +3,7 @@ from sqlalchemy.orm import Session
 from typing import List
 from sqlalchemy import func
 from .. import schemas, models, database
+from ..cache import cache
 
 router = APIRouter(
     prefix="/youtube-jobs",
@@ -55,10 +56,22 @@ def create_job(job_in: schemas.YoutubeJobCreate, db: Session = Depends(database.
         
         created_jobs.append(db_job)
     
+    cache.invalidate_prefix("youtube_jobs_list")
+    
+    # Cache the new jobs
+    for job in created_jobs:
+        data = schemas.YoutubeJob.model_validate(job).model_dump(mode='json')
+        cache.set(f"youtube_job:{job.id}", data, expire=600)
+    
     return created_jobs
 
 @router.get("/", response_model=List[schemas.YoutubeJob])
 def read_jobs(skip: int = 0, limit: int = 100, db: Session = Depends(database.get_db)):
+    cache_key = f"youtube_jobs_list:{skip}:{limit}"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+
     jobs = db.query(models.YoutubeJob).order_by(models.YoutubeJob.created_at.desc()).offset(skip).limit(limit).all()
     
     # Enrich with counts
@@ -74,10 +87,18 @@ def read_jobs(skip: int = 0, limit: int = 100, db: Session = Depends(database.ge
         # Pending + Running + Paused = Pending for simplicity or just explicit Pending
         job.pending_count = count_map.get(models.JobStatus.PENDING, 0) + count_map.get(models.JobStatus.RUNNING, 0)
 
+    data = [schemas.YoutubeJob.model_validate(j).model_dump(mode='json') for j in jobs]
+    cache.set(cache_key, data, expire=600)
+
     return jobs
 
 @router.get("/{job_id}", response_model=schemas.YoutubeJob)
 def read_job(job_id: int, db: Session = Depends(database.get_db)):
+    cache_key = f"youtube_job:{job_id}"
+    cached = cache.get(cache_key)
+    if cached:
+        return cached
+
     job = db.query(models.YoutubeJob).filter(models.YoutubeJob.id == job_id).first()
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
@@ -91,6 +112,9 @@ def read_job(job_id: int, db: Session = Depends(database.get_db)):
     job.success_count = count_map.get(models.JobStatus.COMPLETED, 0)
     job.failed_count = count_map.get(models.JobStatus.FAILED, 0)
     job.pending_count = count_map.get(models.JobStatus.PENDING, 0) + count_map.get(models.JobStatus.RUNNING, 0)
+    
+    data = schemas.YoutubeJob.model_validate(job).model_dump(mode='json')
+    cache.set(cache_key, data, expire=600)
     
     return job
 
@@ -125,4 +149,9 @@ def delete_pending_jobs(db: Session = Depends(database.get_db)):
     db.query(models.YoutubeJob).filter(models.YoutubeJob.id.in_(ids)).delete(synchronize_session=False)
     
     db.commit()
+    
+    cache.invalidate_prefix("youtube_jobs_list")
+    for jid in ids:
+        cache.delete(f"youtube_job:{jid}")
+    
     return {"message": f"Deleted {len(ids)} pending jobs"}

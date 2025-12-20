@@ -5,6 +5,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     app_name: str = "Unbound Future Admin"
     db_url: str
+    redis_url: str
     feishu_app_id: str
     feishu_app_secret: str
     feishu_redirect_uri: str
@@ -34,6 +35,7 @@ def load_config() -> Settings:
     return Settings(
         app_name=config_data["app"]["name"],
         db_url=config_data["database"]["url"],
+        redis_url=config_data.get("redis", {}).get("url", "redis://localhost:6379/0"),
         feishu_app_id=config_data["feishu"]["app_id"],
         feishu_app_secret=config_data["feishu"]["app_secret"],
         feishu_redirect_uri=config_data["feishu"]["redirect_uri"],
