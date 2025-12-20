@@ -33,26 +33,24 @@ const YoutubeJobList = () => {
   const handleCreate = async () => {
     try {
       const values = await form.validateFields();
-      let urls = values.urls ? values.urls.split('\n').filter(line => line.trim() !== '') : [];
       
-      // Read files
-      for (const file of fileList) {
-        const text = await file.text();
-        const fileUrls = text.split('\n').filter(line => line.trim() !== '');
-        urls = urls.concat(fileUrls);
+      const formData = new FormData();
+      formData.append('r2_prefix', values.r2_prefix);
+      
+      if (values.urls) {
+        formData.append('urls', values.urls);
       }
       
-      if (urls.length === 0) {
-        message.error('Please enter URLs or upload a file');
-        return;
+      if (fileList.length > 0) {
+        formData.append('file', fileList[0]);
+      }
+      
+      if (!values.urls && fileList.length === 0) {
+         message.error('Please enter URLs or upload a file');
+         return;
       }
 
-      const payload = {
-        r2_prefix: values.r2_prefix,
-        urls: urls
-      };
-
-      await api.post('/youtube-jobs/', payload);
+      await api.post('/youtube-jobs/', formData);
       message.success('Job(s) created');
       setIsModalOpen(false);
       form.resetFields();

@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Body
+from fastapi import APIRouter, Depends, HTTPException, Body, File, UploadFile, Form
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from sqlalchemy import func, or_, not_, and_
@@ -158,14 +158,38 @@ def update_job_status(job_id: int, update: schemas.YoutubeJobStatusUpdate, db: S
     return job
 
 @router.post("/", response_model=List[schemas.YoutubeJob])
-def create_job(job_in: schemas.YoutubeJobCreate, db: Session = Depends(database.get_db)):
-    unique_urls = list(set(url.strip() for url in job_in.urls if url.strip()))
+async def create_job(
+    r2_prefix: str = Form(...),
+    urls: Optional[str] = Form(None),
+    file: Optional[UploadFile] = File(None),
+    db: Session = Depends(database.get_db)
+):
+    unique_urls = set()
     
-    if not unique_urls:
+    # Process text input
+    if urls:
+        for line in urls.split('\n'):
+            stripped = line.strip()
+            if stripped:
+                unique_urls.add(stripped)
+    
+    # Process file input
+    if file:
+        # Read file in chunks to avoid memory issues, but here we need lines.
+        # SpooledTemporaryFile in FastAPI is already efficient.
+        # We can iterate over the file object directly which yields lines (bytes)
+        async for line in file.file:
+            decoded = line.decode("utf-8", errors="ignore").strip()
+            if decoded:
+                unique_urls.add(decoded)
+    
+    unique_urls_list = list(unique_urls)
+    
+    if not unique_urls_list:
         raise HTTPException(status_code=400, detail="No valid URLs provided")
 
     MAX_URLS_PER_JOB = 100000
-    chunks = [unique_urls[i:i + MAX_URLS_PER_JOB] for i in range(0, len(unique_urls), MAX_URLS_PER_JOB)]
+    chunks = [unique_urls_list[i:i + MAX_URLS_PER_JOB] for i in range(0, len(unique_urls_list), MAX_URLS_PER_JOB)]
     
     created_jobs = []
 
@@ -174,7 +198,7 @@ def create_job(job_in: schemas.YoutubeJobCreate, db: Session = Depends(database.
         
         # Create Job with initialized counters
         db_job = models.YoutubeJob(
-            r2_prefix=job_in.r2_prefix,
+            r2_prefix=r2_prefix,
             status=models.JobStatus.PENDING,
             total_count=count,
             pending_count=count,
@@ -195,6 +219,11 @@ def create_job(job_in: schemas.YoutubeJobCreate, db: Session = Depends(database.
             ))
         
         if tasks:
+            # For very large number of tasks, add_all might still be slow or hit SQL limits
+            # But for 100k it might be okay depending on DB. 
+            # If needed, we can chunk this insert too.
+            # SQLAlchemy `bulk_save_objects` is faster but deprecated in 2.0 (we use 1.4/2.0 compat style usually)
+            # `db.add_all` is fine for now.
             db.add_all(tasks)
         
         db.commit()
