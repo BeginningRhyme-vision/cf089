@@ -213,36 +213,28 @@ async def create_job(
     if not unique_urls_list:
         raise HTTPException(status_code=400, detail="No valid URLs provided")
 
-    MAX_URLS_PER_JOB = 100000
-    chunks = [unique_urls_list[i:i + MAX_URLS_PER_JOB] for i in range(0, len(unique_urls_list), MAX_URLS_PER_JOB)]
+    count = len(unique_urls_list)
     
-    created_jobs = []
-
-    for i, chunk in enumerate(chunks):
-        count = len(chunk)
-        
-        # Create Job with initialized counters
-        db_job = models.YoutubeJob(
-            r2_prefix=r2_prefix,
-            status=models.JobStatus.PENDING,
-            total_count=count,
-            pending_count=count,
-            running_count=0,
-            success_count=0,
-            failed_count=0
-        )
-        db.add(db_job)
-        db.commit()
-        db.refresh(db_job)
-        
-        # Offload task creation to background
-        background_tasks.add_task(insert_job_tasks, db_job.id, chunk)
-        
-        created_jobs.append(db_job)
+    # Create Job with initialized counters
+    db_job = models.YoutubeJob(
+        r2_prefix=r2_prefix,
+        status=models.JobStatus.PENDING,
+        total_count=count,
+        pending_count=count,
+        running_count=0,
+        success_count=0,
+        failed_count=0
+    )
+    db.add(db_job)
+    db.commit()
+    db.refresh(db_job)
+    
+    # Offload task creation to background
+    background_tasks.add_task(insert_job_tasks, db_job.id, unique_urls_list)
     
     cache.invalidate_prefix("youtube_jobs_list")
     
-    return created_jobs
+    return [db_job]
 
 @router.get("/", response_model=List[schemas.YoutubeJob])
 def read_jobs(skip: int = 0, limit: int = 10, db: Session = Depends(database.get_db)):

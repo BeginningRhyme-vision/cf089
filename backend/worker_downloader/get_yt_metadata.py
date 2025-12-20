@@ -356,22 +356,11 @@ def process_video_task(task_id, url, r2_prefix, ydl_opts):
         print(f"Critical error for task {task_id}: {e}")
         update_task_status(task_id, "FAILED", f"Critical: {str(e)}")
 
-def process_tasks(tasks, proxy_address=None):
-    if not tasks:
-        return
+def main():
+    proxy_address = None
+    if len(sys.argv) > 1:
+        proxy_address = sys.argv[1]
 
-    print(f"Processing batch of {len(tasks)} tasks...")
-
-    # We need the prefix. It's not in the task object directly unless we join.
-    # The API 'YoutubeTask' schema in list doesn't include job details usually, 
-    # but the worker needs `r2_prefix`.
-    # Optimization: The worker could fetch the job details once per job_id seen.
-    # OR: The acquire endpoint should return job_r2_prefix.
-    # Let's check `schemas.py`. `YoutubeTask` has `job_id`.
-    # We will fetch job details for each unique job_id in the batch.
-    
-    job_cache = {}
-    
     # yt-dlp options
     ydl_opts = {
         'quiet': True,
@@ -383,44 +372,69 @@ def process_tasks(tasks, proxy_address=None):
     if proxy_address:
         ydl_opts['proxy'] = proxy_address
 
-    max_parallel_videos = 256 
+    max_parallel_videos = 256
+    job_cache = {}
+    
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel_videos)
+    futures = set()
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel_videos) as executor:
-        futures = []
-        for task in tasks:
-            jid = task['job_id']
-            if jid not in job_cache:
+    print(f"Worker {WORKER_ID} started. Polling for tasks (Concurrency: {max_parallel_videos})...")
+
+    try:
+        while True:
+            # 1. Clean up completed futures
+            done_futures = {f for f in futures if f.done()}
+            for f in done_futures:
+                futures.remove(f)
                 try:
-                    job_info = api_get_job(jid)
-                    job_cache[jid] = job_info['r2_prefix']
-                except:
-                    print(f"Failed to get job info for {jid}, skipping task {task['id']}")
-                    continue
-            
-            r2_prefix = job_cache[jid]
-            futures.append(executor.submit(process_video_task, task['id'], task['url'], r2_prefix, ydl_opts))
-        
-        for future in concurrent.futures.as_completed(futures):
-            try:
-                future.result()
-            except Exception as e:
-                print(f"Thread error: {e}")
+                    f.result()
+                except Exception as e:
+                    print(f"Thread error: {e}")
 
-def main():
-    proxy_address = None
-    if len(sys.argv) > 1:
-        proxy_address = sys.argv[1]
+            # 2. Refill if below limit
+            active_count = len(futures)
+            if active_count < max_parallel_videos:
+                needed = max_parallel_videos - active_count
+                
+                tasks = []
+                try:
+                    tasks = api_acquire_tasks(limit=needed)
+                except Exception as e:
+                    print(f"Error acquiring tasks: {e}")
+                    time.sleep(2)
 
-    print(f"Worker {WORKER_ID} started. Polling for tasks...")
+                if tasks:
+                    print(f"Acquired {len(tasks)} tasks (Active: {active_count}).")
+                    for task in tasks:
+                        jid = task['job_id']
+                        if jid not in job_cache:
+                            try:
+                                job_info = api_get_job(jid)
+                                job_cache[jid] = job_info['r2_prefix']
+                            except Exception as e:
+                                print(f"Failed to get job info for {jid}: {e}")
+                                update_task_status(task['id'], "FAILED", f"Job info error: {str(e)}")
+                                continue
+                        
+                        r2_prefix = job_cache.get(jid)
+                        if r2_prefix:
+                            f = executor.submit(process_video_task, task['id'], task['url'], r2_prefix, ydl_opts)
+                            futures.add(f)
+                else:
+                    # No tasks available
+                    if active_count == 0:
+                        time.sleep(5)
+                    else:
+                        # Queue empty, wait a bit before retrying to avoid spamming
+                        time.sleep(2)
+            else:
+                # 3. Wait if full (wait for at least one to finish)
+                concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
 
-    while True:
-        tasks = api_acquire_tasks(limit=256) # Small batch for testing/stability
-        if not tasks:
-            # print("No pending tasks. Waiting...")
-            time.sleep(5)
-            continue
-        
-        process_tasks(tasks, proxy_address)
+    except KeyboardInterrupt:
+        print("\nStopping worker...")
+        executor.shutdown(wait=False)
+        sys.exit(0)
 
 if __name__ == "__main__":
     main()
