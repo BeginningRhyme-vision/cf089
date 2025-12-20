@@ -178,7 +178,7 @@ async def create_job(
         # Read file in chunks to avoid memory issues, but here we need lines.
         # SpooledTemporaryFile in FastAPI is already efficient.
         # We can iterate over the file object directly which yields lines (bytes)
-        async for line in file.file:
+        for line in file.file:
             decoded = line.decode("utf-8", errors="ignore").strip()
             if decoded:
                 unique_urls.add(decoded)

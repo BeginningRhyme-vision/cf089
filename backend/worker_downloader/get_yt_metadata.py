@@ -293,8 +293,14 @@ def process_video_task(task_id, url, r2_prefix, ydl_opts):
                     formats = info.get('formats', [])
                     video_id = info.get('id', 'video')
                     
-                    best_audio = next((f for f in reversed(formats) 
-                                       if f.get('vcodec') == 'none' and f.get('acodec') != 'none'), None)
+                    audio_formats = [f for f in reversed(formats) 
+                                     if f.get('vcodec') == 'none' and f.get('acodec') != 'none']
+                    
+                    best_audio = None
+                    if audio_formats:
+                        best_audio = next((f for f in audio_formats if f.get('language') == 'en'), None)
+                        if not best_audio:
+                            best_audio = audio_formats[0]
 
                     best_video = next((f for f in reversed(formats) 
                                        if f.get('vcodec') != 'none' and f.get('acodec') == 'none'), None)
