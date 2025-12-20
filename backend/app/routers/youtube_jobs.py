@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 from typing import List
-from sqlalchemy import func
+from sqlalchemy import func, or_, not_, and_
 from .. import schemas, models, database
 from ..cache import cache
 
@@ -9,6 +9,81 @@ router = APIRouter(
     prefix="/youtube-jobs",
     tags=["youtube-jobs"]
 )
+
+@router.post("/acquire", response_model=schemas.YoutubeJob)
+def acquire_job(db: Session = Depends(database.get_db)):
+    # Find a PENDING job first
+    job = db.query(models.YoutubeJob).filter(
+        models.YoutubeJob.status == models.JobStatus.PENDING
+    ).order_by(models.YoutubeJob.created_at.asc()).first() 
+
+    if not job:
+         # Fallback to RUNNING job (if restarting or taking over)
+         job = db.query(models.YoutubeJob).filter(
+             models.YoutubeJob.status == models.JobStatus.RUNNING
+         ).first()
+    
+    if not job:
+        raise HTTPException(status_code=404, detail="No pending or running jobs found")
+    
+    # Lock it
+    job.status = models.JobStatus.RUNNING
+    db.commit()
+    db.refresh(job)
+    
+    cache.delete(f"youtube_job:{job.id}")
+    cache.invalidate_prefix("youtube_jobs_list")
+    
+    return job
+
+@router.get("/{job_id}/tasks", response_model=List[schemas.YoutubeRecord])
+def read_job_tasks(job_id: int, db: Session = Depends(database.get_db)):
+    records = db.query(models.YoutubeRecord).filter(
+        models.YoutubeRecord.job_id == job_id,
+        models.YoutubeRecord.status.in_([models.JobStatus.PENDING, models.JobStatus.FAILED]),
+        or_(
+            models.YoutubeRecord.error_message == None,
+            and_(
+                not_(models.YoutubeRecord.error_message.contains("Video unavailable")),
+                not_(models.YoutubeRecord.error_message.contains("This video is private"))
+            )
+        )
+    ).all()
+    return records
+
+@router.patch("/records/{record_id}", response_model=schemas.YoutubeRecord)
+def update_record(record_id: int, update: schemas.YoutubeRecordUpdate, db: Session = Depends(database.get_db)):
+    record = db.query(models.YoutubeRecord).filter(models.YoutubeRecord.id == record_id).first()
+    if not record:
+        raise HTTPException(status_code=404, detail="Record not found")
+    
+    if update.status:
+        record.status = update.status
+    if update.title:
+        record.title = update.title
+    if update.video_id:
+        record.video_id = update.video_id
+    if update.error_message is not None: # Allow clearing error message if passed as empty string or distinct value
+        record.error_message = update.error_message
+        
+    db.commit()
+    db.refresh(record)
+    return record
+
+@router.patch("/{job_id}/status", response_model=schemas.YoutubeJob)
+def update_job_status(job_id: int, update: schemas.YoutubeJobStatusUpdate, db: Session = Depends(database.get_db)):
+    job = db.query(models.YoutubeJob).filter(models.YoutubeJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+        
+    job.status = update.status
+    db.commit()
+    db.refresh(job)
+    
+    cache.delete(f"youtube_job:{job.id}")
+    cache.invalidate_prefix("youtube_jobs_list")
+    
+    return job
 
 @router.post("/", response_model=List[schemas.YoutubeJob])
 def create_job(job_in: schemas.YoutubeJobCreate, db: Session = Depends(database.get_db)):

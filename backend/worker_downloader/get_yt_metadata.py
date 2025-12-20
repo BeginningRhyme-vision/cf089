@@ -9,8 +9,8 @@ import ssl
 import concurrent.futures
 import threading
 import os
+import requests
 from datetime import datetime
-from sqlalchemy import or_, not_, and_
 
 try:
     import yaml
@@ -23,18 +23,6 @@ try:
     from botocore.config import Config
 except ImportError:
     print("Error: boto3 is required. Please install it with `pip install boto3`.")
-    sys.exit(1)
-
-# Add backend directory to sys.path to allow importing app modules
-current_dir = os.path.dirname(os.path.abspath(__file__))
-backend_dir = os.path.dirname(current_dir)
-sys.path.append(backend_dir)
-
-try:
-    from app.database import SessionLocal
-    from app.models import YoutubeJob, YoutubeRecord, JobStatus
-except ImportError as e:
-    print(f"Error importing app modules: {e}")
     sys.exit(1)
 
 CHUNK_SIZE = 6 * 1024 * 1024  # 6MB
@@ -81,6 +69,49 @@ s3_client = boto3.client(
     config=Config(signature_version='s3v4', s3={'addressing_style': 'virtual'}),
     region_name='auto'
 )
+
+# API Configuration
+API_BASE_URL = os.environ.get("BACKEND_API_URL", "http://localhost:8000")
+
+def api_acquire_job():
+    try:
+        resp = requests.post(f"{API_BASE_URL}/youtube-jobs/acquire")
+        if resp.status_code == 200:
+            return resp.json()
+        elif resp.status_code == 404:
+            return None
+        else:
+            print(f"API Error acquiring job: {resp.text}")
+            return None
+    except Exception as e:
+        print(f"Connection Error: {e}")
+        return None
+
+def api_get_job(job_id):
+    resp = requests.get(f"{API_BASE_URL}/youtube-jobs/{job_id}")
+    resp.raise_for_status()
+    return resp.json()
+
+def api_get_pending_tasks(job_id):
+    resp = requests.get(f"{API_BASE_URL}/youtube-jobs/{job_id}/tasks")
+    resp.raise_for_status()
+    return resp.json()
+
+def api_update_record(record_id, data):
+    try:
+        resp = requests.patch(f"{API_BASE_URL}/youtube-jobs/records/{record_id}", json=data)
+        if resp.status_code != 200:
+            print(f"Failed to update record {record_id}: {resp.text}")
+    except Exception as e:
+        print(f"Failed to update record {record_id} due to connection error: {e}")
+
+def api_update_job_status(job_id, status):
+    try:
+        resp = requests.patch(f"{API_BASE_URL}/youtube-jobs/{job_id}/status", json={"status": status})
+        if resp.status_code != 200:
+             print(f"Failed to update job {job_id} status: {resp.text}")
+    except Exception as e:
+         print(f"Failed to update job {job_id} status due to connection error: {e}")
 
 def get_content_length(url):
     try:
@@ -260,26 +291,13 @@ def check_file_exists(key):
         return False
 
 def update_record_metadata(record_id, title, video_id):
-    db = SessionLocal()
-    try:
-        record = db.query(YoutubeRecord).filter(YoutubeRecord.id == record_id).first()
-        if record:
-            if title: record.title = title
-            if video_id: record.video_id = video_id
-            db.commit()
-    finally:
-        db.close()
+    api_update_record(record_id, {"title": title, "video_id": video_id})
 
 def update_record_status(record_id, status, error_message=None):
-    db = SessionLocal()
-    try:
-        record = db.query(YoutubeRecord).filter(YoutubeRecord.id == record_id).first()
-        if record:
-            record.status = status
-            record.error_message = error_message
-            db.commit()
-    finally:
-        db.close()
+    data = {"status": status}
+    if error_message is not None:
+        data["error_message"] = error_message
+    api_update_record(record_id, data)
 
 def process_video_record(record_id, url, r2_prefix, ydl_opts):
     print(f"Processing Record ID {record_id} - URL: {url}")
@@ -380,54 +398,28 @@ def process_video_record(record_id, url, r2_prefix, ydl_opts):
                 time.sleep(5)
 
         if success:
-            update_record_status(record_id, JobStatus.COMPLETED)
+            update_record_status(record_id, "COMPLETED")
         else:
-            update_record_status(record_id, JobStatus.FAILED, str(last_error))
+            update_record_status(record_id, "FAILED", str(last_error))
 
     except Exception as e:
         print(f"Critical error for record {record_id}: {e}")
-        update_record_status(record_id, JobStatus.FAILED, f"Critical: {str(e)}")
+        update_record_status(record_id, "FAILED", f"Critical: {str(e)}")
 
-def process_job(job_id, proxy_address=None):
-    print(f"Starting worker for Job ID: {job_id}")
+def process_job(job_id, r2_prefix, proxy_address=None):
+    print(f"Starting worker for Job ID: {job_id} (Prefix: {r2_prefix})")
 
-    db = SessionLocal()
-    job = db.query(YoutubeJob).filter(YoutubeJob.id == job_id).first()
-    
-    if not job:
-        print(f"Job {job_id} not found.")
-        db.close()
-        return
-    
-    # Update Job status
-    job.status = JobStatus.RUNNING
-    db.commit()
-
-    r2_prefix = job.r2_prefix
-
-    # Fetch pending or failed records
-    # We want to retry failed ones too, but skip those that are definitely unavailable
-    records = db.query(YoutubeRecord).filter(
-        YoutubeRecord.job_id == job_id,
-        YoutubeRecord.status.in_([JobStatus.PENDING, JobStatus.FAILED]),
-        or_(
-            YoutubeRecord.error_message == None,
-            and_(
-                not_(YoutubeRecord.error_message.contains("Video unavailable")),
-                not_(YoutubeRecord.error_message.contains("This video is private"))
-            )
-        )
-    ).all()
-    
-    # Detach objects so we can close session or pass data to threads safely
-    # Actually, we will just pass IDs and let threads open their own sessions
-    record_ids = [r.id for r in records]
-    record_urls = {r.id: r.url for r in records}
-    
-    db.close() # Close main session
-
+    records = api_get_pending_tasks(job_id)
     print(f"Found {len(records)} records to process.")
     
+    if not records:
+        print("No pending records found.")
+        api_update_job_status(job_id, "COMPLETED")
+        return
+
+    record_ids = [r['id'] for r in records]
+    record_urls = {r['id']: r['url'] for r in records}
+
     # yt-dlp options
     ydl_opts = {
         'quiet': True,
@@ -457,33 +449,20 @@ def process_job(job_id, proxy_address=None):
                 print(f"CRITICAL: Thread for record {rid} exited with error: {e}")
 
     # Check if all completed
-    db = SessionLocal()
-    pending_count = db.query(YoutubeRecord).filter(
-        YoutubeRecord.job_id == job_id,
-        YoutubeRecord.status.in_([JobStatus.PENDING, JobStatus.RUNNING])
-    ).count()
+    remaining = api_get_pending_tasks(job_id)
+    # Filter only PENDING (api returns PENDING and FAILED)
+    # 'tasks' endpoint returns PENDING and FAILED.
+    # If we have only FAILED left, it means we tried and failed.
+    # If we have PENDING, it means we missed something or a new retry cycle is needed.
     
-    failed_count = db.query(YoutubeRecord).filter(
-        YoutubeRecord.job_id == job_id,
-        YoutubeRecord.status == JobStatus.FAILED
-    ).count()
+    pending_left = [r for r in remaining if r['status'] == 'PENDING']
 
-    job = db.query(YoutubeJob).filter(YoutubeJob.id == job_id).first()
-    if pending_count == 0:
-        if failed_count > 0:
-             # If some failed, maybe keep job as RUNNING or PARTIAL? 
-             # Or set to COMPLETED/FAILED based on threshold?
-             # For now, if no pending, we mark job as COMPLETED (with errors) or FAILED.
-             # Let's say COMPLETED means "Done trying". Users can see failed count.
-             job.status = JobStatus.COMPLETED 
-        else:
-             job.status = JobStatus.COMPLETED
+    if not pending_left:
+        api_update_job_status(job_id, "COMPLETED")
     else:
         # If script finishes but pending remain (shouldn't happen with wait), something wrong
-        pass
-
-    db.commit()
-    db.close()
+        print(f"Job {job_id} still has {len(pending_left)} pending tasks. Keeping as RUNNING/PARTIAL.")
+    
     print("Job processing finished.")
 
 def main():
@@ -496,34 +475,13 @@ def main():
 
     if job_arg == "all":
         while True:
-            db = SessionLocal()
-            try:
-                # Fetch one job that is Pending or Running
-                # We prioritize Pending, then Running.
-                # Actually, if we pick a RUNNING job, we assume it's abandoned or we are taking over.
-                # To avoid picking the same job if we fail to complete it (e.g. exceptions), we might need care.
-                # But the instructions say "Pending, Running".
-                
-                # Note: if I pick a RUNNING job, process it, and it stays RUNNING (due to some error logic or partial),
-                # I might pick it again.
-                # However, process_job sets it to COMPLETED if pending_count == 0.
-                
-                # Fetch only ID to be minimal
-                job_candidate = db.query(YoutubeJob.id).filter(
-                    YoutubeJob.status.in_([JobStatus.PENDING, JobStatus.RUNNING])
-                ).first()
-                
-                if not job_candidate:
-                    print("No more Pending or Running jobs found.")
-                    break
-                
-                job_id = job_candidate.id
-                
-            finally:
-                db.close()
+            job = api_acquire_job()
+            if not job:
+                print("No more Pending or Running jobs found.")
+                break
             
-            # Process outside the DB session
-            process_job(job_id, proxy_address)
+            # job is dict with keys matching YoutubeJob schema
+            process_job(job['id'], job['r2_prefix'], proxy_address)
             
             # small pause
             time.sleep(1)
@@ -531,7 +489,12 @@ def main():
     else:
         try:
             job_id = int(job_arg)
-            process_job(job_id, proxy_address)
+            try:
+                job = api_get_job(job_id)
+                process_job(job_id, job['r2_prefix'], proxy_address)
+            except Exception as e:
+                print(f"Error fetching job {job_id}: {e}")
+                sys.exit(1)
         except ValueError:
             print("Job ID must be an integer or 'all'.")
             sys.exit(1)

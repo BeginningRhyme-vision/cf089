@@ -99,9 +99,18 @@ class YoutubeRecordPage(BaseModel):
     page: int
     size: int
 
+class YoutubeRecordUpdate(BaseModel):
+    status: Optional[JobStatus] = None
+    title: Optional[str] = None
+    video_id: Optional[str] = None
+    error_message: Optional[str] = None
+
 class YoutubeJobCreate(BaseModel):
     r2_prefix: str
     urls: List[str] # List of URLs to process
+
+class YoutubeJobStatusUpdate(BaseModel):
+    status: JobStatus
 
 class YoutubeJob(BaseModel):
     id: int
