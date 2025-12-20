@@ -383,7 +383,7 @@ def process_tasks(tasks, proxy_address=None):
     if proxy_address:
         ydl_opts['proxy'] = proxy_address
 
-    max_parallel_videos = 16 
+    max_parallel_videos = 256 
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel_videos) as executor:
         futures = []
@@ -414,7 +414,7 @@ def main():
     print(f"Worker {WORKER_ID} started. Polling for tasks...")
 
     while True:
-        tasks = api_acquire_tasks(limit=10) # Small batch for testing/stability
+        tasks = api_acquire_tasks(limit=256) # Small batch for testing/stability
         if not tasks:
             # print("No pending tasks. Waiting...")
             time.sleep(5)

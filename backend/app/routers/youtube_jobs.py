@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Body, File, UploadFile, Form
+from fastapi import APIRouter, Depends, HTTPException, Body, File, UploadFile, Form, BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import List, Optional
 from sqlalchemy import func, or_, not_, and_
@@ -10,6 +10,30 @@ router = APIRouter(
     prefix="/youtube-jobs",
     tags=["youtube-jobs"]
 )
+
+def insert_job_tasks(job_id: int, urls: List[str]):
+    """Background task to insert tasks for a job."""
+    db = database.SessionLocal()
+    try:
+        tasks = []
+        for url in urls:
+            tasks.append(models.YoutubeTask(
+                job_id=job_id,
+                url=url,
+                status=models.JobStatus.PENDING
+            ))
+        
+        # Insert in batches to manage memory and transaction size
+        BATCH_SIZE = 5000
+        for i in range(0, len(tasks), BATCH_SIZE):
+            batch = tasks[i : i + BATCH_SIZE]
+            db.add_all(batch)
+            db.commit()
+            
+    except Exception as e:
+        print(f"Error inserting tasks for job {job_id}: {e}")
+    finally:
+        db.close()
 
 @router.post("/tasks/acquire", response_model=List[schemas.YoutubeTask])
 def acquire_tasks(
@@ -160,6 +184,7 @@ def update_job_status(job_id: int, update: schemas.YoutubeJobStatusUpdate, db: S
 @router.post("/", response_model=List[schemas.YoutubeJob])
 async def create_job(
     r2_prefix: str = Form(...),
+    background_tasks: BackgroundTasks,
     urls: Optional[str] = Form(None),
     file: Optional[UploadFile] = File(None),
     db: Session = Depends(database.get_db)
@@ -207,27 +232,12 @@ async def create_job(
             failed_count=0
         )
         db.add(db_job)
-        db.flush() # Get ID
-
-        # Create Tasks
-        tasks = []
-        for url in chunk:
-            tasks.append(models.YoutubeTask(
-                job_id=db_job.id,
-                url=url,
-                status=models.JobStatus.PENDING
-            ))
-        
-        if tasks:
-            # For very large number of tasks, add_all might still be slow or hit SQL limits
-            # But for 100k it might be okay depending on DB. 
-            # If needed, we can chunk this insert too.
-            # SQLAlchemy `bulk_save_objects` is faster but deprecated in 2.0 (we use 1.4/2.0 compat style usually)
-            # `db.add_all` is fine for now.
-            db.add_all(tasks)
-        
         db.commit()
         db.refresh(db_job)
+        
+        # Offload task creation to background
+        background_tasks.add_task(insert_job_tasks, db_job.id, chunk)
+        
         created_jobs.append(db_job)
     
     cache.invalidate_prefix("youtube_jobs_list")
