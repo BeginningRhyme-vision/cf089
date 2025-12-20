@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
-import { Table, Button, Modal, Form, Input, Tag, message, Space, Upload } from 'antd';
-import { ReloadOutlined, PlusOutlined, EyeOutlined, UploadOutlined } from '@ant-design/icons';
+import { Table, Button, Modal, Form, Input, Tag, message, Space, Upload, Popconfirm } from 'antd';
+import { ReloadOutlined, PlusOutlined, EyeOutlined, UploadOutlined, DeleteOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import api from '../api';
 
@@ -65,6 +65,17 @@ const YoutubeJobList = () => {
     } catch (error) {
       console.error(error);
       message.error('Failed to create job');
+    }
+  };
+
+  const handleDeletePending = async () => {
+    try {
+      const res = await api.delete('/youtube-jobs/pending');
+      message.success(res.data.message || 'Pending jobs deleted');
+      fetchJobs();
+    } catch (error) {
+      console.error(error);
+      message.error('Failed to delete pending jobs');
     }
   };
 
@@ -136,7 +147,18 @@ const YoutubeJobList = () => {
         <Button type="primary" icon={<PlusOutlined />} onClick={() => setIsModalOpen(true)}>
           New Youtube Job
         </Button>
-        <Button icon={<ReloadOutlined />} onClick={fetchJobs}>Refresh</Button>
+        <Space>
+          <Popconfirm
+            title="Delete all pending jobs?"
+            description="This action cannot be undone."
+            onConfirm={handleDeletePending}
+            okText="Yes"
+            cancelText="No"
+          >
+            <Button danger icon={<DeleteOutlined />}>Delete Pending</Button>
+          </Popconfirm>
+          <Button icon={<ReloadOutlined />} onClick={fetchJobs}>Refresh</Button>
+        </Space>
       </div>
       
       <Table columns={columns} dataSource={jobs} rowKey="id" loading={loading} />

@@ -107,3 +107,22 @@ def read_job_records(job_id: int, page: int = 1, size: int = 50, db: Session = D
         page=page,
         size=size
     )
+
+@router.delete("/pending")
+def delete_pending_jobs(db: Session = Depends(database.get_db)):
+    # Find Pending Jobs
+    pending_jobs = db.query(models.YoutubeJob).filter(models.YoutubeJob.status == models.JobStatus.PENDING).all()
+    
+    if not pending_jobs:
+        return {"message": "No pending jobs to delete"}
+    
+    ids = [job.id for job in pending_jobs]
+    
+    # Delete Records first (safe approach if cascade isn't fully trusted/configured)
+    db.query(models.YoutubeRecord).filter(models.YoutubeRecord.job_id.in_(ids)).delete(synchronize_session=False)
+    
+    # Delete Jobs
+    db.query(models.YoutubeJob).filter(models.YoutubeJob.id.in_(ids)).delete(synchronize_session=False)
+    
+    db.commit()
+    return {"message": f"Deleted {len(ids)} pending jobs"}
