@@ -81,9 +81,11 @@ def acquire_tasks(
         if job:
             job.pending_count = models.YoutubeJob.pending_count - count
             job.running_count = models.YoutubeJob.running_count + count
-            db.add(job)
             
+            if job.status == models.JobStatus.PENDING:
+                job.status = models.JobStatus.RUNNING
             # Invalidate cache for this job
+            db.add(job)
             cache.delete(f"youtube_job:{job_id}")
 
     db.commit()
