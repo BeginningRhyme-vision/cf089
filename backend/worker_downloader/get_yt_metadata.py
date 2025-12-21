@@ -372,7 +372,7 @@ def main():
     if proxy_address:
         ydl_opts['proxy'] = proxy_address
 
-    max_parallel_videos = 256
+    max_parallel_videos = 1024
     job_cache = {}
     
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel_videos)
@@ -394,7 +394,7 @@ def main():
             # 2. Refill if below limit
             active_count = len(futures)
             if active_count < max_parallel_videos:
-                needed = max_parallel_videos - active_count
+                needed = max_parallel_videos
                 
                 tasks = []
                 try:

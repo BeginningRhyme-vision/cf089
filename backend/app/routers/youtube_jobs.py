@@ -3,6 +3,9 @@ from sqlalchemy.orm import Session
 from typing import List, Optional
 from sqlalchemy import func, or_, not_, and_
 from datetime import datetime
+from collections import defaultdict
+import threading
+import time
 from .. import schemas, models, database
 from ..cache import cache
 
@@ -10,6 +13,114 @@ router = APIRouter(
     prefix="/youtube-jobs",
     tags=["youtube-jobs"]
 )
+
+# --- Batch Update Buffer ---
+UPDATE_BUFFER = []
+BUFFER_LOCK = threading.Lock()
+
+def flush_buffer():
+    with BUFFER_LOCK:
+        if not UPDATE_BUFFER:
+            return
+        batch = UPDATE_BUFFER[:]
+        UPDATE_BUFFER.clear()
+
+    db = database.SessionLocal()
+    try:
+        # 1. Aggregate updates by task_id
+        updates_by_id = defaultdict(dict)
+        for task_id, data in batch:
+            updates_by_id[task_id].update(data)
+        
+        if not updates_by_id:
+            return
+
+        task_ids = list(updates_by_id.keys())
+        
+        # 2. Fetch Tasks
+        tasks = db.query(models.YoutubeTask).filter(models.YoutubeTask.id.in_(task_ids)).all()
+        task_map = {t.id: t for t in tasks}
+        
+        job_deltas = defaultdict(lambda: {'pending': 0, 'running': 0, 'success': 0, 'failed': 0})
+        updated_job_ids = set()
+
+        for t_id, update_data in updates_by_id.items():
+            task = task_map.get(t_id)
+            if not task:
+                continue
+            
+            old_status = task.status
+            job_id = task.job_id
+            
+            # Apply fields
+            if 'title' in update_data:
+                task.title = update_data['title']
+            if 'video_id' in update_data:
+                task.video_id = update_data['video_id']
+            if 'error_message' in update_data:
+                task.error_message = update_data['error_message']
+            if 'completed_at' in update_data:
+                task.completed_at = update_data['completed_at']
+            
+            new_status = update_data.get('status')
+            if new_status and new_status != old_status:
+                task.status = new_status
+                
+                # Decrement old
+                if old_status == models.JobStatus.PENDING:
+                    job_deltas[job_id]['pending'] -= 1
+                elif old_status == models.JobStatus.RUNNING:
+                    job_deltas[job_id]['running'] -= 1
+                elif old_status == models.JobStatus.COMPLETED:
+                    job_deltas[job_id]['success'] -= 1
+                elif old_status == models.JobStatus.FAILED:
+                    job_deltas[job_id]['failed'] -= 1
+                    
+                # Increment new
+                if new_status == models.JobStatus.PENDING:
+                    job_deltas[job_id]['pending'] += 1
+                elif new_status == models.JobStatus.RUNNING:
+                    job_deltas[job_id]['running'] += 1
+                elif new_status == models.JobStatus.COMPLETED:
+                    job_deltas[job_id]['success'] += 1
+                elif new_status == models.JobStatus.FAILED:
+                    job_deltas[job_id]['failed'] += 1
+                
+                updated_job_ids.add(job_id)
+
+        # 3. Update Jobs
+        if updated_job_ids:
+            jobs = db.query(models.YoutubeJob).filter(models.YoutubeJob.id.in_(list(updated_job_ids))).all()
+            for job in jobs:
+                delta = job_deltas[job.id]
+                job.pending_count += delta['pending']
+                job.running_count += delta['running']
+                job.success_count += delta['success']
+                job.failed_count += delta['failed']
+                
+                # Update cache invalidation key
+                cache.delete(f"youtube_job:{job.id}")
+        
+        db.commit()
+        cache.invalidate_prefix("youtube_jobs_list")
+        
+    except Exception as e:
+        print(f"Error flushing youtube tasks: {e}")
+        db.rollback()
+    finally:
+        db.close()
+
+def background_flusher():
+    while True:
+        time.sleep(1)
+        try:
+            flush_buffer()
+        except Exception as e:
+            print(f"Error in background flusher loop: {e}")
+
+# Start background thread
+flusher_thread = threading.Thread(target=background_flusher, daemon=True)
+flusher_thread.start()
 
 def insert_job_tasks(job_id: int, urls: List[str]):
     """Background task to insert tasks for a job."""
@@ -117,54 +228,22 @@ def update_task(task_id: int, update: schemas.YoutubeTaskUpdate, db: Session = D
     if not task:
         raise HTTPException(status_code=404, detail="Task not found")
     
-    old_status = task.status
-    job_id = task.job_id
+    update_data = update.model_dump(exclude_unset=True)
     
-    if update.status:
-        task.status = update.status
-        if update.status in [models.JobStatus.COMPLETED, models.JobStatus.FAILED]:
-            task.completed_at = datetime.now()
-            
-    if update.title:
-        task.title = update.title
-    if update.video_id:
-        task.video_id = update.video_id
-    if update.error_message is not None:
-        task.error_message = update.error_message
-        
-    db.commit()
-    db.refresh(task)
+    # Handle completion time
+    if update.status and update.status in [models.JobStatus.COMPLETED, models.JobStatus.FAILED]:
+        now = datetime.now()
+        update_data['completed_at'] = now
+        task.completed_at = now
+
+    # Push to buffer
+    with BUFFER_LOCK:
+        UPDATE_BUFFER.append((task_id, update_data))
     
-    # Update Job Counters if status changed
-    if update.status and update.status != old_status:
-        job = db.query(models.YoutubeJob).filter(models.YoutubeJob.id == job_id).first()
-        if job:
-            # Decrement old
-            if old_status == models.JobStatus.PENDING:
-                job.pending_count -= 1
-            elif old_status == models.JobStatus.RUNNING:
-                job.running_count -= 1
-            elif old_status == models.JobStatus.COMPLETED:
-                job.success_count -= 1
-            elif old_status == models.JobStatus.FAILED:
-                job.failed_count -= 1
-                
-            # Increment new
-            if update.status == models.JobStatus.PENDING:
-                job.pending_count += 1
-            elif update.status == models.JobStatus.RUNNING:
-                job.running_count += 1
-            elif update.status == models.JobStatus.COMPLETED:
-                job.success_count += 1
-            elif update.status == models.JobStatus.FAILED:
-                job.failed_count += 1
-            
-            # Recalculate total logic if needed, but total shouldn't change here usually
-            # job.total_count is fixed unless we delete tasks
-            
-            db.commit()
-            cache.delete(f"youtube_job:{job_id}")
-            cache.invalidate_prefix("youtube_jobs_list")
+    # Optimistic local update for response
+    for key, value in update_data.items():
+        if hasattr(task, key):
+            setattr(task, key, value)
 
     return task
 

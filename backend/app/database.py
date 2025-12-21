@@ -7,7 +7,12 @@ from .config import settings
 # but request specified MySQL. We will stick to the config.
 # Ideally, we should handle connection errors gracefully.
 
-engine = create_engine(settings.db_url)
+engine = create_engine(
+    settings.db_url,
+    pool_size=50,
+    max_overflow=100,
+    pool_pre_ping=True
+)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
