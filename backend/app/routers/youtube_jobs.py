@@ -358,6 +358,23 @@ def read_job_records(job_id: int, page: int = 1, size: int = 50, db: Session = D
         size=size
     )
 
+@router.delete("/{job_id}")
+def delete_job(job_id: int, db: Session = Depends(database.get_db)):
+    job = db.query(models.YoutubeJob).filter(models.YoutubeJob.id == job_id).first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    # Explicitly delete tasks to ensure cleanup
+    db.query(models.YoutubeTask).filter(models.YoutubeTask.job_id == job_id).delete(synchronize_session=False)
+    
+    db.delete(job)
+    db.commit()
+    
+    cache.delete(f"youtube_job:{job_id}")
+    cache.invalidate_prefix("youtube_jobs_list")
+    
+    return {"message": "Job deleted"}
+
 @router.delete("/pending")
 def delete_pending_jobs(db: Session = Depends(database.get_db)):
     pending_jobs = db.query(models.YoutubeJob).filter(models.YoutubeJob.status == models.JobStatus.PENDING).all()

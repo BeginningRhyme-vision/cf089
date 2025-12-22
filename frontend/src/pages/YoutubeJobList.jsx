@@ -73,6 +73,17 @@ const YoutubeJobList = () => {
     }
   };
 
+  const handleDeleteJob = async (jobId) => {
+    try {
+      await api.delete(`/youtube-jobs/${jobId}`);
+      message.success('Job deleted');
+      fetchJobs();
+    } catch (error) {
+      console.error(error);
+      message.error('Failed to delete job');
+    }
+  };
+
   const uploadProps = {
     onRemove: (file) => {
       const index = fileList.indexOf(file);
@@ -130,6 +141,14 @@ const YoutubeJobList = () => {
           >
             Details
           </Button>
+          <Popconfirm
+            title="Are you sure delete this job?"
+            onConfirm={() => handleDeleteJob(record.id)}
+            okText="Yes"
+            cancelText="No"
+          >
+             <Button icon={<DeleteOutlined />} size="small" danger>Delete</Button>
+          </Popconfirm>
         </Space>
       ),
     },
