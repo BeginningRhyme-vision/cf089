@@ -20,21 +20,12 @@ WORKDIR /app
 ARG LANCEDB_VERSION=0.1.2
 ARG TARGETARCH=amd64
 
-# Download LanceDB native library
-# We attempt to download the pre-built shared library for Linux.
-# If this fails, you may need to manually download 'liblancedb-linux-amd64.zip' 
-# from the release page and place it in the build context, then modify this file to COPY it.
-RUN curl -L -o liblancedb.zip "https://github.com/lancedb/lancedb-go/releases/download/v${LANCEDB_VERSION}/liblancedb-linux-${TARGETARCH}.zip" \
-    && unzip liblancedb.zip -d /tmp/lancedb \
-    && mkdir -p /usr/local/lib /usr/local/include \
-    && cp /tmp/lancedb/liblancedb_go.so /usr/local/lib/ \
-    || echo "ERROR: Failed to download LanceDB library. Check version and URL."
-
 # Install header file
 # We prefer the one from the downloaded zip if available, but fallback/override with local project header
 # to ensure compatibility with the Go code.
 # Assuming build context is 'backend/go-app', 'include/lancedb.h' should be available.
 COPY include/lancedb.h /usr/local/include/
+COPY lib/liblancedb_go.so /usr/local/lib/
 
 # Setup env for CGO
 ENV CGO_ENABLED=1

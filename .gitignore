@@ -30,7 +30,6 @@ wheels/
 *.egg
 backend/worker_transfer/r2s3
 backend/go-app/vendor
-backend/go-app/lib
 
 backend.pid
 frontend.pid
