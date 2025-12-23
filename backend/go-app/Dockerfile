@@ -4,7 +4,7 @@
 # Note: You must provide config.yaml at runtime (e.g., via volume mount to /app/config.yaml)
 
 # Build Stage
-FROM golang:1.23-bookworm AS builder
+FROM golang:1.25-bookworm AS builder
 
 # Install build dependencies
 RUN apt-get update && apt-get install -y \

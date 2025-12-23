@@ -2,102 +2,67 @@
 set -e
 
 # setup_and_run.sh
-# This script sets up and starts the backend and frontend services locally on macOS.
-# It is based on the build steps defined in backend/go-app/Dockerfile and frontend/Dockerfile.
+# This script builds Docker images for the backend and frontend,
+# and starts them as containers.
 
 # Get the absolute path of the project root
 ROOT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
-BACKEND_DIR="$ROOT_DIR/backend/go-app"
-FRONTEND_DIR="$ROOT_DIR/frontend"
+CONFIG_FILE="$ROOT_DIR/config.yaml"
 
 # --- Pre-flight Checks ---
 
 echo ">>> Checking environment..."
 
-if [ "$(uname)" != "Darwin" ]; then
-    echo "Error: This script is designed for macOS (Darwin). Detected: $(uname)"
+if ! command -v docker &> /dev/null; then
+    echo "Error: 'docker' is not installed."
     exit 1
 fi
 
-ARCH=$(uname -m)
-if [ "$ARCH" != "arm64" ]; then
-    echo "Warning: Detected architecture '$ARCH'. This project seems configured for 'arm64' (Apple Silicon)."
-    echo "If you encounter linking errors, ensure you have the correct LanceDB libraries in backend/go-app/lib/darwin_amd64."
-fi
-
-if ! command -v go &> /dev/null; then
-    echo "Error: 'go' is not installed."
-    exit 1
-fi
-
-if ! command -v npm &> /dev/null; then
-    echo "Error: 'npm' is not installed."
-    exit 1
-fi
-
-if [ ! -f "$ROOT_DIR/config.yaml" ]; then
-    echo "Error: config.yaml not found in project root ($ROOT_DIR/config.yaml)."
+if [ ! -f "$CONFIG_FILE" ]; then
+    echo "Error: config.yaml not found in project root ($CONFIG_FILE)."
     echo "Please create it before running this script."
     exit 1
 fi
 
-# --- Backend Setup ---
+# --- Build Images ---
 
-echo ">>> Setting up Backend..."
-cd "$BACKEND_DIR"
+echo ">>> Building Backend Docker Image..."
+# Context is backend/go-app as per Dockerfile comments
+docker build -t unbound-backend "$ROOT_DIR/backend/go-app"
 
-# Configure CGO to use the local LanceDB library
-# This matches the Dockerfile's intent of linking against liblancedb_go,
-# but uses the local 'lib/darwin_arm64' instead of downloading linux libs.
-LIB_PATH="$BACKEND_DIR/lib/darwin_${ARCH}"
-# Fallback to arm64 if the directory exists and we are on something else (or if specific mapping is needed)
-if [ ! -d "$LIB_PATH" ] && [ -d "$BACKEND_DIR/lib/darwin_arm64" ]; then
-    echo "Using darwin_arm64 library path as fallback..."
-    LIB_PATH="$BACKEND_DIR/lib/darwin_arm64"
-fi
+echo ">>> Building Frontend Docker Image..."
+# Context is frontend
+docker build -t unbound-frontend "$ROOT_DIR/frontend"
 
-export CGO_ENABLED=1
-export CGO_CFLAGS="-I$BACKEND_DIR/include"
-export CGO_LDFLAGS="-L$LIB_PATH -Wl,-rpath,$LIB_PATH -llancedb_go"
+# --- Run Containers ---
 
-echo "  CGO_CFLAGS: $CGO_CFLAGS"
-echo "  CGO_LDFLAGS: $CGO_LDFLAGS"
+echo ">>> Starting Backend Container..."
+# Mount config.yaml to /app/config.yaml
+# Run in detached mode first to get ID
+BACKEND_ID=$(docker run -d --rm \
+    -p 8080:8080 \
+    -v "$CONFIG_FILE:/app/config.yaml" \
+    --name unbound-backend-instance \
+    unbound-backend)
 
-echo "  Downloading Go modules..."
-go mod download
+echo "  Backend started with ID: ${BACKEND_ID:0:12}"
 
-echo "  Building Backend binary..."
-go build -o backend_server main.go
+echo ">>> Starting Frontend Container..."
+# Map host port 3000 to container port 80
+FRONTEND_ID=$(docker run -d --rm \
+    -p 3000:80 \
+    --name unbound-frontend-instance \
+    unbound-frontend)
 
-echo "  Starting Backend..."
-./backend_server &
-BACKEND_PID=$!
-echo "  Backend started with PID $BACKEND_PID"
-
-# --- Frontend Setup ---
-
-echo ">>> Setting up Frontend..."
-cd "$FRONTEND_DIR"
-
-echo "  Installing Frontend dependencies..."
-npm install
-
-echo "  Building Frontend..."
-npm run build
-
-echo "  Starting Frontend (Preview Mode)..."
-# Serving on port 3000 to avoid permission issues with port 80
-npm run preview -- --port 3000 &
-FRONTEND_PID=$!
-echo "  Frontend started with PID $FRONTEND_PID at http://localhost:3000"
+echo "  Frontend started with ID: ${FRONTEND_ID:0:12}"
 
 # --- Cleanup Trap ---
 
 cleanup() {
     echo ""
-    echo ">>> Stopping services..."
-    kill $BACKEND_PID 2>/dev/null || true
-    kill $FRONTEND_PID 2>/dev/null || true
+    echo ">>> Stopping containers..."
+    docker stop "$BACKEND_ID" >/dev/null 2>&1 || true
+    docker stop "$FRONTEND_ID" >/dev/null 2>&1 || true
     echo ">>> Stopped."
 }
 
@@ -109,4 +74,8 @@ echo "Backend API: http://localhost:8080"
 echo "Frontend UI: http://localhost:3000"
 echo "Press CTRL+C to stop."
 
-wait
+# Wait for both containers to exit (or script interruption)
+# We wait on the logs to keep the script running and show output
+# This is a bit tricky with two containers. 
+# Simple approach: wait endlessly.
+sleep infinity
