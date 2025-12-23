@@ -31,3 +31,12 @@ storage:
     access_key: "6e17dce5e6699ec405f7ec07deecf321"
     secret_key: "4916026eb627351979f06b898b4f8f67137caba46c39bab83934eb29a97f92ad"
     region: "auto"
+
+lancedb:
+  uri: "s3://test-1358004944"
+  region: "ap-beijing"
+  access_key: "AKID1woW3RgoofNwOgrupZCfz98wZ2Yv9C7u"
+  secret_key: "31qTED7tUtAHF2g9arw5Cey6FJDyrsph"
+  endpoint: "https://cos.ap-beijing.myqcloud.com"
+  force_path_style: false
+  allow_http: false

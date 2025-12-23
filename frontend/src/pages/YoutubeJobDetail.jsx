@@ -24,16 +24,22 @@ const YoutubeJobDetail = () => {
   const fetchRecords = useCallback(async (page = 1, pageSize = 50) => {
     setLoading(true);
     try {
-      const res = await api.get(`/youtube-jobs/${jobId}/records`, {
-        params: { page, size: pageSize }
+      // Use new LanceDB Batch Fetch endpoint
+      const res = await api.post('/tasks/fetch', {
+        job_id: parseInt(jobId),
+        limit: pageSize,
+        offset: (page - 1) * pageSize
       });
-      setRecords(res.data.items);
+      
+      // Backend returns { tasks: [...], total: ... }
+      setRecords(res.data.tasks || []);
       setPagination({
-        current: res.data.page,
-        pageSize: res.data.size,
-        total: res.data.total
+        current: page,
+        pageSize: pageSize,
+        total: res.data.total || 0
       });
     } catch (error) {
+      console.error(error);
       message.error('Failed to load records');
     } finally {
       setLoading(false);
@@ -49,21 +55,17 @@ const YoutubeJobDetail = () => {
   useEffect(() => {
     const interval = setInterval(() => {
         fetchJob();
-        // Poll current page without setting loading state to avoid flicker?
-        // But fetchRecords sets loading. 
-        // Let's create a silent fetch or just accept the flicker for now or modify fetchRecords.
-        // For simplicity, let's just re-fetch. Ideally we separate 'loading' state for initial load vs updates.
-        // But since we are reusing fetchRecords, it will trigger loading.
-        // Let's modify fetchRecords to accept a 'silent' param?
-        // Or just define a separate poll function.
         
-        api.get(`/youtube-jobs/${jobId}/records`, {
-            params: { page: pagination.current, size: pagination.pageSize }
+        // Silent poll for tasks
+        api.post('/tasks/fetch', {
+            job_id: parseInt(jobId),
+            limit: pagination.pageSize,
+            offset: (pagination.current - 1) * pagination.pageSize
         }).then(res => {
-             setRecords(res.data.items);
+             setRecords(res.data.tasks || []);
              setPagination(prev => ({
                 ...prev,
-                total: res.data.total
+                total: res.data.total || 0
              }));
         }).catch(e => console.error(e));
 

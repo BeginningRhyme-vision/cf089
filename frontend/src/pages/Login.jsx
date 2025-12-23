@@ -1,5 +1,5 @@
 import React, { useEffect } from 'react';
-import { Button, Card, Typography, Layout } from 'antd';
+import { Button, Card, Typography, Layout, message } from 'antd';
 import { LoginOutlined } from '@ant-design/icons';
 import api from '../api';
 
@@ -13,8 +13,7 @@ const Login = () => {
       window.location.href = response.data.url;
     } catch (error) {
       console.error('Failed to get login url', error);
-      // Fallback for demo if backend fails or needs mock trigger from UI
-      alert("Ensure backend is running on port 8000");
+      message.error("Failed to connect to login service. Please check your network or contact admin.");
     }
   };
 

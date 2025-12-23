@@ -138,69 +138,70 @@ func main() {
 
 	// List objects
 	srcCh := make(chan Object, 1000)
-	dstCh := make(chan Object, 1000)
+	// dstCh := make(chan Object, 1000)
 	go listObjects(ctx, srcClient, srcCfg, srcCh)
-	go listObjects(ctx, dstClient, dstCfg, dstCh)
-	jobs := make(chan Object, 1000)
-	go func() {
-		defer close(jobs)
-		var dstObj *Object
-		var ok bool
+	// go listObjects(ctx, dstClient, dstCfg, dstCh)
+	// jobs := make(chan Object, 1000)
+	jobs := srcCh
+	// go func() {
+	// 	defer close(jobs)
+	// 	var dstObj *Object
+	// 	var ok bool
 
-		// Initial read for dst
-		val, open := <-dstCh
-		if open {
-			dstObj = &val
-			ok = true
-		}
+	// 	// Initial read for dst
+	// 	val, open := <-dstCh
+	// 	if open {
+	// 		dstObj = &val
+	// 		ok = true
+	// 	}
 
-		for srcObj := range srcCh {
-			atomic.AddInt64(&statsTotal, 1)
-			// We need to advance dstCh until dstObj.RelKey >= srcObj.RelKey
-			for ok && dstObj.RelKey < srcObj.RelKey {
-				// dstObj is extra (exists in dst but not src). We ignore it.
-				val, open := <-dstCh
-				if !open {
-					ok = false
-					dstObj = nil
-				} else {
-					dstObj = &val
-				}
-			}
+	// 	for srcObj := range srcCh {
+	// 		atomic.AddInt64(&statsTotal, 1)
+	// 		// We need to advance dstCh until dstObj.RelKey >= srcObj.RelKey
+	// 		for ok && dstObj.RelKey < srcObj.RelKey {
+	// 			// dstObj is extra (exists in dst but not src). We ignore it.
+	// 			val, open := <-dstCh
+	// 			if !open {
+	// 				ok = false
+	// 				dstObj = nil
+	// 			} else {
+	// 				dstObj = &val
+	// 			}
+	// 		}
 
-			if ok && dstObj != nil && dstObj.RelKey == srcObj.RelKey {
-				if dstObj.Size == srcObj.Size {
-					logger.Debugf("Skipping %s: already exists", srcObj.RelKey)
-					atomic.AddInt64(&statsSkipped, 1)
-					if deleteSrc {
-						wg.Add(1)
-						fileCh <- struct{}{}
-						go func(key string) {
-							defer wg.Done()
-							defer func() { <-fileCh }()
-							deleteObject(srcClient, srcCfg.Bucket, key)
-							atomic.AddInt64(&statsDeleted, 1)
-						}(srcObj.Key)
-					}
-				} else {
-					// Update needed
-					jobs <- srcObj
-				}
-				// Move to next dst
-				val, open := <-dstCh
-				if !open {
-					ok = false
-					dstObj = nil
-				} else {
-					dstObj = &val
-				}
-			} else {
-				// dstObj > srcObj OR dstCh exhausted.
-				// srcObj is new.
-				jobs <- srcObj
-			}
-		}
-	}()
+	// 		if ok && dstObj != nil && dstObj.RelKey == srcObj.RelKey {
+	// 			if dstObj.Size == srcObj.Size {
+	// 				logger.Infof("Skipping %s: already exists", srcObj.RelKey)
+	// 				atomic.AddInt64(&statsSkipped, 1)
+	// 				if deleteSrc {
+	// 					wg.Add(1)
+	// 					fileCh <- struct{}{}
+	// 					go func(key string) {
+	// 						defer wg.Done()
+	// 						defer func() { <-fileCh }()
+	// 						deleteObject(srcClient, srcCfg.Bucket, key)
+	// 						atomic.AddInt64(&statsDeleted, 1)
+	// 					}(srcObj.Key)
+	// 				}
+	// 			} else {
+	// 				// Update needed
+	// 				jobs <- srcObj
+	// 			}
+	// 			// Move to next dst
+	// 			val, open := <-dstCh
+	// 			if !open {
+	// 				ok = false
+	// 				dstObj = nil
+	// 			} else {
+	// 				dstObj = &val
+	// 			}
+	// 		} else {
+	// 			// dstObj > srcObj OR dstCh exhausted.
+	// 			// srcObj is new.
+	// 			jobs <- srcObj
+	// 		}
+	// 	}
+	// }()
 
 	for {
 		obj, ok := <-jobs
@@ -324,7 +325,7 @@ func listObjects(ctx context.Context, client *s3.Client, cfg *S3Config, out chan
 			logger.Errorf("List objects failed: %v", err)
 			return
 		}
-
+		
 		for _, item := range page.Contents {
 			if strings.HasSuffix(*item.Key, "/") {
 				continue // Skip directories if needed
