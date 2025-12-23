@@ -66,7 +66,7 @@ jobs:
           docker build \
             -f Dockerfile-frontend \
             -t "$FULL_IMAGE_NAME" \
-            . 2>&1 | tee docker-build.log
+            . 
 
       # 6. 推送 Docker 镜像到远程仓库
       #    - 推送同一 Tag 的镜像
@@ -77,19 +77,8 @@ jobs:
           echo "推送镜像: $FULL_IMAGE_NAME"
           docker push "$FULL_IMAGE_NAME" 2>&1 | tee docker-push.log
 
-      # 7. 上传构建与推送日志作为构建产物
-      #    - 即使 Job 失败（if: always()），仍会上传日志，方便排查问题
-      - name: 上传构建日志
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: docker-logs-${{ github.sha }}
-          path: |
-            docker-build-frontend.log
-            docker-push-frontend.log
-          retention-days: 7
 
-      # 8. 构建失败时发送通知
+      # 构建失败时发送通知
       #    - 此处以任意 Webhook（如企业微信/飞书/Slack/自建服务）为例
       #    - 用户需要在仓库 Secrets 中配置 NOTIFY_WEBHOOK_URL
       #    - 只在本 Job 失败时触发
