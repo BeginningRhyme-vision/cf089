@@ -25,14 +25,14 @@ type User struct {
 }
 
 type TransferMetadata struct {
-	ID          uint           `gorm:"primaryKey"`
-	ClientName  string         `gorm:"size:255;not null"`
-	Endpoint    string         `gorm:"size:1024;not null"`
-	AK          string         `gorm:"size:255;not null"`
-	SKEncrypted string         `gorm:"column:sk_encrypted;size:1024;not null"`
-	CreatedAt   time.Time      `gorm:"autoCreateTime"`
-	UpdatedAt   time.Time      `gorm:"autoUpdateTime"`
-	Jobs        []TransferJob  `gorm:"foreignKey:MetadataID"`
+	ID          uint           `gorm:"primaryKey" json:"id"`
+	ClientName  string         `gorm:"size:255;not null" json:"client_name"`
+	Endpoint    string         `gorm:"size:1024;not null" json:"endpoint"`
+	AK          string         `gorm:"size:255;not null" json:"ak"`
+	SKEncrypted string         `gorm:"column:sk_encrypted;size:1024;not null" json:"sk_encrypted"`
+	CreatedAt   time.Time      `gorm:"autoCreateTime" json:"created_at"`
+	UpdatedAt   time.Time      `gorm:"autoUpdateTime" json:"updated_at"`
+	Jobs        []TransferJob  `gorm:"foreignKey:MetadataID" json:"jobs"`
 }
 
 func (TransferMetadata) TableName() string {
@@ -40,24 +40,24 @@ func (TransferMetadata) TableName() string {
 }
 
 type TransferJob struct {
-	JobID           uint      `gorm:"primaryKey;column:job_id"`
-	MetadataID      uint      `gorm:"index"`
-	SrcDir          string    `gorm:"size:1024;not null"`
-	DstDir          string    `gorm:"size:1024;not null"`
-	Include         string    `gorm:"size:1024"`
-	Exclude         string    `gorm:"size:1024"`
-	DeleteSource    bool      `gorm:"default:false"`
-	IsIncremental   bool      `gorm:"default:false"`
-	Status          JobStatus `gorm:"type:varchar(50);default:'PENDING'"`
-	StartTime       *time.Time
-	EndTime         *time.Time
-	DurationSeconds int
-	ExecutionCount  int
-	ResultMessage   string    `gorm:"type:text"`
-	CreatedAt       time.Time `gorm:"autoCreateTime"`
-	UpdatedAt       time.Time `gorm:"autoUpdateTime"`
+	JobID           uint      `gorm:"primaryKey;column:job_id" json:"job_id"`
+	MetadataID      uint      `gorm:"index" json:"metadata_id"`
+	SrcDir          string    `gorm:"size:1024;not null" json:"src_dir"`
+	DstDir          string    `gorm:"size:1024;not null" json:"dst_dir"`
+	Include         string    `gorm:"size:1024" json:"include"`
+	Exclude         string    `gorm:"size:1024" json:"exclude"`
+	DeleteSource    bool      `gorm:"default:false" json:"delete_source"`
+	IsIncremental   bool      `gorm:"default:false" json:"is_incremental"`
+	Status          JobStatus `gorm:"type:varchar(50);default:'PENDING'" json:"status"`
+	StartTime       *time.Time `json:"start_time"`
+	EndTime         *time.Time `json:"end_time"`
+	DurationSeconds int        `json:"duration_seconds"`
+	ExecutionCount  int        `json:"execution_count"`
+	ResultMessage   string    `gorm:"type:text" json:"result_message"`
+	CreatedAt       time.Time `gorm:"autoCreateTime" json:"created_at"`
+	UpdatedAt       time.Time `gorm:"autoUpdateTime" json:"updated_at"`
     
-    Metadata        TransferMetadata `gorm:"foreignKey:MetadataID"`
+    Metadata        TransferMetadata `gorm:"foreignKey:MetadataID" json:"metadata"`
 }
 
 func (TransferJob) TableName() string {
@@ -65,15 +65,15 @@ func (TransferJob) TableName() string {
 }
 
 type YoutubeJob struct {
-	ID           uint      `gorm:"primaryKey"`
-	R2Prefix     string    `gorm:"size:1024;not null"`
-	Status       JobStatus `gorm:"type:varchar(50);default:'PENDING'"`
-	TotalCount   int       `gorm:"default:0"`
-	PendingCount int       `gorm:"default:0"`
-	RunningCount int       `gorm:"default:0"`
-	SuccessCount int       `gorm:"default:0"`
-	FailedCount  int       `gorm:"default:0"`
-	CreatedAt    time.Time `gorm:"autoCreateTime"`
+	ID           uint      `gorm:"primaryKey" json:"id"`
+	R2Prefix     string    `gorm:"size:1024;not null" json:"r2_prefix"`
+	Status       JobStatus `gorm:"type:varchar(50);default:'PENDING'" json:"status"`
+	TotalCount   int       `gorm:"default:0" json:"total_count"`
+	PendingCount int       `gorm:"default:0" json:"pending_count"`
+	RunningCount int       `gorm:"default:0" json:"running_count"`
+	SuccessCount int       `gorm:"default:0" json:"success_count"`
+	FailedCount  int       `gorm:"default:0" json:"failed_count"`
+	CreatedAt    time.Time `gorm:"autoCreateTime" json:"created_at"`
 }
 
 func (YoutubeJob) TableName() string {

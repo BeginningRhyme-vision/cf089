@@ -36,10 +36,16 @@ docker build -t unbound-frontend "$ROOT_DIR/frontend"
 
 # --- Run Containers ---
 
+echo ">>> Creating Docker Network..."
+# Create network if it doesn't exist
+docker network create unbound-net 2>/dev/null || true
+
 echo ">>> Starting Backend Container..."
 # Mount config.yaml to /app/config.yaml
 # Run in detached mode first to get ID
 BACKEND_ID=$(docker run -d --rm \
+    --network unbound-net \
+    --network-alias backend \
     -p 8080:8080 \
     -v "$CONFIG_FILE:/app/config.yaml" \
     --name unbound-backend-instance \
@@ -50,6 +56,7 @@ echo "  Backend started with ID: ${BACKEND_ID:0:12}"
 echo ">>> Starting Frontend Container..."
 # Map host port 3000 to container port 80
 FRONTEND_ID=$(docker run -d --rm \
+    --network unbound-net \
     -p 3000:80 \
     --name unbound-frontend-instance \
     unbound-frontend)
