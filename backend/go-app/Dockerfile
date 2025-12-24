@@ -15,6 +15,7 @@ FROM ubuntu:24.04 AS builder
 RUN apt-get update && apt-get install -y \
     curl \
     unzip \
+    wget \
     build-essential \
     ca-certificates \
     && rm -rf /var/lib/apt/lists/*
@@ -35,7 +36,7 @@ ARG TARGETARCH=amd64
 # to ensure compatibility with the Go code.
 # Assuming build context is 'backend/go-app', 'include/lancedb.h' should be available.
 COPY include/lancedb.h /usr/local/include/
-COPY lib/linux_amd64/liblancedb_go.so /usr/local/lib/
+RUN wget https://release.unboundfuture.ai/unbound-admin/liblancedb_go.so && mv liblancedb_go.so /usr/local/lib/
 
 # Setup env for CGO
 ENV CGO_ENABLED=1
