@@ -1,4 +1,4 @@
-name: CI Tag - Docker Build & Push
+name: Frontend CI Tag - Docker Build & Push
 
 on:
   push:
@@ -21,7 +21,10 @@ jobs:
       # 镜像仓库地址（使用 HTTPS，Docker 默认通过 HTTPS 通信）
       REGISTRY: r2-registry-production.cf022.workers.dev
       # 仓库名使用 <owner>/<repo> 形式，保持唯一性
-      IMAGE_NAME: ${{ github.repository }}
+      IMAGE_NAME: ${{ github.repository }}-frontend
+      ARGOCD_REPO: unbound-future/argocd
+      ARGOCD_BRANCH: ${{ vars.ARGOCD_BRANCH }}
+      ARGOCD_FRONTEND_FILE_PATH: ${{ vars.ARGOCD_FRONTEND_FILE_PATH }}
 
     steps:
       # 1. 检出当前仓库代码，用于后续 Docker 构建
@@ -61,7 +64,7 @@ jobs:
       #    - 构建输出通过 tee 记录到日志文件，用于后续问题排查
       - name: 构建 Frontend Docker 镜像
         run: |
-          FULL_IMAGE_NAME="$REGISTRY/$IMAGE_NAME-frontend:$IMAGE_TAG"
+          FULL_IMAGE_NAME="$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
           echo "构建镜像: $FULL_IMAGE_NAME"
           docker build \
             -f Dockerfile-frontend \
@@ -73,9 +76,50 @@ jobs:
       #    - 推送日志同样记录到文件
       - name: 推送 Frontend Docker 镜像
         run: |
-          FULL_IMAGE_NAME="$REGISTRY/$IMAGE_NAME-frontend:$IMAGE_TAG"
+          FULL_IMAGE_NAME="$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
           echo "推送镜像: $FULL_IMAGE_NAME"
-          docker push "$FULL_IMAGE_NAME" 2>&1 | tee docker-push.log
+          docker push "$FULL_IMAGE_NAME" 
+
+      - name: 获取 GitHub App Token
+        uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.GITHUBAPP_ID }}
+          private-key: ${{ secrets.GITHUBAPP_PRIVATE_KEY }}
+          # 如果 ArgoCD 仓库在另一个账号下，请填写 owner
+          owner: ${{ github.repository_owner }} 
+
+      - name: 检出 ArgoCD 仓库
+        uses: actions/checkout@v4
+        with:
+          repository: unbound-future/argocd
+          # 使用上面生成的短效 Token
+          token: ${{ steps.app-token.outputs.token }}
+          ref: ${{ env.ARGOCD_BRANCH }}
+          path: argocd-repo
+
+      - name: 更新镜像并推送到 ArgoCD 仓库
+        run: |
+          FULL_IMAGE_NAME="$REGISTRY/$IMAGE_NAME:$IMAGE_TAG"
+          cd argocd-repo
+          
+          # 1. 直接覆盖整个 image 字段内容
+          yq -i '(.spec.template.spec.containers[] | select(.name == "unbound-future-admin-frontend")).image = strenv(FULL_IMAGE)' "${{ env.ARGOCD_FRONTEND_FILE_PATH }}"
+
+          # 2. 配置 Git 身份
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # 3. 检查是否有实际变更
+          if git diff --exit-code "${{ env.ARGOCD_FRONTEND_FILE_PATH }}"; then
+            echo "文件内容未发生变化，跳过提交。"
+            exit 0
+          fi
+
+          # 4. 提交并推送
+          git add "${{ env.ARGOCD_FRONTEND_FILE_PATH }}"
+          git commit -m "ci: update deployment image to $FULL_IMAGE"
+          git push origin ${{ env.ARGOCD_BRANCH }}
 
 
       # 构建失败时发送通知
