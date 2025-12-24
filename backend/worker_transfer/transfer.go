@@ -1,0 +1,485 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log"
+	"math"
+	"net/http"
+	"os"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
+	awsconfig "github.com/aws/aws-sdk-go-v2/config"
+	"github.com/aws/aws-sdk-go-v2/credentials"
+	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"gopkg.in/yaml.v3"
+)
+
+// Transfer Worker
+// 1. Acquire Tasks (Transfer)
+// 2. Transfer using external service
+
+type Config struct {
+	Storage StorageConfig `yaml:"storage"`
+}
+
+type StorageConfig struct {
+	Src                SrcConfig `yaml:"src"`
+	TransferServiceURL string    `yaml:"transfer_service_url"`
+}
+
+type SrcConfig struct {
+	Endpoint  string `yaml:"endpoint"`
+	AccessKey string `yaml:"access_key"`
+	SecretKey string `yaml:"secret_key"`
+}
+
+type TransferTask struct {
+	ID     int64  `json:"id"`
+	JobID  int64  `json:"job_id"`
+	Src    string `json:"src"`
+	Status string `json:"status"`
+}
+
+type JobInfo struct {
+	JobID    uint             `json:"job_id"`
+	Metadata TransferMetadata `json:"metadata"`
+	DstDir   string           `json:"dst_dir"`
+	SrcDir   string           `json:"src_dir"`
+}
+
+type TransferMetadata struct {
+	Endpoint    string `json:"endpoint"`
+	AK          string `json:"ak"`
+	SKEncrypted string `json:"sk_encrypted"`
+}
+
+var (
+	cfg        *Config
+	apiBaseURL string
+	jobCache   sync.Map // JobID -> JobInfo
+	
+	defaultPartSize int64 = 16 * 1024 * 1024
+	s3Clients  sync.Map // Endpoint -> *s3.Client (Cache for Destinations)
+	srcClient  *s3.Client
+)
+
+const WorkerID = "go-transfer-1"
+
+func main() {
+	loadConfig()
+	apiBaseURL = os.Getenv("BACKEND_API_URL")
+	if apiBaseURL == "" {
+		apiBaseURL = "http://localhost:8080/api"
+	}
+
+	initSourceClient()
+
+	log.Println("Transfer Worker Started")
+
+	for {
+		tasks, err := acquireTasks()
+		if err != nil {
+			log.Printf("Error acquiring tasks: %v", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+
+		if len(tasks) == 0 {
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		log.Printf("Acquired %d tasks", len(tasks))
+		var wg sync.WaitGroup
+		for _, t := range tasks {
+			wg.Add(1)
+			go func(task TransferTask) {
+				defer wg.Done()
+				processTask(task)
+			}(t)
+		}
+		wg.Wait()
+	}
+}
+
+func loadConfig() {
+	paths := []string{"../../config.yaml", "../config.yaml", "config.yaml"}
+	var data []byte
+	var err error
+	for _, p := range paths {
+		data, err = os.ReadFile(p)
+		if err == nil {
+			break
+		}
+	}
+	if data == nil {
+		log.Fatal("Could not find config.yaml")
+	}
+
+	cfg = &Config{}
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		log.Fatalf("Failed to parse config: %v", err)
+	}
+}
+
+func initSourceClient() {
+	var err error
+	srcClient, err = createS3Client(cfg.Storage.Src.Endpoint, cfg.Storage.Src.AccessKey, cfg.Storage.Src.SecretKey)
+	if err != nil {
+		log.Fatalf("Failed to init source client: %v", err)
+	}
+}
+
+func createS3Client(endpoint, ak, sk string) (*s3.Client, error) {
+	r2Resolver := aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
+		return aws.Endpoint{URL: endpoint}, nil
+	})
+
+	c, err := awsconfig.LoadDefaultConfig(context.TODO(),
+		awsconfig.WithEndpointResolverWithOptions(r2Resolver),
+		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(ak, sk, "")),
+		awsconfig.WithRegion("auto"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return s3.NewFromConfig(c, func(o *s3.Options) {
+		o.UsePathStyle = true // Generally generic S3/R2
+	}), nil
+}
+
+func acquireTasks() ([]TransferTask, error) {
+	reqBody, _ := json.Marshal(map[string]interface{}{
+		"worker_id": WorkerID,
+		"limit":     10,
+	})
+
+	resp, err := http.Post(apiBaseURL+"/transfer-tasks/acquire", "application/json", bytes.NewBuffer(reqBody))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	}
+
+	var tasks []TransferTask
+	if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
+func getJobInfo(jobID int64) (*JobInfo, error) {
+	if val, ok := jobCache.Load(jobID); ok {
+		j := val.(JobInfo)
+		return &j, nil
+	}
+
+	resp, err := http.Get(fmt.Sprintf("%s/jobs/%d", apiBaseURL, jobID))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("job fetch failed: %d", resp.StatusCode)
+	}
+
+	var job JobInfo
+	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
+		return nil, err
+	}
+
+	jobCache.Store(jobID, job)
+	return &job, nil
+}
+
+func updateTaskStatus(id int64, status, msg string) {
+	req := TransferTask{
+		ID: id,
+		Status: status,
+	}
+	// Error message handling not in basic struct, but we can assume backend might handle extended fields if added.
+	// For now just Status.
+	
+	wrapper := []TransferTask{req}
+	data, _ := json.Marshal(wrapper)
+	
+	http.Post(apiBaseURL+"/transfer-tasks/update", "application/json", bytes.NewBuffer(data))
+}
+
+func processTask(t TransferTask) {
+	job, err := getJobInfo(t.JobID)
+	if err != nil {
+		updateTaskStatus(t.ID, "FAILED", err.Error())
+		return
+	}
+
+	// 1. Resolve Dst Client
+	// Cache based on Endpoint? Or Metadata ID?
+	// Just use Endpoint+Creds hash?
+	// For simplicity, create new or simple cache.
+	
+	sk := job.Metadata.SKEncrypted
+	if strings.HasPrefix(sk, "enc_") {
+		sk = strings.TrimPrefix(sk, "enc_")
+	}
+	
+	dstClient, err := createS3Client(job.Metadata.Endpoint, job.Metadata.AK, sk)
+	if err != nil {
+		updateTaskStatus(t.ID, "FAILED", "Dst client init failed")
+		return
+	}
+	
+	// 2. Resolve Paths
+	// t.Src is "folder/file.txt" (Key)
+	// Job.SrcDir is "folder"
+	// RelKey = "file.txt"
+	// Job.DstDir is "backup"
+	// DstKey = "backup/file.txt"
+	
+	srcKey := t.Src
+	var relKey string
+	if job.SrcDir != "" {
+		if srcKey == job.SrcDir {
+			// Single file?
+			relKey = "" // handle edge case?
+		} else if strings.HasPrefix(srcKey, job.SrcDir) {
+			relKey = strings.TrimPrefix(srcKey, job.SrcDir)
+			relKey = strings.TrimPrefix(relKey, "/")
+		} else {
+			relKey = srcKey // Fallback
+		}
+	} else {
+		relKey = srcKey
+	}
+	
+	dstKey := relKey
+	if job.DstDir != "" {
+		if dstKey == "" {
+			dstKey = job.DstDir
+		} else {
+			dstKey = strings.TrimSuffix(job.DstDir, "/") + "/" + dstKey
+		}
+	}
+	
+	// 3. Get Object Info (Size) from Src
+	head, err := srcClient.HeadObject(context.TODO(), &s3.HeadObjectInput{
+		Bucket: aws.String(getBucketFromEndpoint(cfg.Storage.Src.Endpoint)),
+		Key:    aws.String(srcKey),
+	})
+	if err != nil {
+		updateTaskStatus(t.ID, "FAILED", "HeadObject failed: "+err.Error())
+		return
+	}
+	size := *head.ContentLength
+	
+	// 4. Construct Public/Presigned URLs for Transfer Service
+	// Src URL (R2)
+	srcBucket := getBucketFromEndpoint(cfg.Storage.Src.Endpoint)
+	// Assuming R2 public or accessible via signed URL?
+	// The `r2s3` tool constructed URL: scheme://bucket.host/key
+	// And assumed credentials were passed to service or pre-signed?
+	// `r2s3` passed `trans_src` which was `https://...` and credentials in Env.
+	// But `worker_downloader` (Youtube) uses presigned/public URLs? 
+	// The `transfer_service` (external) presumably takes R2/S3 URLs + Creds?
+	// `r2s3.go` code: `callExternalService` took `r2Key` and `s3Url`.
+	// It did NOT pass creds in payload. 
+	// It passed creds to the binary via ENV.
+	// The binary logic `callExternalService` uses `r2Key` and `s3Url`.
+	// The service running at `service-url` (localhost:8787/initiate-copy) seems to be a Cloudflare Worker or similar?
+	// If it's a Cloudflare Worker, it might need signed URLs or just public access if allowed.
+	// But `r2s3` binary passed keys.
+	// Wait, the new `transfer.go` is supposed to CALL external service.
+	// `r2s3.go` (original) passed keys to ENV of SUBPROCESS.
+	// But `processObject` called `callExternalService`.
+	// Does `callExternalService` use the env vars? No, it sends HTTP request.
+	// The Service likely relies on `R2Key` and `S3Url` being usable.
+	// If R2 is private, they must be presigned.
+	
+	// Let's presign source and destination?
+	// `downloader.go` presigned DESTINATION.
+	// Here `transfer.go` needs to move from Src to Dst.
+	// We should probably presign BOTH.
+	
+	srcPresignClient := s3.NewPresignClient(srcClient)
+	presignedSrc, err := srcPresignClient.PresignGetObject(context.TODO(), &s3.GetObjectInput{
+		Bucket: aws.String(srcBucket),
+		Key:    aws.String(srcKey),
+	}, s3.WithPresignExpires(24*time.Hour))
+	if err != nil {
+		updateTaskStatus(t.ID, "FAILED", "Presign Src failed")
+		return
+	}
+	
+	// Dst Bucket
+	dstBucket := getBucketFromEndpoint(job.Metadata.Endpoint)
+	
+	// 5. Transfer Loop
+	// If small, 1 chunk. If large, multipart.
+	// Simplified: Delegate to `transferFile`.
+	
+	err = transferFile(presignedSrc.URL, dstClient, dstBucket, dstKey, size, job.Metadata.Endpoint)
+	if err != nil {
+		updateTaskStatus(t.ID, "FAILED", err.Error())
+	} else {
+		updateTaskStatus(t.ID, "COMPLETED", "")
+	}
+}
+
+func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string, size int64, dstEndpoint string) error {
+	if size < defaultPartSize {
+		// Single Put? No, we need to COPY.
+		// If using `transfer_service`, we send `r2Key` (Src URL) and `s3Url` (Dst URL).
+		// We can construct a PRESIGNED PUT for Dest?
+		// `downloader.go` logic used Presigned PUT for Dest.
+		// Let's do that.
+		
+		presignDst := s3.NewPresignClient(dstClient)
+		req, err := presignDst.PresignPutObject(context.TODO(), &s3.PutObjectInput{
+			Bucket: aws.String(dstBucket),
+			Key:    aws.String(dstKey),
+			ContentLength: aws.Int64(size),
+		}, s3.WithPresignExpires(24*time.Hour))
+		if err != nil {
+			return err
+		}
+		
+		_, err = callTransferService(srcURL, req.URL, size, 0, "", -1)
+		return err
+	}
+	
+	// Multipart
+	createOut, err := dstClient.CreateMultipartUpload(context.TODO(), &s3.CreateMultipartUploadInput{
+		Bucket: aws.String(dstBucket),
+		Key:    aws.String(dstKey),
+	})
+	if err != nil { return err }
+	uploadID := *createOut.UploadId
+	
+	numParts := int(math.Ceil(float64(size) / float64(defaultPartSize)))
+	var completedParts []types.CompletedPart
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	errAbort := make(chan error, 1)
+	
+	sem := make(chan struct{}, 4)
+	
+	presignDst := s3.NewPresignClient(dstClient)
+	
+	for i := 0; i < numParts; i++ {
+		start := int64(i) * defaultPartSize
+		end := start + defaultPartSize - 1
+		if end >= size { end = size - 1 }
+		partNum := int32(i + 1)
+		
+		wg.Add(1)
+		go func(pNum int32, s, e int64) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			
+			// Presign Upload Part
+			req, err := presignDst.PresignUploadPart(context.TODO(), &s3.UploadPartInput{
+				Bucket: aws.String(dstBucket),
+				Key:    aws.String(dstKey),
+				UploadId: aws.String(uploadID),
+				PartNumber: aws.Int32(pNum),
+				ContentLength: aws.Int64(e - s + 1),
+			}, s3.WithPresignExpires(24*time.Hour))
+			if err != nil {
+				select { case errAbort <- err: default: }; return
+			}
+			
+			etag, err := callTransferService(srcURL, req.URL, e-s+1, s, uploadID, int(pNum))
+			if err != nil {
+				select { case errAbort <- err: default: }; return
+			}
+			
+			mu.Lock()
+			completedParts = append(completedParts, types.CompletedPart{
+				ETag: aws.String(etag),
+				PartNumber: aws.Int32(pNum),
+			})
+			mu.Unlock()
+		}(partNum, start, end)
+	}
+	
+	wg.Wait()
+	
+	select {
+	case err := <-errAbort:
+		dstClient.AbortMultipartUpload(context.TODO(), &s3.AbortMultipartUploadInput{
+			Bucket: aws.String(dstBucket), Key: aws.String(dstKey), UploadId: aws.String(uploadID),
+		})
+		return err
+	default:
+	}
+	
+	// Sort
+	for i := 0; i < len(completedParts); i++ {
+		for j := i + 1; j < len(completedParts); j++ {
+			if *completedParts[i].PartNumber > *completedParts[j].PartNumber {
+				completedParts[i], completedParts[j] = completedParts[j], completedParts[i]
+			}
+		}
+	}
+	
+	_, err = dstClient.CompleteMultipartUpload(context.TODO(), &s3.CompleteMultipartUploadInput{
+		Bucket: aws.String(dstBucket), Key: aws.String(dstKey), UploadId: aws.String(uploadID),
+		MultipartUpload: &types.CompletedMultipartUpload{Parts: completedParts},
+	})
+	return err
+}
+
+func callTransferService(srcUrl, dstUrl string, size, offset int64, uploadID string, partNum int) (string, error) {
+	// Payload matches r2s3 / downloader logic
+	// But `r2s3` sent `r2Key` and `s3Url`.
+	// We are sending Presigned URLs for both.
+	
+	payload := map[string]interface{}{
+		"r2Key":      srcUrl,
+		"s3Url":      dstUrl,
+		"size":       size,
+		"offset":     offset,
+		"uploadId":   uploadID,
+		"partNumber": partNum,
+	}
+	
+	body, _ := json.Marshal(payload)
+	
+	// Retry
+	for i:=0; i<3; i++ {
+		resp, err := http.Post(cfg.Storage.TransferServiceURL, "application/json", bytes.NewBuffer(body))
+		if err != nil {
+			time.Sleep(1*time.Second)
+			continue
+		}
+		defer resp.Body.Close()
+		
+		if resp.StatusCode == 200 {
+			var res map[string]interface{}
+			json.NewDecoder(resp.Body).Decode(&res)
+			if etag, ok := res["etag"].(string); ok {
+				return etag, nil
+			}
+		}
+		time.Sleep(1*time.Second)
+	}
+	return "", fmt.Errorf("service call failed")
+}
+
+func getBucketFromEndpoint(endpoint string) string {
+	u, _ := http.NewRequest("GET", endpoint, nil)
+	return strings.Trim(u.URL.Path, "/")
+}

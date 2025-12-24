@@ -48,6 +48,8 @@ type TransferJob struct {
 	Exclude         string    `gorm:"size:1024" json:"exclude"`
 	DeleteSource    bool      `gorm:"default:false" json:"delete_source"`
 	IsIncremental   bool      `gorm:"default:false" json:"is_incremental"`
+	PeriodicInterval int      `gorm:"default:0" json:"periodic_interval"` // In seconds. 0 = not periodic
+	LastScanTime    *time.Time `json:"last_scan_time"`
 	Status          JobStatus `gorm:"type:varchar(50);default:'PENDING'" json:"status"`
 	StartTime       *time.Time `json:"start_time"`
 	EndTime         *time.Time `json:"end_time"`

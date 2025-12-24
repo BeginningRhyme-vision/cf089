@@ -17,6 +17,7 @@ import (
 // Global Buffer Manager
 var (
 	jobBuffers = make(map[int64]chan models.YoutubeTask)
+	txJobBuffers = make(map[int64]chan models.TransferTask)
 	bufferMutex sync.RWMutex
 	fillingMap sync.Map // prevent concurrent fills for same job
 )
@@ -34,6 +35,7 @@ func StartBufferService() {
 		ticker := time.NewTicker(1 * time.Second)
 		for range ticker.C {
 			checkAndRefillBuffers()
+			checkAndRefillTxBuffers()
 		}
 	}()
 }
@@ -231,6 +233,11 @@ func BatchUpdate(c *gin.Context) {
                 Member: u.ID,
              })
         }
+
+		// Status Machine Transition: METADATA_FETCHED -> Ready for Download
+		if u.Status == "METADATA_FETCHED" {
+			pipe.RPush(ctx, "queue:youtube:download_ready", u.ID)
+		}
 	}
 
 	_, err := pipe.Exec(ctx)
@@ -240,6 +247,109 @@ func BatchUpdate(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "updated"})
+}
+
+func AcquireTasks(c *gin.Context) {
+	type AcquireRequest struct {
+		WorkerID string `json:"worker_id"`
+		Stage    string `json:"stage"` // "metadata" (default) or "download"
+		Limit    int    `json:"limit"`
+	}
+
+	var req AcquireRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if req.Limit <= 0 {
+		req.Limit = 10
+	}
+	if req.Stage == "" {
+		req.Stage = "metadata"
+	}
+
+	ctx := context.Background()
+	var tasks []models.YoutubeTask
+
+	if req.Stage == "download" {
+		// Pop from download queue
+		// RPopCount is available in newer redis, but let's loop for safety with older go-redis or just RPop
+		// We use a loop with RPOP for now
+		for i := 0; i < req.Limit; i++ {
+			idStr, err := database.RDB.LPop(ctx, "queue:youtube:download_ready").Result()
+			if err == redis.Nil {
+				break
+			}
+			if err != nil {
+				continue
+			}
+			
+			// Fetch task details
+			taskData, err := database.RDB.Get(ctx, fmt.Sprintf("task:%s", idStr)).Result()
+			if err == nil {
+				var t models.YoutubeTask
+				if err := json.Unmarshal([]byte(taskData), &t); err == nil {
+					// Optimization: Check if actually METADATA_FETCHED? 
+					// Ideally yes, but queue implies readiness.
+					tasks = append(tasks, t)
+				}
+			}
+		}
+	} else {
+		// Metadata stage: Round-robin across active job buffers
+		// We need to iterate over map.
+		bufferMutex.RLock()
+		// Get keys
+		var jobIDs []int64
+		for jid := range jobBuffers {
+			jobIDs = append(jobIDs, jid)
+		}
+		bufferMutex.RUnlock()
+
+		if len(jobIDs) == 0 {
+			c.JSON(http.StatusOK, gin.H{"tasks": tasks})
+			return
+		}
+
+		// Simple strategy: Try each job until we have enough tasks
+		for _, jid := range jobIDs {
+			if len(tasks) >= req.Limit {
+				break
+			}
+			
+			bufferMutex.RLock()
+			ch, ok := jobBuffers[jid]
+			bufferMutex.RUnlock()
+			
+			if !ok {
+				continue
+			}
+
+			// Proactive refill
+			if len(ch) < BufferLowWater {
+				triggerRefill(jid)
+			}
+			
+			// Drain what we can
+			loop:
+			for len(tasks) < req.Limit {
+				select {
+				case t := <-ch:
+					// Check if status is PENDING?
+					// The buffer *should* ideally only contain pending, but if we have restarts...
+					// For now assume buffer is raw tasks from ZRange. 
+					// We might want to check status if we want strict PENDING.
+					// But let's assume Python worker handles idempotency.
+					tasks = append(tasks, t)
+				default:
+					break loop
+				}
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, tasks) // Direct array response
 }
 
 func BatchFetch(c *gin.Context) {
@@ -446,8 +556,8 @@ func AddTransferTasksToJob(jobID int64, srcs []string) (int, error) {
 	srcs = uniqueSrcs // Use unique list
 
 	ctx := context.Background()
-	jobKey := fmt.Sprintf("job:%d:tasks", jobID)
-	dedupKey := fmt.Sprintf("job:%d:dedup", jobID) // Hash: Src -> 1 (or TaskID)
+	jobKey := fmt.Sprintf("tx:job:%d:tasks", jobID)
+	dedupKey := fmt.Sprintf("tx:job:%d:dedup", jobID) // Hash: Src -> 1 (or TaskID)
 
 	// 1. Filter out duplicates from Redis
 	// We can use HMGet to check which ones exist, or try to HSetNX in a pipeline.
@@ -483,7 +593,10 @@ func AddTransferTasksToJob(jobID int64, srcs []string) (int, error) {
 	if err != nil || len(lastIDs) == 0 {
 		startID = jobID * 1000000
 	} else {
-		fmt.Sscanf(lastIDs[0], "%d", &startID)
+		// Parse last ID
+		// Redis returns string member
+		var member string = lastIDs[0]
+		fmt.Sscanf(member, "%d", &startID)
 		startID++
 	}
 
@@ -509,7 +622,7 @@ func AddTransferTasksToJob(jobID int64, srcs []string) (int, error) {
 			continue
 		}
 
-		taskKey := fmt.Sprintf("task:%d", task.ID)
+		taskKey := fmt.Sprintf("tx:task:%d", task.ID)
 		pipe.Set(ctx, taskKey, data, 0)
 		pipe.ZAdd(ctx, jobKey, redis.Z{
 			Score:  float64(task.ID),
@@ -525,4 +638,208 @@ func AddTransferTasksToJob(jobID int64, srcs []string) (int, error) {
 	}
 
 	return len(tasks), nil
+}
+
+// --- Transfer Task Buffer Logic ---
+
+func checkAndRefillTxBuffers() {
+	var jobs []models.TransferJob
+	if err := database.DB.Where("status IN ?", []models.JobStatus{models.StatusRunning}).Find(&jobs).Error; err != nil {
+		return
+	}
+
+	for _, job := range jobs {
+		ensureTxBuffer(int64(job.JobID))
+
+		bufferMutex.RLock()
+		ch, exists := txJobBuffers[int64(job.JobID)]
+		bufferMutex.RUnlock()
+
+		if exists && len(ch) < BufferLowWater {
+			triggerTxRefill(int64(job.JobID))
+		}
+	}
+}
+
+func ensureTxBuffer(jobID int64) {
+	bufferMutex.Lock()
+	defer bufferMutex.Unlock()
+	if _, ok := txJobBuffers[jobID]; !ok {
+		txJobBuffers[jobID] = make(chan models.TransferTask, BufferSize)
+	}
+}
+
+func triggerTxRefill(jobID int64) {
+	key := fmt.Sprintf("tx:%d", jobID)
+	if _, filling := fillingMap.Load(key); !filling {
+		fillingMap.Store(key, true)
+		go func(jid int64) {
+			defer fillingMap.Delete(fmt.Sprintf("tx:%d", jid))
+			fillTxJobBuffer(jid)
+		}(jobID)
+	}
+}
+
+func fillTxJobBuffer(jobID int64) {
+	ctx := context.Background()
+	lockKey := fmt.Sprintf("tx:job:%d:lock", jobID)
+
+	ok, err := database.RDB.SetNX(ctx, lockKey, 1, LockExpiration).Result()
+	if err != nil || !ok {
+		return
+	}
+	defer database.RDB.Del(ctx, lockKey)
+
+	offsetKey := fmt.Sprintf("tx:job:%d:offset", jobID)
+	offsetStr, _ := database.RDB.Get(ctx, offsetKey).Result()
+	var offset int64
+	if offsetStr != "" {
+		fmt.Sscanf(offsetStr, "%d", &offset)
+	}
+
+	jobKey := fmt.Sprintf("tx:job:%d:tasks", jobID)
+	start := offset
+	stop := offset + int64(FetchBatchSize) - 1
+
+	ids, err := database.RDB.ZRange(ctx, jobKey, start, stop).Result()
+	if err != nil || len(ids) == 0 {
+		return
+	}
+
+	var keys []string
+	for _, id := range ids {
+		keys = append(keys, fmt.Sprintf("tx:task:%s", id))
+	}
+
+	jsonList, err := database.RDB.MGet(ctx, keys...).Result()
+	if err != nil {
+		return
+	}
+
+	bufferMutex.RLock()
+	ch, exists := txJobBuffers[jobID]
+	bufferMutex.RUnlock()
+
+	if !exists {
+		return
+	}
+
+	count := 0
+	for _, item := range jsonList {
+		if item == nil {
+			continue
+		}
+		str, ok := item.(string)
+		if !ok {
+			continue
+		}
+
+		var task models.TransferTask
+		if err := json.Unmarshal([]byte(str), &task); err == nil {
+			if task.Status != "PENDING" {
+				continue // Skip non-pending in buffer? Or just deliver?
+				// Transfer logic: Usually we only want PENDING.
+				// If status is COMPLETED, skip.
+			}
+			select {
+			case ch <- task:
+				count++
+			default:
+				goto FINISH
+			}
+		}
+	}
+
+FINISH:
+	if count > 0 {
+		newOffset := offset + int64(count)
+		database.RDB.Set(ctx, offsetKey, newOffset, 0)
+	}
+}
+
+func AcquireTransferTasks(c *gin.Context) {
+	type AcquireRequest struct {
+		WorkerID string `json:"worker_id"`
+		Limit    int    `json:"limit"`
+	}
+	var req AcquireRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.Limit <= 0 { req.Limit = 10 }
+
+	var tasks []models.TransferTask
+
+	bufferMutex.RLock()
+	var jobIDs []int64
+	for jid := range txJobBuffers {
+		jobIDs = append(jobIDs, jid)
+	}
+	bufferMutex.RUnlock()
+
+	if len(jobIDs) == 0 {
+		c.JSON(http.StatusOK, tasks)
+		return
+	}
+
+	// Simple round robin or random
+	// Ideally verify Job Status is RUNNING here too, but buffer manager handles removal?
+	// Currently buffer manager doesn't remove keys from map if job stops.
+	// But `checkAndRefill` only checks active jobs.
+	// We might serve stale buffer for stopped jobs. Acceptable for now.
+
+	for _, jid := range jobIDs {
+		if len(tasks) >= req.Limit { break }
+
+		bufferMutex.RLock()
+		ch, ok := txJobBuffers[jid]
+		bufferMutex.RUnlock()
+		if !ok { continue }
+
+		if len(ch) < BufferLowWater {
+			triggerTxRefill(jid)
+		}
+
+		loop:
+		for len(tasks) < req.Limit {
+			select {
+			case t := <-ch:
+				tasks = append(tasks, t)
+			default:
+				break loop
+			}
+		}
+	}
+	c.JSON(http.StatusOK, tasks)
+}
+
+func BatchUpdateTransfer(c *gin.Context) {
+	var updates []models.TransferTask
+	if err := c.ShouldBindJSON(&updates); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	
+	if len(updates) == 0 {
+		c.JSON(http.StatusOK, gin.H{"status": "no updates"})
+		return
+	}
+
+	ctx := context.Background()
+	pipe := database.RDB.Pipeline()
+
+	for _, u := range updates {
+		data, err := json.Marshal(u)
+		if err != nil { continue }
+		
+		pipe.Set(ctx, fmt.Sprintf("tx:task:%d", u.ID), data, 0)
+	}
+
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "updated"})
 }

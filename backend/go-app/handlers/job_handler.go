@@ -68,6 +68,16 @@ func ListTransferJobs(c *gin.Context) {
 	c.JSON(http.StatusOK, jobs)
 }
 
+func GetTransferJob(c *gin.Context) {
+	id := c.Param("id")
+	var job models.TransferJob
+	if err := database.DB.Preload("Metadata").First(&job, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Job not found"})
+		return
+	}
+	c.JSON(http.StatusOK, job)
+}
+
 func StartTransferJob(c *gin.Context) {
 	id := c.Param("id")
 	var job models.TransferJob
@@ -103,24 +113,67 @@ func StopTransferJob(c *gin.Context) {
 	c.JSON(http.StatusOK, job)
 }
 
+func ListPendingTransferJobs(c *gin.Context) {
+	var jobs []models.TransferJob
+	if err := database.DB.Preload("Metadata").
+		Where("status = ?", models.StatusPending).
+		Or("status = ? AND periodic_interval > 0 AND (last_scan_time IS NULL OR last_scan_time < NOW() - make_interval(secs => periodic_interval))", models.StatusRunning).
+		Find(&jobs).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, jobs)
+}
+
+type UpdateJobStatusRequest struct {
+	Status       models.JobStatus `json:"status"`
+	LastScanTime *time.Time       `json:"last_scan_time"`
+}
+
+func UpdateTransferJobStatus(c *gin.Context) {
+	id := c.Param("id")
+	var req UpdateJobStatusRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var job models.TransferJob
+	if err := database.DB.First(&job, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Job not found"})
+		return
+	}
+
+	job.Status = req.Status
+	if req.LastScanTime != nil {
+		job.LastScanTime = req.LastScanTime
+	}
+
+	if err := database.DB.Save(&job).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, job)
+}
+
 func cleanupTransferJobRedis(ctx context.Context, jobID uint) {
 	// 1. Get all task IDs
-	jobKey := fmt.Sprintf("job:%d:tasks", jobID)
+	jobKey := fmt.Sprintf("tx:job:%d:tasks", jobID)
 	
 	taskIDs, err := database.RDB.ZRange(ctx, jobKey, 0, -1).Result()
 	if err == nil && len(taskIDs) > 0 {
 		pipe := database.RDB.Pipeline()
 		for _, tid := range taskIDs {
-			pipe.Del(ctx, fmt.Sprintf("task:%s", tid))
+			pipe.Del(ctx, fmt.Sprintf("tx:task:%s", tid))
 		}
 		pipe.Exec(ctx)
 	}
 
 	// 2. Delete Job Key, metadata and dedup
 	database.RDB.Del(ctx, jobKey)
-	database.RDB.Del(ctx, fmt.Sprintf("job:%d:dedup", jobID))
-	database.RDB.Del(ctx, fmt.Sprintf("job:%d:lock", jobID))
-	database.RDB.Del(ctx, fmt.Sprintf("job:%d:offset", jobID))
+	database.RDB.Del(ctx, fmt.Sprintf("tx:job:%d:dedup", jobID))
+	database.RDB.Del(ctx, fmt.Sprintf("tx:job:%d:lock", jobID))
+	database.RDB.Del(ctx, fmt.Sprintf("tx:job:%d:offset", jobID))
 }
 
 func DeleteTransferJob(c *gin.Context) {
@@ -247,10 +300,10 @@ func CreateYoutubeJob(c *gin.Context) {
 
 func ListYoutubeJobs(c *gin.Context) {
 	var jobs []models.YoutubeJob
-    page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-    limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
-    offset := (page - 1) * limit
-    
+	// page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	// limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
+	// offset := (page - 1) * limit
+
 	c.JSON(http.StatusOK, jobs)
 }
 

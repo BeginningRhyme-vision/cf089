@@ -9,6 +9,8 @@ type YoutubeTask struct {
 	ID           int64     `json:"id"`
 	JobID        int64     `json:"job_id"`
 	URL          string    `json:"url"`
+	AudioURL     string    `json:"audio_url"`
+	VideoURL     string    `json:"video_url"`
 	Status       string    `json:"status"` // PENDING, RUNNING, COMPLETED, FAILED
 	Title        string    `json:"title"`
 	VideoID      string    `json:"video_id"`

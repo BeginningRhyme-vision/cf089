@@ -1,6 +1,8 @@
 module unbound-future-backend
 
-go 1.25.5
+go 1.24.0
+
+toolchain go1.24.1
 
 require (
 	github.com/apache/arrow/go/v17 v17.0.0
@@ -8,7 +10,7 @@ require (
 	github.com/redis/go-redis/v9 v9.17.2
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/postgres v1.6.0
-	gorm.io/gorm v1.31.1
+	gorm.io/gorm v1.25.12
 )
 
 require (

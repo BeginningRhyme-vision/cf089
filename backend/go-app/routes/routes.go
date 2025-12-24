@@ -15,8 +15,11 @@ func SetupRouter() *gin.Engine {
 		{
 			jobs.POST("/", handlers.CreateTransferJob)
 			jobs.GET("/", handlers.ListTransferJobs)
+			jobs.GET("/pending", handlers.ListPendingTransferJobs)
+			jobs.GET("/:id", handlers.GetTransferJob)
 			jobs.POST("/:id/start", handlers.StartTransferJob)
 			jobs.POST("/:id/stop", handlers.StopTransferJob)
+			jobs.PATCH("/:id/status", handlers.UpdateTransferJobStatus)
 			jobs.POST("/:id/tasks", handlers.AddTasksToTransferJob)
 			jobs.DELETE("/:id", handlers.DeleteTransferJob)
 		}
@@ -45,12 +48,18 @@ func SetupRouter() *gin.Engine {
         // Tasks (New Batch Interface)
         tasks := api.Group("/tasks")
         {
-            tasks.POST("/batch", handlers.BatchInsert) // Or just POST / for insert? Plan said "batch_insert" interface.
-            // Using sub-paths to distinguish operations clearly as they are distinct logical "batch" ops
             tasks.POST("/insert", handlers.BatchInsert)
             tasks.POST("/update", handlers.BatchUpdate)
             tasks.POST("/fetch", handlers.BatchFetch)
+            tasks.POST("/acquire", handlers.AcquireTasks)
             tasks.POST("/delete", handlers.BatchDelete)
+        }
+
+        // Transfer Tasks
+        txTasks := api.Group("/transfer-tasks")
+        {
+            txTasks.POST("/acquire", handlers.AcquireTransferTasks)
+            txTasks.POST("/update", handlers.BatchUpdateTransfer)
         }
 	}
 

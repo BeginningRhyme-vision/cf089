@@ -13,6 +13,8 @@ var TaskArrowSchema = arrow.NewSchema(
 		{Name: "id", Type: arrow.PrimitiveTypes.Int64},
 		{Name: "job_id", Type: arrow.PrimitiveTypes.Int64},
 		{Name: "url", Type: arrow.BinaryTypes.String},
+		{Name: "audio_url", Type: arrow.BinaryTypes.String},
+		{Name: "video_url", Type: arrow.BinaryTypes.String},
 		{Name: "status", Type: arrow.BinaryTypes.String},
 		{Name: "title", Type: arrow.BinaryTypes.String},
 		{Name: "video_id", Type: arrow.BinaryTypes.String},
@@ -36,20 +38,24 @@ func ToArrowRecord(tasks []YoutubeTask) (arrow.Record, error) {
 	bID := builder.Field(0).(*array.Int64Builder)
 	bJobID := builder.Field(1).(*array.Int64Builder)
 	bURL := builder.Field(2).(*array.StringBuilder)
-	bStatus := builder.Field(3).(*array.StringBuilder)
-	bTitle := builder.Field(4).(*array.StringBuilder)
-	bVideoID := builder.Field(5).(*array.StringBuilder)
-	bError := builder.Field(6).(*array.StringBuilder)
-	bWorker := builder.Field(7).(*array.StringBuilder)
-	bStarted := builder.Field(8).(*array.TimestampBuilder)
-	bCompleted := builder.Field(9).(*array.TimestampBuilder)
-	bCreated := builder.Field(10).(*array.TimestampBuilder)
-	bUpdated := builder.Field(11).(*array.TimestampBuilder)
+	bAudioURL := builder.Field(3).(*array.StringBuilder)
+	bVideoURL := builder.Field(4).(*array.StringBuilder)
+	bStatus := builder.Field(5).(*array.StringBuilder)
+	bTitle := builder.Field(6).(*array.StringBuilder)
+	bVideoID := builder.Field(7).(*array.StringBuilder)
+	bError := builder.Field(8).(*array.StringBuilder)
+	bWorker := builder.Field(9).(*array.StringBuilder)
+	bStarted := builder.Field(10).(*array.TimestampBuilder)
+	bCompleted := builder.Field(11).(*array.TimestampBuilder)
+	bCreated := builder.Field(12).(*array.TimestampBuilder)
+	bUpdated := builder.Field(13).(*array.TimestampBuilder)
 
 	for _, t := range tasks {
 		bID.Append(t.ID)
 		bJobID.Append(t.JobID)
 		bURL.Append(t.URL)
+		bAudioURL.Append(t.AudioURL)
+		bVideoURL.Append(t.VideoURL)
 		bStatus.Append(t.Status)
 		bTitle.Append(t.Title)
 		bVideoID.Append(t.VideoID)
