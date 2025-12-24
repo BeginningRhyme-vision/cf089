@@ -24,7 +24,8 @@ const YoutubeJobDetail = () => {
   const fetchRecords = useCallback(async (page = 1, pageSize = 50) => {
     setLoading(true);
     try {
-      // Use new LanceDB Batch Fetch endpoint
+              // Use new Batch Fetch endpoint
+      
       const res = await api.post('/tasks/fetch', {
         job_id: parseInt(jobId),
         limit: pageSize,

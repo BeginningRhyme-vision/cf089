@@ -15,6 +15,10 @@ func SetupRouter() *gin.Engine {
 		{
 			jobs.POST("/", handlers.CreateTransferJob)
 			jobs.GET("/", handlers.ListTransferJobs)
+			jobs.POST("/:id/start", handlers.StartTransferJob)
+			jobs.POST("/:id/stop", handlers.StopTransferJob)
+			jobs.POST("/:id/tasks", handlers.AddTasksToTransferJob)
+			jobs.DELETE("/:id", handlers.DeleteTransferJob)
 		}
 
         // Youtube Jobs
@@ -22,6 +26,10 @@ func SetupRouter() *gin.Engine {
         {
             ytJobs.POST("/", handlers.CreateYoutubeJob)
             ytJobs.GET("/", handlers.ListYoutubeJobs)
+            ytJobs.GET("/:id", handlers.GetYoutubeJob)
+            ytJobs.POST("/:id/tasks", handlers.AddTasksToYoutubeJob)
+            ytJobs.DELETE("/pending", handlers.DeletePendingYoutubeJobs)
+            ytJobs.DELETE("/:id", handlers.DeleteYoutubeJob)
         }
         
         // Metadata

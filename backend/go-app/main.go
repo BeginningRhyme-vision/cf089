@@ -5,6 +5,7 @@ import (
 
 	"unbound-future-backend/config"
 	"unbound-future-backend/database"
+	"unbound-future-backend/handlers"
 	"unbound-future-backend/routes"
 )
 
@@ -18,9 +19,12 @@ func main() {
 		log.Fatalf("Failed to init postgres: %v", err)
 	}
 
-	if err := database.InitLanceDB(cfg); err != nil {
-		log.Fatalf("Failed to init lancedb: %v", err)
+	if err := database.InitRedis(cfg); err != nil {
+		log.Fatalf("Failed to init redis: %v", err)
 	}
+
+	// Start background task buffer service
+	handlers.StartBufferService()
 
 	r := routes.SetupRouter()
 

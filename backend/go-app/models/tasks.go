@@ -4,7 +4,7 @@ import (
 	"time"
 )
 
-// YoutubeTask represents a task stored in LanceDB
+// YoutubeTask represents a task
 type YoutubeTask struct {
 	ID           int64     `json:"id"`
 	JobID        int64     `json:"job_id"`
@@ -18,6 +18,17 @@ type YoutubeTask struct {
 	CompletedAt  time.Time `json:"completed_at"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
-    Vector       []float32 `json:"vector,omitempty" lancedb:"vector,128"` // Example vector field if needed, likely not for this task but LanceDB is vector DB. 
-    // If not using vectors, we just use it as a columnar DB.
+}
+
+type TransferTask struct {
+	ID           int64     `json:"id"`
+	JobID        int64     `json:"job_id"`
+	Src          string    `json:"src"`
+	Status       string    `json:"status"` // PENDING, RUNNING, COMPLETED, FAILED
+	ErrorMessage string    `json:"error_message"`
+	WorkerID     string    `json:"worker_id"`
+	StartedAt    time.Time `json:"started_at"`
+	CompletedAt  time.Time `json:"completed_at"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }

@@ -53,9 +53,14 @@ type TransferJob struct {
 	EndTime         *time.Time `json:"end_time"`
 	DurationSeconds int        `json:"duration_seconds"`
 	ExecutionCount  int        `json:"execution_count"`
-	ResultMessage   string    `gorm:"type:text" json:"result_message"`
-	CreatedAt       time.Time `gorm:"autoCreateTime" json:"created_at"`
-	UpdatedAt       time.Time `gorm:"autoUpdateTime" json:"updated_at"`
+	TotalCount      int        `gorm:"default:0" json:"total_count"`
+	PendingCount    int        `gorm:"default:0" json:"pending_count"`
+	RunningCount    int        `gorm:"default:0" json:"running_count"`
+	SuccessCount    int        `gorm:"default:0" json:"success_count"`
+	FailedCount     int        `gorm:"default:0" json:"failed_count"`
+	ResultMessage   string     `gorm:"type:text" json:"result_message"`
+	CreatedAt       time.Time  `gorm:"autoCreateTime" json:"created_at"`
+	UpdatedAt       time.Time  `gorm:"autoUpdateTime" json:"updated_at"`
     
     Metadata        TransferMetadata `gorm:"foreignKey:MetadataID" json:"metadata"`
 }

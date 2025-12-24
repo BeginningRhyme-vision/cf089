@@ -15,17 +15,6 @@ type Config struct {
 	Security SecurityConfig `yaml:"security"`
 	Storage  StorageConfig  `yaml:"storage"`
 	Worker   WorkerConfig   `yaml:"worker"`
-	LanceDB  LanceDBConfig  `yaml:"lancedb"`
-}
-
-type LanceDBConfig struct {
-	URI            string `yaml:"uri"`
-	Region         string `yaml:"region"`
-	AccessKey      string `yaml:"access_key"`
-	SecretKey      string `yaml:"secret_key"`
-	Endpoint       string `yaml:"endpoint"`
-	ForcePathStyle bool   `yaml:"force_path_style"`
-	AllowHTTP      bool   `yaml:"allow_http"`
 }
 
 type AppConfig struct {

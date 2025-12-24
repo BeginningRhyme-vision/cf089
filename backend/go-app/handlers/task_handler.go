@@ -2,38 +2,161 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
+	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/lancedb/lancedb-go/pkg/contracts"
-	lancedb "github.com/lancedb/lancedb-go/pkg/lancedb"
+	"github.com/redis/go-redis/v9"
 	"unbound-future-backend/database"
 	"unbound-future-backend/models"
 )
 
-const TableName = "youtube_tasks"
+// Global Buffer Manager
+var (
+	jobBuffers = make(map[int64]chan models.YoutubeTask)
+	bufferMutex sync.RWMutex
+	fillingMap sync.Map // prevent concurrent fills for same job
+)
 
-func getTable(ctx context.Context) (contracts.ITable, error) {
-	db := database.LanceDB
-    names, err := db.TableNames(ctx)
-    if err != nil {
-        return nil, err
-    }
-    
-    found := false
-    for _, n := range names {
-        if n == TableName {
-            found = true
-            break
-        }
-    }
-    
-    if found {
-        return db.OpenTable(ctx, TableName)
-    }
-    return nil, fmt.Errorf("table not found")
+const (
+	BufferSize     = 1000
+	FetchBatchSize = 100
+	BufferLowWater = 500 // Refill when below this
+	LockExpiration = 30 * time.Second
+)
+
+// StartBufferService initializes the background pre-fetching service
+func StartBufferService() {
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		for range ticker.C {
+			checkAndRefillBuffers()
+		}
+	}()
+}
+
+func checkAndRefillBuffers() {
+	var jobs []models.YoutubeJob
+	// Find active jobs
+	if err := database.DB.Where("status IN ?", []models.JobStatus{models.StatusPending, models.StatusRunning}).Find(&jobs).Error; err != nil {
+		return
+	}
+
+	for _, job := range jobs {
+		ensureBuffer(int64(job.ID))
+
+		bufferMutex.RLock()
+		ch, exists := jobBuffers[int64(job.ID)]
+		bufferMutex.RUnlock()
+
+		if exists && len(ch) < BufferLowWater {
+			triggerRefill(int64(job.ID))
+		}
+	}
+}
+
+func ensureBuffer(jobID int64) {
+	bufferMutex.Lock()
+	defer bufferMutex.Unlock()
+	if _, ok := jobBuffers[jobID]; !ok {
+		jobBuffers[jobID] = make(chan models.YoutubeTask, BufferSize)
+	}
+}
+
+func triggerRefill(jobID int64) {
+	// Trigger refill if not already filling
+	if _, filling := fillingMap.Load(jobID); !filling {
+		fillingMap.Store(jobID, true)
+		go func(jid int64) {
+			defer fillingMap.Delete(jid)
+			fillJobBuffer(jid)
+		}(jobID)
+	}
+}
+
+func fillJobBuffer(jobID int64) {
+	ctx := context.Background()
+	lockKey := fmt.Sprintf("job:%d:lock", jobID)
+
+	// Acquire Lock
+	ok, err := database.RDB.SetNX(ctx, lockKey, 1, LockExpiration).Result()
+	if err != nil || !ok {
+		return // Failed to acquire lock
+	}
+	defer database.RDB.Del(ctx, lockKey)
+
+	// Get Offset
+	offsetKey := fmt.Sprintf("job:%d:offset", jobID)
+	offsetStr, _ := database.RDB.Get(ctx, offsetKey).Result()
+	var offset int64
+	if offsetStr != "" {
+		fmt.Sscanf(offsetStr, "%d", &offset)
+	}
+
+	// Fetch batch from Redis
+	jobKey := fmt.Sprintf("job:%d:tasks", jobID)
+	start := offset
+	stop := offset + int64(FetchBatchSize) - 1
+
+	ids, err := database.RDB.ZRange(ctx, jobKey, start, stop).Result()
+	if err != nil || len(ids) == 0 {
+		return
+	}
+
+	// Fetch details
+	var keys []string
+	for _, id := range ids {
+		keys = append(keys, fmt.Sprintf("task:%s", id))
+	}
+
+	jsonList, err := database.RDB.MGet(ctx, keys...).Result()
+	if err != nil {
+		return
+	}
+
+	// Push to buffer
+	bufferMutex.RLock()
+	ch, exists := jobBuffers[jobID]
+	bufferMutex.RUnlock()
+
+	if !exists {
+		return
+	}
+
+	count := 0
+	for _, item := range jsonList {
+		if item == nil {
+			continue
+		}
+		str, ok := item.(string)
+		if !ok {
+			continue
+		}
+
+		var task models.YoutubeTask
+		if err := json.Unmarshal([]byte(str), &task); err == nil {
+			// Non-blocking send or timeout?
+			// Since we check len < LowWater, there should be space.
+			// But to be safe, use select
+			select {
+			case ch <- task:
+				count++
+			default:
+				// Buffer full, stop filling
+				goto FINISH
+			}
+		}
+	}
+
+FINISH:
+	// Update offset
+	if count > 0 {
+		newOffset := offset + int64(count)
+		database.RDB.Set(ctx, offsetKey, newOffset, 0)
+	}
 }
 
 func BatchInsert(c *gin.Context) {
@@ -43,52 +166,35 @@ func BatchInsert(c *gin.Context) {
 		return
 	}
 
-    if len(tasks) == 0 {
-        c.JSON(http.StatusOK, gin.H{"message": "No tasks to insert"})
-        return
-    }
+	if len(tasks) == 0 {
+		c.JSON(http.StatusOK, gin.H{"message": "No tasks to insert"})
+		return
+	}
 
-	db := database.LanceDB
-    ctx := context.Background()
+	ctx := context.Background()
+	pipe := database.RDB.Pipeline()
 
-    rec, err := models.ToArrowRecord(tasks)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create arrow record: " + err.Error()})
-        return
-    }
-    defer rec.Release()
+	for _, task := range tasks {
+		data, err := json.Marshal(task)
+		if err != nil {
+			continue
+		}
+		
+		taskKey := fmt.Sprintf("task:%d", task.ID)
+		jobKey := fmt.Sprintf("job:%d:tasks", task.JobID)
+		
+		pipe.Set(ctx, taskKey, data, 0)
+		pipe.ZAdd(ctx, jobKey, redis.Z{
+			Score:  float64(task.ID),
+			Member: task.ID,
+		})
+	}
 
-    tbl, err := getTable(ctx)
-    if err != nil {
-        // Table doesn't exist, create it
-        sch, err := lancedb.NewSchema(models.TaskArrowSchema)
-        if err != nil {
-             c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to convert schema: " + err.Error()})
-             return
-        }
-        
-        _, err = db.CreateTable(ctx, TableName, sch)
-        if err != nil {
-            c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create table: " + err.Error()})
-            return
-        }
-        // Re-open
-        tbl, err = getTable(ctx)
-        if err != nil {
-             c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open created table: " + err.Error()})
-             return
-        }
-        
-        if err := tbl.Add(ctx, rec, nil); err != nil {
-             c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add tasks: " + err.Error()})
-             return
-        }
-    } else {
-        if err := tbl.Add(ctx, rec, nil); err != nil {
-             c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add tasks: " + err.Error()})
-             return
-        }
-    }
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save tasks: " + err.Error()})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{"count": len(tasks)})
 }
@@ -100,117 +206,323 @@ func BatchUpdate(c *gin.Context) {
 		return
 	}
 
-    if len(updates) == 0 {
-        c.JSON(http.StatusOK, gin.H{"message": "No updates"})
-        return
-    }
+	if len(updates) == 0 {
+		c.JSON(http.StatusOK, gin.H{"message": "No updates"})
+		return
+	}
 
-    ctx := context.Background()
-    tbl, err := getTable(ctx)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Table not found"})
-        return
-    }
-    
-    var ids []string
-    for _, u := range updates {
-        ids = append(ids, fmt.Sprintf("%d", u.ID))
-    }
-    
-    filter := fmt.Sprintf("id IN (%s)", strings.Join(ids, ","))
-    
-    if err := tbl.Delete(ctx, filter); err != nil {
-         c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete old versions: " + err.Error()})
-         return
-    }
-    
-    rec, err := models.ToArrowRecord(updates)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create arrow record: " + err.Error()})
-        return
-    }
-    defer rec.Release()
-    
-    if err := tbl.Add(ctx, rec, nil); err != nil {
-         c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add updated tasks: " + err.Error()})
-         return
-    }
-    
+	ctx := context.Background()
+	pipe := database.RDB.Pipeline()
+
+	for _, u := range updates {
+		data, err := json.Marshal(u)
+		if err != nil {
+			continue
+		}
+		
+		taskKey := fmt.Sprintf("task:%d", u.ID)
+		pipe.Set(ctx, taskKey, data, 0)
+        // Also ensure it's in the job list if it wasn't for some reason, 
+        // though usually updates are for existing tasks.
+        if u.JobID != 0 {
+             jobKey := fmt.Sprintf("job:%d:tasks", u.JobID)
+             pipe.ZAdd(ctx, jobKey, redis.Z{
+                Score:  float64(u.ID),
+                Member: u.ID,
+             })
+        }
+	}
+
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update tasks: " + err.Error()})
+		return
+	}
+
 	c.JSON(http.StatusOK, gin.H{"status": "updated"})
 }
 
 func BatchFetch(c *gin.Context) {
-    type FetchRequest struct {
-        JobID  int64  `json:"job_id"`
-        Limit  int    `json:"limit"`
-        Offset int    `json:"offset"`
+	type FetchRequest struct {
+		JobID  int64 `json:"job_id"`
+		Limit  int   `json:"limit"`
+		Offset int   `json:"offset"` // Ignored in new logic
+	}
+
+	var req FetchRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Ensure buffer exists (lazy init if not yet created by background)
+	ensureBuffer(req.JobID)
+
+	bufferMutex.RLock()
+	ch, exists := jobBuffers[req.JobID]
+	bufferMutex.RUnlock()
+
+	if !exists {
+		// Should not happen after ensureBuffer
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Buffer initialization failed"})
+		return
+	}
+
+    // Proactive refill trigger
+    if len(ch) < BufferLowWater {
+        triggerRefill(req.JobID)
     }
-    
-    var req FetchRequest
-    if err := c.ShouldBindJSON(&req); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-        return
-    }
-    
-    ctx := context.Background()
-    tbl, err := getTable(ctx)
-    if err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "Table not found"})
-        return
-    }
-    
-    filter := fmt.Sprintf("job_id = %d", req.JobID)
-    
-    results, err := tbl.SelectWithFilter(ctx, filter)
-    if err != nil {
-         c.JSON(http.StatusInternalServerError, gin.H{"error": "Query failed: " + err.Error()})
-         return
-    }
-    
-    start := req.Offset
-    end := start + req.Limit
-    if start > len(results) {
-        start = len(results)
-    }
-    if end > len(results) {
-        end = len(results)
-    }
-    
-    c.JSON(http.StatusOK, gin.H{"tasks": results[start:end], "total": len(results)})
+
+	var tasks []models.YoutubeTask
+
+	// Timeout for initial fetch
+	timeout := time.After(30 * time.Second)
+
+	// 1. Fetch first item (blocking with timeout)
+	select {
+	case t := <-ch:
+		tasks = append(tasks, t)
+	case <-timeout:
+		// Return empty if timed out
+		c.JSON(http.StatusOK, gin.H{"tasks": tasks, "total": 0})
+		return
+	}
+
+	// 2. Fetch remaining up to Limit (non-blocking or short wait)
+	for len(tasks) < req.Limit {
+		select {
+		case t := <-ch:
+			tasks = append(tasks, t)
+		default:
+			// No more items immediately available, return what we have
+			goto RESPONSE
+		}
+	}
+
+RESPONSE:
+    // We could fetch Total from Redis if needed, but for worker queue it might not be critical
+	c.JSON(http.StatusOK, gin.H{"tasks": tasks})
 }
 
 func BatchDelete(c *gin.Context) {
-    type DeleteRequest struct {
-        IDs []int64 `json:"ids"`
-    }
-     var req DeleteRequest
-    if err := c.ShouldBindJSON(&req); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-        return
+	type DeleteRequest struct {
+		IDs []int64 `json:"ids"`
+	}
+	var req DeleteRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	if len(req.IDs) == 0 {
+		c.JSON(http.StatusOK, gin.H{"status": "no ids"})
+		return
+	}
+
+	ctx := context.Background()
+	
+	// First, we need to know which job these tasks belong to, to remove from ZSet.
+	// We can MGet them.
+	var keys []string
+	for _, id := range req.IDs {
+		keys = append(keys, fmt.Sprintf("task:%d", id))
+	}
+    
+    // We handle this in chunks or just MGet all. Assuming reasonable batch size.
+	jsonList, err := database.RDB.MGet(ctx, keys...).Result()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch tasks for deletion: " + err.Error()})
+		return
+	}
+
+    pipe := database.RDB.Pipeline()
+    
+    for i, item := range jsonList {
+        if item == nil {
+            continue
+        }
+        str, ok := item.(string)
+        if !ok {
+            continue
+        }
+        
+        var task models.YoutubeTask
+        if err := json.Unmarshal([]byte(str), &task); err == nil {
+             // Remove from Job ZSet
+             jobKey := fmt.Sprintf("job:%d:tasks", task.JobID)
+             pipe.ZRem(ctx, jobKey, task.ID)
+        }
+        
+        // Remove Task Key
+        pipe.Del(ctx, keys[i])
     }
     
-    if len(req.IDs) == 0 {
-         c.JSON(http.StatusOK, gin.H{"status": "no ids"})
-         return
-    }
-    
-    ctx := context.Background()
-    tbl, err := getTable(ctx)
+    _, err = pipe.Exec(ctx)
     if err != nil {
-        c.JSON(http.StatusNotFound, gin.H{"error": "Table not found"})
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete tasks: " + err.Error()})
         return
     }
-    
-    var ids []string
-    for _, id := range req.IDs {
-        ids = append(ids, fmt.Sprintf("%d", id))
-    }
-    filter := fmt.Sprintf("id IN (%s)", strings.Join(ids, ","))
-    
-    if err := tbl.Delete(ctx, filter); err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Delete failed: " + err.Error()})
-        return
-    }
-    
-    c.JSON(http.StatusOK, gin.H{"status": "deleted"})
+
+	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
+}
+
+// AddTasksToJob adds new tasks to an existing job in Redis
+func AddTasksToJob(jobID int64, urls []string) (int, error) {
+	if len(urls) == 0 {
+		return 0, nil
+	}
+
+	ctx := context.Background()
+	jobKey := fmt.Sprintf("job:%d:tasks", jobID)
+
+	// 1. Determine start ID
+	// Try to get the last ID from ZSet to continue sequence
+	lastIDs, err := database.RDB.ZRevRange(ctx, jobKey, 0, 0).Result()
+	var startID int64
+	if err != nil || len(lastIDs) == 0 {
+		// No tasks yet, use default start
+		startID = jobID * 1000000
+	} else {
+		// Parse last ID
+		// Redis returns string member
+		fmt.Sscanf(lastIDs[0], "%d", &startID)
+		startID++ // Start from next
+	}
+
+	var tasks []models.YoutubeTask
+	now := time.Now()
+
+	// 2. Prepare tasks
+	for i, url := range urls {
+		tasks = append(tasks, models.YoutubeTask{
+			ID:        startID + int64(i),
+			JobID:     jobID,
+			URL:       url,
+			Status:    "PENDING",
+			CreatedAt: now,
+			UpdatedAt: now,
+		})
+	}
+
+	// 3. Pipeline Insert
+	pipe := database.RDB.Pipeline()
+	for _, task := range tasks {
+		data, err := json.Marshal(task)
+		if err != nil {
+			continue
+		}
+
+		taskKey := fmt.Sprintf("task:%d", task.ID)
+		pipe.Set(ctx, taskKey, data, 0)
+		pipe.ZAdd(ctx, jobKey, redis.Z{
+			Score:  float64(task.ID),
+			Member: task.ID,
+		})
+	}
+
+	_, err = pipe.Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	return len(tasks), nil
+}
+
+// AddTransferTasksToJob adds new transfer tasks to an existing job in Redis with deduplication
+func AddTransferTasksToJob(jobID int64, srcs []string) (int, error) {
+	if len(srcs) == 0 {
+		return 0, nil
+	}
+
+	// 0. Dedup input slice in memory
+	uniqueSrcs := make([]string, 0, len(srcs))
+	seen := make(map[string]bool)
+	for _, src := range srcs {
+		if !seen[src] {
+			seen[src] = true
+			uniqueSrcs = append(uniqueSrcs, src)
+		}
+	}
+	srcs = uniqueSrcs // Use unique list
+
+	ctx := context.Background()
+	jobKey := fmt.Sprintf("job:%d:tasks", jobID)
+	dedupKey := fmt.Sprintf("job:%d:dedup", jobID) // Hash: Src -> 1 (or TaskID)
+
+	// 1. Filter out duplicates from Redis
+	// We can use HMGet to check which ones exist, or try to HSetNX in a pipeline.
+	// Since we need to assign IDs only to NEW tasks, checking first or using a script is better.
+	// Simple approach: Filter in memory against Redis.
+	// For large batches, pipeline the checks.
+	
+	// Pipeline exists check
+	checkPipe := database.RDB.Pipeline()
+	for _, src := range srcs {
+		checkPipe.HExists(ctx, dedupKey, src)
+	}
+	results, err := checkPipe.Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	var newSrcs []string
+	for i, res := range results {
+		exists, _ := res.(*redis.BoolCmd).Result()
+		if !exists {
+			newSrcs = append(newSrcs, srcs[i])
+		}
+	}
+
+	if len(newSrcs) == 0 {
+		return 0, nil
+	}
+
+	// 2. Determine start ID
+	lastIDs, err := database.RDB.ZRevRange(ctx, jobKey, 0, 0).Result()
+	var startID int64
+	if err != nil || len(lastIDs) == 0 {
+		startID = jobID * 1000000
+	} else {
+		fmt.Sscanf(lastIDs[0], "%d", &startID)
+		startID++
+	}
+
+	var tasks []models.TransferTask
+	now := time.Now()
+
+	// 3. Prepare tasks and Pipeline Insert
+	pipe := database.RDB.Pipeline()
+	
+	for i, src := range newSrcs {
+		task := models.TransferTask{
+			ID:        startID + int64(i),
+			JobID:     jobID,
+			Src:       src,
+			Status:    "PENDING",
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		tasks = append(tasks, task)
+
+		data, err := json.Marshal(task)
+		if err != nil {
+			continue
+		}
+
+		taskKey := fmt.Sprintf("task:%d", task.ID)
+		pipe.Set(ctx, taskKey, data, 0)
+		pipe.ZAdd(ctx, jobKey, redis.Z{
+			Score:  float64(task.ID),
+			Member: task.ID,
+		})
+		// Add to dedup map
+		pipe.HSet(ctx, dedupKey, src, task.ID)
+	}
+
+	_, err = pipe.Exec(ctx)
+	if err != nil {
+		return 0, err
+	}
+
+	return len(tasks), nil
 }
