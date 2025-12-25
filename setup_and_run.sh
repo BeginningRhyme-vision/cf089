@@ -34,6 +34,12 @@ echo ">>> Building Frontend Docker Image..."
 # Context is frontend
 docker build -t unbound-frontend "$ROOT_DIR/frontend"
 
+echo ">>> Building Worker Downloader Docker Image..."
+docker build -t unbound-worker-downloader "$ROOT_DIR/backend/worker_downloader"
+
+echo ">>> Building Worker Transfer Docker Image..."
+docker build -t unbound-worker-transfer "$ROOT_DIR/backend/worker_transfer"
+
 # --- Run Containers ---
 
 echo ">>> Creating Docker Network..."
@@ -63,6 +69,26 @@ FRONTEND_ID=$(docker run -d --rm \
 
 echo "  Frontend started with ID: ${FRONTEND_ID:0:12}"
 
+echo ">>> Starting Worker Downloader Container..."
+WORKER_DOWNLOADER_ID=$(docker run -d --rm \
+    --network unbound-net \
+    --network-alias worker_downloader \
+    -e BACKEND_API_URL="http://backend:8080/api" \
+    --name unbound-worker-downloader-instance \
+    unbound-worker-downloader)
+
+echo "  Worker Downloader started with ID: ${WORKER_DOWNLOADER_ID:0:12}"
+
+echo ">>> Starting Worker Transfer Container..."
+WORKER_TRANSFER_ID=$(docker run -d --rm \
+    --network unbound-net \
+    --network-alias worker_transfer \
+    -e BACKEND_API_URL="http://backend:8080/api" \
+    --name unbound-worker-transfer-instance \
+    unbound-worker-transfer)
+
+echo "  Worker Transfer started with ID: ${WORKER_TRANSFER_ID:0:12}"
+
 # --- Cleanup Trap ---
 
 cleanup() {
@@ -70,6 +96,8 @@ cleanup() {
     echo ">>> Stopping containers..."
     docker stop "$BACKEND_ID" >/dev/null 2>&1 || true
     docker stop "$FRONTEND_ID" >/dev/null 2>&1 || true
+    docker stop "$WORKER_DOWNLOADER_ID" >/dev/null 2>&1 || true
+    docker stop "$WORKER_TRANSFER_ID" >/dev/null 2>&1 || true
     echo ">>> Stopped."
 }
 
