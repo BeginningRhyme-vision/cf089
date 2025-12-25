@@ -265,15 +265,7 @@ func initSourceS3() (*s3.Client, error) {
 	}
 	baseEndpoint := fmt.Sprintf("%s://%s", u.URL.Scheme, u.URL.Host)
 
-	// Custom Resolver for R2
-	r2Resolver := aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
-		return aws.Endpoint{
-			URL: baseEndpoint,
-		}, nil
-	})
-
 	c, err := awsconfig.LoadDefaultConfig(context.TODO(),
-		awsconfig.WithEndpointResolverWithOptions(r2Resolver),
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
 			cfg.Storage.Src.AccessKey,
 			cfg.Storage.Src.SecretKey,
@@ -286,7 +278,8 @@ func initSourceS3() (*s3.Client, error) {
 	}
 
 	return s3.NewFromConfig(c, func(o *s3.Options) {
-		o.UsePathStyle = true
+		o.BaseEndpoint = aws.String(baseEndpoint)
+		o.UsePathStyle = false
 	}), nil
 }
 

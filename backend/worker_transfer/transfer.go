@@ -145,12 +145,7 @@ func createS3Client(endpoint, ak, sk string) (*s3.Client, error) {
 	}
 	baseEndpoint := fmt.Sprintf("%s://%s", u.URL.Scheme, u.URL.Host)
 
-	r2Resolver := aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
-		return aws.Endpoint{URL: baseEndpoint}, nil
-	})
-
 	c, err := awsconfig.LoadDefaultConfig(context.TODO(),
-		awsconfig.WithEndpointResolverWithOptions(r2Resolver),
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(ak, sk, "")),
 		awsconfig.WithRegion("auto"),
 	)
@@ -159,8 +154,19 @@ func createS3Client(endpoint, ak, sk string) (*s3.Client, error) {
 	}
 
 	return s3.NewFromConfig(c, func(o *s3.Options) {
-		o.UsePathStyle = true // Generally generic S3/R2
+		o.BaseEndpoint = aws.String(baseEndpoint)
+		o.UsePathStyle = false 
 	}), nil
+}
+
+func calculatePartSize(size int64) int64 {
+	partSize := defaultPartSize
+	// Max parts is 10000 for S3
+	if size > partSize*10000 {
+		partSize = size / 10000
+		partSize = ((partSize-1)>>20 + 1) << 20 // align to MB
+	}
+	return partSize
 }
 
 func acquireTasks() ([]TransferTask, error) {
@@ -374,7 +380,9 @@ func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string,
 	if err != nil { return err }
 	uploadID := *createOut.UploadId
 	
-	numParts := int(math.Ceil(float64(size) / float64(defaultPartSize)))
+	partSize := calculatePartSize(size)
+	numParts := int((size-1)/partSize) + 1
+
 	var completedParts []types.CompletedPart
 	var mu sync.Mutex
 	var wg sync.WaitGroup
@@ -385,8 +393,8 @@ func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string,
 	presignDst := s3.NewPresignClient(dstClient)
 	
 	for i := 0; i < numParts; i++ {
-		start := int64(i) * defaultPartSize
-		end := start + defaultPartSize - 1
+		start := int64(i) * partSize
+		end := start + partSize - 1
 		if end >= size { end = size - 1 }
 		partNum := int32(i + 1)
 		
