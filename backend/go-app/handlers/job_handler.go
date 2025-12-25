@@ -48,7 +48,11 @@ func CreateTransferJob(c *gin.Context) {
 	// Async add tasks
 	if len(req.Tasks) > 0 {
 		go func(jobID uint, tasks []string) {
-			_, err := AddTransferTasksToJob(int64(jobID), tasks)
+			var inputs []TransferTaskInput
+			for _, t := range tasks {
+				inputs = append(inputs, TransferTaskInput{Src: t, Size: 0})
+			}
+			_, err := AddTransferTasksToJob(int64(jobID), inputs)
 			if err != nil {
 				fmt.Printf("Error adding tasks for transfer job %d: %v\n", jobID, err)
 			}
@@ -195,6 +199,10 @@ func DeleteTransferJob(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
 }
 
+type AddTransferTasksRequest struct {
+	Tasks []TransferTaskInput `json:"tasks"`
+}
+
 func AddTasksToTransferJob(c *gin.Context) {
 	idStr := c.Param("id")
 	id, err := strconv.Atoi(idStr)
@@ -203,7 +211,7 @@ func AddTasksToTransferJob(c *gin.Context) {
 		return
 	}
 
-	var req AddTasksRequest // Reusing existing struct as it is just { tasks: []string }
+	var req AddTransferTasksRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return

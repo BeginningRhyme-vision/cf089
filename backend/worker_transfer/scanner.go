@@ -159,6 +159,11 @@ func updateJobStatus(jobID uint, status string, lastScanTime *time.Time) error {
 	return nil
 }
 
+type TransferTaskInput struct {
+	Src  string `json:"src"`
+	Size int64  `json:"size"`
+}
+
 func processJob(job TransferJob) {
 	startTime := time.Now()
 	jobJSON, _ := json.Marshal(job)
@@ -188,7 +193,7 @@ func processJob(job TransferJob) {
 		Prefix: aws.String(prefix),
 	})
 
-	var batch []string
+	var batch []TransferTaskInput
 	count := 0
 	skipped := 0
 	pages := 0
@@ -217,7 +222,12 @@ func processJob(job TransferJob) {
 				}
 			}
 
-			batch = append(batch, key)
+			var size int64
+			if obj.Size != nil {
+				size = *obj.Size
+			}
+
+			batch = append(batch, TransferTaskInput{Src: key, Size: size})
 			if len(batch) >= 1000 {
 				if err := sendBatch(job.JobID, batch); err != nil {
 					log.Printf("Failed to send batch for job %d: %v", job.JobID, err)
@@ -245,7 +255,7 @@ func processJob(job TransferJob) {
 	}
 }
 
-func sendBatch(jobID uint, tasks []string) error {
+func sendBatch(jobID uint, tasks []TransferTaskInput) error {
 	payload := map[string]interface{}{
 		"tasks": tasks,
 	}

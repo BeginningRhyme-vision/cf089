@@ -44,6 +44,7 @@ type TransferTask struct {
 	ID     int64  `json:"id"`
 	JobID  int64  `json:"job_id"`
 	Src    string `json:"src"`
+	Size   int64  `json:"size"`
 	Status string `json:"status"`
 }
 
@@ -292,16 +293,20 @@ func processTask(t TransferTask) {
 	
 	// 3. Get Object Info (Size) from Src
 	srcBucket := getBucketFromEndpoint(cfg.Storage.Src.Endpoint)
-	head, err := srcClient.HeadObject(context.TODO(), &s3.HeadObjectInput{
-		Bucket: aws.String(srcBucket),
-		Key:    aws.String(srcKey),
-	})
-	if err != nil {
-		log.Printf("HeadObject failed for %s/%s: %v", srcBucket, srcKey, err)
-		updateTaskStatus(t.ID, "FAILED", "HeadObject failed: "+err.Error())
-		return
+	size := t.Size
+	
+	if size == 0 {
+		head, err := srcClient.HeadObject(context.TODO(), &s3.HeadObjectInput{
+			Bucket: aws.String(srcBucket),
+			Key:    aws.String(srcKey),
+		})
+		if err != nil {
+			log.Printf("HeadObject failed for %s/%s: %v", srcBucket, srcKey, err)
+			updateTaskStatus(t.ID, "FAILED", "HeadObject failed: "+err.Error())
+			return
+		}
+		size = *head.ContentLength
 	}
-	size := *head.ContentLength
 	
 	// 4. Construct Public/Presigned URLs for Transfer Service
 	srcPresignClient := s3.NewPresignClient(srcClient)

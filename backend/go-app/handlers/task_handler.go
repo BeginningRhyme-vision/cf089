@@ -538,52 +538,52 @@ func AddTasksToJob(jobID int64, urls []string) (int, error) {
 	return len(tasks), nil
 }
 
+type TransferTaskInput struct {
+	Src  string `json:"src"`
+	Size int64  `json:"size"`
+}
+
 // AddTransferTasksToJob adds new transfer tasks to an existing job in Redis with deduplication
-func AddTransferTasksToJob(jobID int64, srcs []string) (int, error) {
-	if len(srcs) == 0 {
+func AddTransferTasksToJob(jobID int64, inputs []TransferTaskInput) (int, error) {
+	if len(inputs) == 0 {
 		return 0, nil
 	}
 
 	// 0. Dedup input slice in memory
-	uniqueSrcs := make([]string, 0, len(srcs))
+	uniqueInputs := make([]TransferTaskInput, 0, len(inputs))
 	seen := make(map[string]bool)
-	for _, src := range srcs {
-		if !seen[src] {
-			seen[src] = true
-			uniqueSrcs = append(uniqueSrcs, src)
+	for _, input := range inputs {
+		if !seen[input.Src] {
+			seen[input.Src] = true
+			uniqueInputs = append(uniqueInputs, input)
 		}
 	}
-	srcs = uniqueSrcs // Use unique list
+	inputs = uniqueInputs // Use unique list
 
 	ctx := context.Background()
 	jobKey := fmt.Sprintf("tx:job:%d:tasks", jobID)
 	dedupKey := fmt.Sprintf("tx:job:%d:dedup", jobID) // Hash: Src -> 1 (or TaskID)
 
 	// 1. Filter out duplicates from Redis
-	// We can use HMGet to check which ones exist, or try to HSetNX in a pipeline.
-	// Since we need to assign IDs only to NEW tasks, checking first or using a script is better.
-	// Simple approach: Filter in memory against Redis.
-	// For large batches, pipeline the checks.
-	
 	// Pipeline exists check
 	checkPipe := database.RDB.Pipeline()
-	for _, src := range srcs {
-		checkPipe.HExists(ctx, dedupKey, src)
+	for _, input := range inputs {
+		checkPipe.HExists(ctx, dedupKey, input.Src)
 	}
 	results, err := checkPipe.Exec(ctx)
 	if err != nil {
 		return 0, err
 	}
 
-	var newSrcs []string
+	var newInputs []TransferTaskInput
 	for i, res := range results {
 		exists, _ := res.(*redis.BoolCmd).Result()
 		if !exists {
-			newSrcs = append(newSrcs, srcs[i])
+			newInputs = append(newInputs, inputs[i])
 		}
 	}
 
-	if len(newSrcs) == 0 {
+	if len(newInputs) == 0 {
 		return 0, nil
 	}
 
@@ -606,11 +606,12 @@ func AddTransferTasksToJob(jobID int64, srcs []string) (int, error) {
 	// 3. Prepare tasks and Pipeline Insert
 	pipe := database.RDB.Pipeline()
 	
-	for i, src := range newSrcs {
+	for i, input := range newInputs {
 		task := models.TransferTask{
 			ID:        startID + int64(i),
 			JobID:     jobID,
-			Src:       src,
+			Src:       input.Src,
+			Size:      input.Size,
 			Status:    "PENDING",
 			CreatedAt: now,
 			UpdatedAt: now,
@@ -629,7 +630,7 @@ func AddTransferTasksToJob(jobID int64, srcs []string) (int, error) {
 			Member: task.ID,
 		})
 		// Add to dedup map
-		pipe.HSet(ctx, dedupKey, src, task.ID)
+		pipe.HSet(ctx, dedupKey, input.Src, task.ID)
 	}
 
 	_, err = pipe.Exec(ctx)

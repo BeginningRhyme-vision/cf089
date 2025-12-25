@@ -26,6 +26,7 @@ type TransferTask struct {
 	ID           int64     `json:"id"`
 	JobID        int64     `json:"job_id"`
 	Src          string    `json:"src"`
+	Size         int64     `json:"size"`
 	Status       string    `json:"status"` // PENDING, RUNNING, COMPLETED, FAILED
 	ErrorMessage string    `json:"error_message"`
 	WorkerID     string    `json:"worker_id"`
