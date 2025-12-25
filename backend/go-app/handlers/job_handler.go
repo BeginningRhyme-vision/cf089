@@ -1,10 +1,12 @@
 package handlers
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -302,39 +304,84 @@ func AddTasksToTransferJob(c *gin.Context) {
 // --- Youtube Jobs ---
 
 type CreateYoutubeJobRequest struct {
-    R2Prefix string   `json:"r2_prefix"`
-    Tasks    []string `json:"tasks"` // List of URLs
+	R2Prefix string   `json:"r2_prefix" form:"r2_prefix"`
+	Tasks    []string `json:"tasks" form:"-"` // List of URLs
 }
 
 func CreateYoutubeJob(c *gin.Context) {
-    var req CreateYoutubeJobRequest
-    if err := c.ShouldBindJSON(&req); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-        return
-    }
-    
-    // 1. Create Job in PG
-    job := models.YoutubeJob{
-        R2Prefix: req.R2Prefix,
-        Status: models.StatusPending,
-        TotalCount: len(req.Tasks),
-        PendingCount: len(req.Tasks),
-    }
-    
-    if err := database.DB.Create(&job).Error; err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create job in PG: " + err.Error()})
-        return
-    }
-    
-    // 2. Create Tasks in Redis (Sync to ensure order/consistency)
-    if len(req.Tasks) > 0 {
-        _, err := AddTasksToJob(int64(job.ID), req.Tasks)
-        if err != nil {
-            fmt.Printf("Error adding tasks to Redis for job %d: %v\n", job.ID, err)
-        }
-    }
-    
-    c.JSON(http.StatusCreated, job)
+	var req CreateYoutubeJobRequest
+
+	contentType := c.GetHeader("Content-Type")
+
+	if strings.Contains(contentType, "application/json") {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	} else if strings.Contains(contentType, "multipart/form-data") {
+		req.R2Prefix = c.PostForm("r2_prefix")
+
+		// Handle file upload
+		file, err := c.FormFile("file")
+		if err == nil {
+			f, err := file.Open()
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open file"})
+				return
+			}
+			defer f.Close()
+
+			scanner := bufio.NewScanner(f)
+			for scanner.Scan() {
+				line := strings.TrimSpace(scanner.Text())
+				if line != "" {
+					req.Tasks = append(req.Tasks, line)
+				}
+			}
+			if err := scanner.Err(); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read file: " + err.Error()})
+				return
+			}
+		}
+
+		// Handle manual tasks from form field
+		manualTasks := c.PostForm("tasks")
+		if manualTasks != "" {
+			lines := strings.Split(manualTasks, "\n")
+			for _, line := range lines {
+				trimmed := strings.TrimSpace(line)
+				if trimmed != "" {
+					req.Tasks = append(req.Tasks, trimmed)
+				}
+			}
+		}
+	} else {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Unsupported Content-Type"})
+		return
+	}
+
+	// 1. Create Job in PG
+	job := models.YoutubeJob{
+		R2Prefix:     req.R2Prefix,
+		Status:       models.StatusPending,
+		TotalCount:   len(req.Tasks),
+		PendingCount: len(req.Tasks),
+	}
+
+	if err := database.DB.Create(&job).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create job in PG: " + err.Error()})
+		return
+	}
+
+	// 2. Create Tasks in Redis (Sync to ensure order/consistency)
+	if len(req.Tasks) > 0 {
+		_, err := AddTasksToJob(int64(job.ID), req.Tasks)
+		if err != nil {
+			fmt.Printf("Error adding tasks to Redis for job %d: %v\n", job.ID, err)
+		}
+	}
+
+	c.JSON(http.StatusCreated, job)
 }
 
 func ListYoutubeJobs(c *gin.Context) {
@@ -411,8 +458,38 @@ func AddTasksToYoutubeJob(c *gin.Context) {
 	}
 
 	var req AddTasksRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	contentType := c.GetHeader("Content-Type")
+
+	if strings.Contains(contentType, "application/json") {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+	} else if strings.Contains(contentType, "multipart/form-data") {
+		// Handle file upload
+		file, err := c.FormFile("file")
+		if err == nil {
+			f, err := file.Open()
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open file"})
+				return
+			}
+			defer f.Close()
+
+			scanner := bufio.NewScanner(f)
+			for scanner.Scan() {
+				line := strings.TrimSpace(scanner.Text())
+				if line != "" {
+					req.Tasks = append(req.Tasks, line)
+				}
+			}
+			if err := scanner.Err(); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read file: " + err.Error()})
+				return
+			}
+		}
+	} else {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Unsupported Content-Type"})
 		return
 	}
 

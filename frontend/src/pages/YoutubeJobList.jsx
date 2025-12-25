@@ -34,34 +34,39 @@ const YoutubeJobList = () => {
     try {
       const values = await form.validateFields();
       
-      let tasks = [];
-      
-      // Parse URLs from text area
-      if (values.urls) {
-        const textUrls = values.urls.split('\n').map(u => u.trim()).filter(u => u.length > 0);
-        tasks = [...tasks, ...textUrls];
-      }
-      
-      // Parse URLs from file if uploaded
+      // If file is present, use Multipart/Form-Data
       if (fileList.length > 0) {
-         const file = fileList[0];
-         const text = await file.text(); // Browser API to read file
-         const fileUrls = text.split(/\r?\n/).map(u => u.trim()).filter(u => u.length > 0);
-         tasks = [...tasks, ...fileUrls];
+        const formData = new FormData();
+        formData.append('r2_prefix', values.r2_prefix);
+        formData.append('file', fileList[0]);
+        if (values.urls) {
+            formData.append('tasks', values.urls);
+        }
+
+        await api.post('/youtube-jobs/', formData);
+      } else {
+        // Use JSON
+        let tasks = [];
+        
+        // Parse URLs from text area
+        if (values.urls) {
+            const textUrls = values.urls.split('\n').map(u => u.trim()).filter(u => u.length > 0);
+            tasks = [...tasks, ...textUrls];
+        }
+
+        if (tasks.length === 0) {
+            message.error('Please enter URLs or upload a file containing URLs');
+            return;
+        }
+
+        const payload = {
+            r2_prefix: values.r2_prefix,
+            tasks: tasks
+        };
+
+        await api.post('/youtube-jobs/', payload);
       }
 
-      if (tasks.length === 0) {
-         message.error('Please enter URLs or upload a file containing URLs');
-         return;
-      }
-
-      // Send as JSON matching Go backend: type CreateYoutubeJobRequest struct { R2Prefix, Tasks }
-      const payload = {
-          r2_prefix: values.r2_prefix,
-          tasks: tasks
-      };
-
-      await api.post('/youtube-jobs/', payload);
       message.success('Job(s) created');
       setIsModalOpen(false);
       form.resetFields();
