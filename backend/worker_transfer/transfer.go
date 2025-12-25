@@ -67,6 +67,11 @@ type cachedJob struct {
 	expiry time.Time
 }
 
+type JobStatsDelta struct {
+	Success int
+	Failed  int
+}
+
 var (
 	cfg        *Config
 	apiBaseURL string
@@ -75,6 +80,9 @@ var (
 	defaultPartSize int64 = 16 * 1024 * 1024
 	s3Clients  sync.Map // Endpoint -> *s3.Client (Cache for Destinations)
 	srcClient  *s3.Client
+
+	statsBuffer = make(map[int64]*JobStatsDelta)
+	statsMutex  sync.Mutex
 )
 
 const WorkerID = "go-transfer-1"
@@ -87,6 +95,7 @@ func main() {
 	}
 
 	initSourceClient()
+	initStatsFlusher()
 
 	log.Println("Transfer Worker Started")
 
@@ -116,158 +125,78 @@ func main() {
 	}
 }
 
-func loadConfig() {
-	paths := []string{"../../config.yaml", "../config.yaml", "config.yaml"}
-	var data []byte
-	var err error
-	for _, p := range paths {
-		data, err = os.ReadFile(p)
-		if err == nil {
-			break
+func initStatsFlusher() {
+	go func() {
+		ticker := time.NewTicker(3 * time.Second)
+		for range ticker.C {
+			flushStats()
+		}
+	}()
+}
+
+func flushStats() {
+	statsMutex.Lock()
+	if len(statsBuffer) == 0 {
+		statsMutex.Unlock()
+		return
+	}
+	
+	snapshot := make(map[int64]JobStatsDelta)
+	for k, v := range statsBuffer {
+		if v.Success > 0 || v.Failed > 0 {
+			snapshot[k] = *v
 		}
 	}
-	if data == nil {
-		log.Fatal("Could not find config.yaml")
-	}
+	// Reset buffer
+	statsBuffer = make(map[int64]*JobStatsDelta)
+	statsMutex.Unlock()
 
-	cfg = &Config{}
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		log.Fatalf("Failed to parse config: %v", err)
-	}
-}
-
-func initSourceClient() {
-	var err error
-	srcClient, err = createS3Client(cfg.Storage.Src.Endpoint, cfg.Storage.Src.AccessKey, cfg.Storage.Src.SecretKey)
-	if err != nil {
-		log.Fatalf("Failed to init source client: %v", err)
+	for jobID, delta := range snapshot {
+		sendJobStatsUpdate(jobID, delta.Success, delta.Failed)
 	}
 }
 
-func createS3Client(endpoint, ak, sk string) (*s3.Client, error) {
-	// Normalize endpoint to http/https as AWS SDK BaseEndpoint requires a web URI
-	normalized := endpoint
-	isS3 := strings.HasPrefix(endpoint, "s3://")
-	if isS3 {
-		normalized = "http://" + strings.TrimPrefix(endpoint, "s3://")
+func updateJobStats(jobID int64, incSuccess, incFailed int) {
+	if incSuccess == 0 && incFailed == 0 {
+		return
 	}
-	if !strings.Contains(normalized, "://") {
-		normalized = "http://" + normalized
+	statsMutex.Lock()
+	defer statsMutex.Unlock()
+	
+	if _, ok := statsBuffer[jobID]; !ok {
+		statsBuffer[jobID] = &JobStatsDelta{}
 	}
-
-	u, err := url.Parse(normalized)
-	if err != nil {
-		return nil, err
-	}
-
-	host := u.Host
-	if isS3 {
-		parts := strings.SplitN(u.Host, ".", 2)
-		if len(parts) == 2 {
-			host = parts[1]
-		}
-	}
-
-	baseEndpoint := fmt.Sprintf("%s://%s", u.Scheme, host)
-
-	c, err := awsconfig.LoadDefaultConfig(context.TODO(),
-		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(ak, sk, "")),
-		awsconfig.WithRegion("auto"),
-	)
-	if err != nil {
-		return nil, err
-	}
-
-	return s3.NewFromConfig(c, func(o *s3.Options) {
-		o.BaseEndpoint = aws.String(baseEndpoint)
-		o.UsePathStyle = false 
-	}), nil
+	statsBuffer[jobID].Success += incSuccess
+	statsBuffer[jobID].Failed += incFailed
 }
 
-func calculatePartSize(size int64) int64 {
-	partSize := defaultPartSize
-	// Max parts is 10000 for S3
-	if size > partSize*10000 {
-		partSize = size / 10000
-		partSize = ((partSize-1)>>20 + 1) << 20 // align to MB
+func sendJobStatsUpdate(jobID int64, incSuccess, incFailed int) {
+	payload := map[string]interface{}{
+		"inc_success": incSuccess,
+		"inc_failed":  incFailed,
 	}
-	return partSize
-}
+	data, _ := json.Marshal(payload)
 
-func acquireTasks() ([]TransferTask, error) {
-	reqBody, _ := json.Marshal(map[string]interface{}{
-		"worker_id": WorkerID,
-		"limit":     1024,
-	})
+	req, _ := http.NewRequest("PATCH", fmt.Sprintf("%s/jobs/%d/status", apiBaseURL, jobID), bytes.NewBuffer(data))
+	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.Post(apiBaseURL+"/transfer-tasks/acquire", "application/json", bytes.NewBuffer(reqBody))
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, err
+		log.Printf("Failed to update job stats for job %d: %v", jobID, err)
+		return
 	}
 	defer resp.Body.Close()
-
 	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("status %d", resp.StatusCode)
+		log.Printf("Failed to update job stats for job %d: status %d", jobID, resp.StatusCode)
 	}
-
-	var tasks []TransferTask
-	if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
-		return nil, err
-	}
-	return tasks, nil
-}
-
-func getJobInfo(jobID int64) (*JobInfo, error) {
-	now := time.Now()
-	if val, ok := jobCache.Load(jobID); ok {
-		cj := val.(cachedJob)
-		if now.Before(cj.expiry) {
-			return &cj.info, nil
-		}
-	}
-
-	resp, err := http.Get(fmt.Sprintf("%s/jobs/%d", apiBaseURL, jobID))
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("job fetch failed: %d", resp.StatusCode)
-	}
-
-	var job JobInfo
-	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
-		return nil, err
-	}
-
-	// Cache for 30 seconds
-	jobCache.Store(jobID, cachedJob{
-		info:   job,
-		expiry: now.Add(30 * time.Second),
-	})
-	return &job, nil
-}
-
-func updateTaskStatus(id int64, status, msg string) {
-	req := TransferTask{
-		ID: id,
-		Status: status,
-	}
-	// Error message handling not in basic struct, but we can assume backend might handle extended fields if added.
-	// For now just Status.
-	
-	wrapper := []TransferTask{req}
-	data, _ := json.Marshal(wrapper)
-	
-	http.Post(apiBaseURL+"/transfer-tasks/update", "application/json", bytes.NewBuffer(data))
 }
 
 func processTask(t TransferTask) {
 	job, err := getJobInfo(t.JobID)
 	if err != nil {
 		log.Printf("Failed to get job info for task %d: %v", t.ID, err)
-		updateTaskStatus(t.ID, "FAILED", err.Error())
+		updateTaskStatus(t, "FAILED", err.Error())
+		updateJobStats(t.JobID, 0, 1)
 		return
 	}
 
@@ -285,7 +214,8 @@ func processTask(t TransferTask) {
 	dstClient, err := createS3Client(job.Metadata.Endpoint, job.Metadata.AK, sk)
 	if err != nil {
 		log.Printf("Dst client init failed for task %d: %v", t.ID, err)
-		updateTaskStatus(t.ID, "FAILED", "Dst client init failed")
+		updateTaskStatus(t, "FAILED", "Dst client init failed")
+		updateJobStats(t.JobID, 0, 1)
 		return
 	}
 	
@@ -325,7 +255,8 @@ func processTask(t TransferTask) {
 		})
 		if err != nil {
 			log.Printf("HeadObject failed for %s/%s: %v", srcBucket, srcKey, err)
-			updateTaskStatus(t.ID, "FAILED", "HeadObject failed: "+err.Error())
+			updateTaskStatus(t, "FAILED", "HeadObject failed: "+err.Error())
+			updateJobStats(t.JobID, 0, 1)
 			return
 		}
 		size = *head.ContentLength
@@ -335,7 +266,8 @@ func processTask(t TransferTask) {
 	srcUrl, err := constructVirtualHostURL(cfg.Storage.Src.Endpoint, srcBucket, srcKey)
 	if err != nil {
 		log.Printf("Failed to construct Src URL for task %d: %v", t.ID, err)
-		updateTaskStatus(t.ID, "FAILED", "Construct Src URL failed")
+		updateTaskStatus(t, "FAILED", "Construct Src URL failed")
+		updateJobStats(t.JobID, 0, 1)
 		return
 	}
 	
@@ -346,7 +278,8 @@ func processTask(t TransferTask) {
 	err = transferFile(srcUrl, dstClient, dstBucket, dstKey, size, job.Metadata.Endpoint)
 	if err != nil {
 		log.Printf("Transfer failed for task %d: %v", t.ID, err)
-		updateTaskStatus(t.ID, "FAILED", err.Error())
+		updateTaskStatus(t, "FAILED", err.Error())
+		updateJobStats(t.JobID, 0, 1)
 	} else {
 		log.Printf("Task %d completed successfully", t.ID)
 		
@@ -362,7 +295,8 @@ func processTask(t TransferTask) {
 			}
 		}
 
-		updateTaskStatus(t.ID, "COMPLETED", "")
+		updateTaskStatus(t, "COMPLETED", "")
+		updateJobStats(t.JobID, 1, 0)
 	}
 }
 
@@ -393,7 +327,7 @@ func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string,
 	var wg sync.WaitGroup
 	errAbort := make(chan error, 1)
 	
-	sem := make(chan struct{}, 4)
+	sem := make(chan struct{}, 1024)
 	
 	for i := 0; i < numParts; i++ {
 		start := int64(i) * partSize
@@ -532,4 +466,174 @@ func constructVirtualHostURL(endpointStr, bucket, key string) (string, error) {
 	
 	// r2s3 style: fmt.Sprintf("%s://%s.%s/%s", u.Scheme, srcCfg.Bucket, u.Host, obj.Key)
 	return fmt.Sprintf("%s://%s.%s/%s", u.Scheme, bucket, host, key), nil
+}
+
+// Implementations of missing functions
+
+func loadConfig() {
+	paths := []string{"../../config.yaml", "../config.yaml", "config.yaml"}
+	var data []byte
+	var err error
+	for _, p := range paths {
+		data, err = os.ReadFile(p)
+		if err == nil {
+			break
+		}
+	}
+	if data == nil {
+		log.Fatal("Could not find config.yaml")
+	}
+
+	cfg = &Config{}
+	if err := yaml.Unmarshal(data, cfg); err != nil {
+		log.Fatalf("Failed to parse config: %v", err)
+	}
+}
+
+func initSourceClient() {
+	c, err := createS3Client(cfg.Storage.Src.Endpoint, cfg.Storage.Src.AccessKey, cfg.Storage.Src.SecretKey)
+	if err != nil {
+		log.Fatalf("Failed to init source client: %v", err)
+	}
+	srcClient = c
+}
+
+func createS3Client(endpoint, ak, sk string) (*s3.Client, error) {
+	normalized := endpoint
+	isS3 := strings.HasPrefix(normalized, "s3://")
+	if isS3 {
+		normalized = "http://" + strings.TrimPrefix(normalized, "s3://")
+	}
+	if !strings.Contains(normalized, "://") {
+		normalized = "http://" + normalized
+	}
+
+	u, err := url.Parse(normalized)
+	if err != nil {
+		return nil, err
+	}
+
+	host := u.Host
+	if isS3 {
+		parts := strings.SplitN(u.Host, ".", 2)
+		if len(parts) == 2 {
+			host = parts[1]
+		}
+	}
+
+	baseEndpoint := fmt.Sprintf("%s://%s", u.Scheme, host)
+
+	c, err := awsconfig.LoadDefaultConfig(context.TODO(),
+		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(ak, sk, "")),
+		awsconfig.WithRegion("auto"),
+	)
+	if err != nil {
+		return nil, err
+	}
+
+	return s3.NewFromConfig(c, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(baseEndpoint)
+		o.UsePathStyle = false
+	}), nil
+}
+
+func acquireTasks() ([]TransferTask, error) {
+	payload := map[string]interface{}{
+		"worker_id": WorkerID,
+		"limit":     100,
+	}
+	data, _ := json.Marshal(payload)
+
+	resp, err := http.Post(apiBaseURL+"/transfer-tasks/acquire", "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	}
+
+	var tasks []TransferTask
+	if err := json.NewDecoder(resp.Body).Decode(&tasks); err != nil {
+		return nil, err
+	}
+	return tasks, nil
+}
+
+func getJobInfo(jobID int64) (*JobInfo, error) {
+	// Check cache
+	if val, ok := jobCache.Load(jobID); ok {
+		cj := val.(cachedJob)
+		if time.Now().Before(cj.expiry) {
+			return &cj.info, nil
+		}
+	}
+
+	resp, err := http.Get(fmt.Sprintf("%s/jobs/%d", apiBaseURL, jobID))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	}
+
+	var job TransferJobStruct
+	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
+		return nil, err
+	}
+
+	// Map backend model to JobInfo
+	info := JobInfo{
+		JobID:    job.JobID,
+		Metadata: job.Metadata,
+		DstDir:   job.DstDir,
+		SrcDir:   job.SrcDir,
+		DeleteSource: job.DeleteSource,
+	}
+
+	jobCache.Store(jobID, cachedJob{info: info, expiry: time.Now().Add(1 * time.Minute)})
+	return &info, nil
+}
+
+// Temporary struct to match backend response for getJobInfo
+type TransferJobStruct struct {
+	JobID        uint             `json:"job_id"`
+	Metadata     TransferMetadata `json:"metadata"`
+	DstDir       string           `json:"dst_dir"`
+	SrcDir       string           `json:"src_dir"`
+	DeleteSource bool             `json:"delete_source"`
+}
+
+func updateTaskStatus(t TransferTask, status string, msg string) {
+	t.Status = status
+	// msg is ignored by backend currently unless we add a field for it, 
+	// but let's send it anyway? No, backend models.TransferTask doesn't have Msg.
+	// We can ignore msg for now or log it.
+	
+	payload := []TransferTask{t}
+	data, _ := json.Marshal(payload)
+
+	resp, err := http.Post(apiBaseURL+"/transfer-tasks/update", "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		log.Printf("Failed to update status for task %d: %v", t.ID, err)
+		return
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		log.Printf("Failed to update status for task %d: status %d", t.ID, resp.StatusCode)
+	}
+}
+
+func calculatePartSize(size int64) int64 {
+	// Max parts: 10000
+	minPartSize := int64(5 * 1024 * 1024) // 5MB
+	
+	partSize := size / 10000
+	if partSize < minPartSize {
+		partSize = minPartSize
+	}
+	return partSize
 }

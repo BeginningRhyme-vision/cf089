@@ -235,12 +235,6 @@ func processJob(job TransferJob) {
 				}
 			}
 
-			if job.IsIncremental && job.LastScanTime != nil && obj.LastModified != nil {
-				if !obj.LastModified.After(*job.LastScanTime) {
-					skipped++
-					continue
-				}
-			}
 
 			var size int64
 			if obj.Size != nil {

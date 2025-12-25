@@ -135,8 +135,11 @@ func ListPendingTransferJobs(c *gin.Context) {
 }
 
 type UpdateJobStatusRequest struct {
-	Status       models.JobStatus `json:"status"`
-	LastScanTime *time.Time       `json:"last_scan_time"`
+	Status        models.JobStatus `json:"status"`
+	LastScanTime  *time.Time       `json:"last_scan_time"`
+	ResultMessage string           `json:"result_message"`
+	IncSuccess    int              `json:"inc_success"`
+	IncFailed     int              `json:"inc_failed"`
 }
 
 func UpdateTransferJobStatus(c *gin.Context) {
@@ -153,15 +156,36 @@ func UpdateTransferJobStatus(c *gin.Context) {
 		return
 	}
 
-	job.Status = req.Status
+	updates := make(map[string]interface{})
+	if req.Status != "" {
+		updates["status"] = req.Status
+	}
 	if req.LastScanTime != nil {
-		job.LastScanTime = req.LastScanTime
+		updates["last_scan_time"] = req.LastScanTime
+	}
+	if req.ResultMessage != "" {
+		updates["result_message"] = req.ResultMessage
 	}
 
-	if err := database.DB.Save(&job).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
+	if len(updates) > 0 {
+		if err := database.DB.Model(&job).Updates(updates).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
 	}
+
+	// Atomic counter updates
+	if req.IncSuccess > 0 || req.IncFailed > 0 {
+		totalDec := req.IncSuccess + req.IncFailed
+		err := database.DB.Exec("UPDATE transfer_jobs SET success_count = success_count + ?, failed_count = failed_count + ?, pending_count = GREATEST(0, pending_count - ?) WHERE job_id = ?", req.IncSuccess, req.IncFailed, totalDec, id).Error
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
+	// Reload job to return latest state
+	database.DB.First(&job, id)
 	c.JSON(http.StatusOK, job)
 }
 
