@@ -81,6 +81,17 @@ WORKER_DOWNLOADER_ID=$(docker run -d --rm \
 
 echo "  Worker Downloader started with ID: ${WORKER_DOWNLOADER_ID:0:12}"
 
+echo ">>> Starting Worker Metadata Container..."
+WORKER_METADATA_ID=$(docker run -d --rm \
+    --network unbound-net \
+    --network-alias worker_metadata \
+    -e BACKEND_API_URL="http://backend:8080/api" \
+    -v "$CONFIG_FILE:/app/config.yaml" \
+    --name unbound-worker-metadata-instance \
+    unbound-worker-downloader)
+
+echo "  Worker Metadata started with ID: ${WORKER_METADATA_ID:0:12}"
+
 echo ">>> Starting Worker Transfer Container..."
 WORKER_TRANSFER_ID=$(docker run -d --rm \
     --network unbound-net \
@@ -113,6 +124,7 @@ cleanup() {
     docker stop "$BACKEND_ID" >/dev/null 2>&1 || true
     docker stop "$FRONTEND_ID" >/dev/null 2>&1 || true
     docker stop "$WORKER_DOWNLOADER_ID" >/dev/null 2>&1 || true
+    docker stop "$WORKER_METADATA_ID" >/dev/null 2>&1 || true
     docker stop "$WORKER_TRANSFER_ID" >/dev/null 2>&1 || true
     docker stop "$WORKER_SCANNER_ID" >/dev/null 2>&1 || true
     echo ">>> Stopped."
