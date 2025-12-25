@@ -160,11 +160,10 @@ func updateJobStatus(jobID uint, status string, lastScanTime *time.Time) error {
 
 func processJob(job TransferJob) {
 	startTime := time.Now()
-	log.Printf("Processing Job %d (Src: %s, Periodic: %v, Incremental: %v, LastScan: %v)", 
-		job.JobID, job.SrcDir, job.PeriodicInterval > 0, job.IsIncremental, job.LastScanTime)
+	jobJSON, _ := json.Marshal(job)
+	log.Printf("Processing Job: %s", string(jobJSON))
 
-	// 1. Update status to RUNNING (if not already, or to confirm heartbeat)
-	// We don't update LastScanTime here, we wait until we finish the scan.
+	// 1. Update status to RUNNING
 	if err := updateJobStatus(job.JobID, "RUNNING", nil); err != nil {
 		log.Printf("Failed to set RUNNING for job %d: %v", job.JobID, err)
 		return
@@ -173,39 +172,44 @@ func processJob(job TransferJob) {
 	// 2. Init S3 Source Client
 	s3Client, err := initSourceS3()
 	if err != nil {
-		log.Printf("Failed to init S3: %v", err)
+		log.Printf("Failed to init S3 for job %d: %v", job.JobID, err)
 		updateJobStatus(job.JobID, "FAILED", nil)
 		return
 	}
 
 	// 3. List and Batch Insert
+	bucketName := getBucketFromEndpoint(cfg.Storage.Src.Endpoint)
+	prefix := job.SrcDir
+	log.Printf("Listing objects for job %d in bucket '%s' with prefix '%s'", job.JobID, bucketName, prefix)
+
 	paginator := s3.NewListObjectsV2Paginator(s3Client, &s3.ListObjectsV2Input{
-		Bucket: aws.String(getBucketFromEndpoint(cfg.Storage.Src.Endpoint)),
-		Prefix: aws.String(job.SrcDir),
+		Bucket: aws.String(bucketName),
+		Prefix: aws.String(prefix),
 	})
 
 	var batch []string
 	count := 0
 	skipped := 0
+	pages := 0
 
 	for paginator.HasMorePages() {
+		pages++
+		log.Printf("Requesting page %d for job %d...", pages, job.JobID)
 		page, err := paginator.NextPage(context.TODO())
 		if err != nil {
-			log.Printf("List failed: %v", err)
-			break
+			log.Printf("ListObjectsV2 failed for job %d on page %d: %v", job.JobID, pages, err)
+			updateJobStatus(job.JobID, "FAILED", nil) // Mark as failed on list error
+			return
 		}
 
+		log.Printf("Page %d for job %d contained %d objects.", pages, job.JobID, len(page.Contents))
 		for _, obj := range page.Contents {
 			key := *obj.Key
 			if strings.HasSuffix(key, "/") {
 				continue
 			}
 
-			// Incremental Check
 			if job.IsIncremental && job.LastScanTime != nil && obj.LastModified != nil {
-				// If object hasn't been modified since last scan, skip it.
-				// We use .After to be safe, or !Before?
-				// If ModTime <= LastScanTime -> Skip.
 				if !obj.LastModified.After(*job.LastScanTime) {
 					skipped++
 					continue
@@ -215,7 +219,7 @@ func processJob(job TransferJob) {
 			batch = append(batch, key)
 			if len(batch) >= 1000 {
 				if err := sendBatch(job.JobID, batch); err != nil {
-					log.Printf("Failed to send batch: %v", err)
+					log.Printf("Failed to send batch for job %d: %v", job.JobID, err)
 				}
 				count += len(batch)
 				batch = nil
@@ -225,18 +229,17 @@ func processJob(job TransferJob) {
 
 	if len(batch) > 0 {
 		if err := sendBatch(job.JobID, batch); err != nil {
-			log.Printf("Failed to send final batch: %v", err)
+			log.Printf("Failed to send final batch for job %d: %v", job.JobID, err)
 		}
 		count += len(batch)
 	}
 
-	log.Printf("Job %d scanned. New tasks: %d, Skipped (old): %d", job.JobID, count, skipped)
-	
+	log.Printf("Job %d scanned. Total pages: %d. New tasks: %d, Skipped (old): %d", job.JobID, pages, count, skipped)
+
 	if job.PeriodicInterval > 0 {
 		updateJobStatus(job.JobID, "RUNNING", &startTime)
 		log.Printf("Job %d is periodic. Next scan in %d seconds.", job.JobID, job.PeriodicInterval)
 	} else {
-		// Scanned tasks, mark COMPLETED. Update LastScanTime for future incremental runs.
 		updateJobStatus(job.JobID, "COMPLETED", &startTime)
 	}
 }
