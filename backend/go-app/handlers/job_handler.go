@@ -31,6 +31,11 @@ func CreateTransferJob(c *gin.Context) {
 	job := req.TransferJob
 	job.Status = models.StatusPending
 	
+	// If Incremental is selected but no interval is provided, default to 60s to ensure it acts as a periodic monitor
+	if job.IsIncremental && job.PeriodicInterval <= 0 {
+		job.PeriodicInterval = 60
+	}
+	
 	// Initial counts
 	job.TotalCount = len(req.Tasks)
 	job.PendingCount = len(req.Tasks)
