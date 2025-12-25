@@ -91,7 +91,7 @@ func main() {
 		}
 
 		if len(tasks) == 0 {
-			time.Sleep(2 * time.Second)
+			time.Sleep(60 * time.Second)
 			continue
 		}
 
@@ -171,7 +171,7 @@ func calculatePartSize(size int64) int64 {
 func acquireTasks() ([]TransferTask, error) {
 	reqBody, _ := json.Marshal(map[string]interface{}{
 		"worker_id": WorkerID,
-		"limit":     10,
+		"limit":     1024,
 	})
 
 	resp, err := http.Post(apiBaseURL+"/transfer-tasks/acquire", "application/json", bytes.NewBuffer(reqBody))
@@ -233,15 +233,17 @@ func updateTaskStatus(id int64, status, msg string) {
 func processTask(t TransferTask) {
 	job, err := getJobInfo(t.JobID)
 	if err != nil {
+		log.Printf("Failed to get job info for task %d: %v", t.ID, err)
 		updateTaskStatus(t.ID, "FAILED", err.Error())
 		return
 	}
 
+	srcDir := strings.TrimSpace(job.SrcDir)
+	dstDir := strings.TrimSpace(job.DstDir)
+
+	log.Printf("Processing Task %d (Job %d): %s -> %s", t.ID, t.JobID, t.Src, dstDir)
+
 	// 1. Resolve Dst Client
-	// Cache based on Endpoint? Or Metadata ID?
-	// Just use Endpoint+Creds hash?
-	// For simplicity, create new or simple cache.
-	
 	sk := job.Metadata.SKEncrypted
 	if strings.HasPrefix(sk, "enc_") {
 		sk = strings.TrimPrefix(sk, "enc_")
@@ -249,102 +251,71 @@ func processTask(t TransferTask) {
 	
 	dstClient, err := createS3Client(job.Metadata.Endpoint, job.Metadata.AK, sk)
 	if err != nil {
+		log.Printf("Dst client init failed for task %d: %v", t.ID, err)
 		updateTaskStatus(t.ID, "FAILED", "Dst client init failed")
 		return
 	}
 	
 	// 2. Resolve Paths
-	// t.Src is "folder/file.txt" (Key)
-	// Job.SrcDir is "folder"
-	// RelKey = "file.txt"
-	// Job.DstDir is "backup"
-	// DstKey = "backup/file.txt"
-	
 	srcKey := t.Src
 	var relKey string
-	if job.SrcDir != "" {
-		if srcKey == job.SrcDir {
-			// Single file?
-			relKey = "" // handle edge case?
-		} else if strings.HasPrefix(srcKey, job.SrcDir) {
-			relKey = strings.TrimPrefix(srcKey, job.SrcDir)
+	if srcDir != "" {
+		if srcKey == srcDir {
+			relKey = ""
+		} else if strings.HasPrefix(srcKey, srcDir) {
+			relKey = strings.TrimPrefix(srcKey, srcDir)
 			relKey = strings.TrimPrefix(relKey, "/")
 		} else {
-			relKey = srcKey // Fallback
+			relKey = srcKey
 		}
 	} else {
 		relKey = srcKey
 	}
 	
 	dstKey := relKey
-	if job.DstDir != "" {
+	if dstDir != "" {
 		if dstKey == "" {
-			dstKey = job.DstDir
+			dstKey = dstDir
 		} else {
-			dstKey = strings.TrimSuffix(job.DstDir, "/") + "/" + dstKey
+			dstKey = strings.TrimSuffix(dstDir, "/") + "/" + dstKey
 		}
 	}
 	
 	// 3. Get Object Info (Size) from Src
+	srcBucket := getBucketFromEndpoint(cfg.Storage.Src.Endpoint)
 	head, err := srcClient.HeadObject(context.TODO(), &s3.HeadObjectInput{
-		Bucket: aws.String(getBucketFromEndpoint(cfg.Storage.Src.Endpoint)),
+		Bucket: aws.String(srcBucket),
 		Key:    aws.String(srcKey),
 	})
 	if err != nil {
+		log.Printf("HeadObject failed for %s/%s: %v", srcBucket, srcKey, err)
 		updateTaskStatus(t.ID, "FAILED", "HeadObject failed: "+err.Error())
 		return
 	}
 	size := *head.ContentLength
 	
 	// 4. Construct Public/Presigned URLs for Transfer Service
-	// Src URL (R2)
-	srcBucket := getBucketFromEndpoint(cfg.Storage.Src.Endpoint)
-	// Assuming R2 public or accessible via signed URL?
-	// The `r2s3` tool constructed URL: scheme://bucket.host/key
-	// And assumed credentials were passed to service or pre-signed?
-	// `r2s3` passed `trans_src` which was `https://...` and credentials in Env.
-	// But `worker_downloader` (Youtube) uses presigned/public URLs? 
-	// The `transfer_service` (external) presumably takes R2/S3 URLs + Creds?
-	// `r2s3.go` code: `callExternalService` took `r2Key` and `s3Url`.
-	// It did NOT pass creds in payload. 
-	// It passed creds to the binary via ENV.
-	// The binary logic `callExternalService` uses `r2Key` and `s3Url`.
-	// The service running at `service-url` (localhost:8787/initiate-copy) seems to be a Cloudflare Worker or similar?
-	// If it's a Cloudflare Worker, it might need signed URLs or just public access if allowed.
-	// But `r2s3` binary passed keys.
-	// Wait, the new `transfer.go` is supposed to CALL external service.
-	// `r2s3.go` (original) passed keys to ENV of SUBPROCESS.
-	// But `processObject` called `callExternalService`.
-	// Does `callExternalService` use the env vars? No, it sends HTTP request.
-	// The Service likely relies on `R2Key` and `S3Url` being usable.
-	// If R2 is private, they must be presigned.
-	
-	// Let's presign source and destination?
-	// `downloader.go` presigned DESTINATION.
-	// Here `transfer.go` needs to move from Src to Dst.
-	// We should probably presign BOTH.
-	
 	srcPresignClient := s3.NewPresignClient(srcClient)
 	presignedSrc, err := srcPresignClient.PresignGetObject(context.TODO(), &s3.GetObjectInput{
 		Bucket: aws.String(srcBucket),
 		Key:    aws.String(srcKey),
 	}, s3.WithPresignExpires(24*time.Hour))
 	if err != nil {
+		log.Printf("Presign Src failed for task %d: %v", t.ID, err)
 		updateTaskStatus(t.ID, "FAILED", "Presign Src failed")
 		return
 	}
 	
-	// Dst Bucket
 	dstBucket := getBucketFromEndpoint(job.Metadata.Endpoint)
+	log.Printf("Task %d: Transferring %d bytes to bucket '%s' key '%s'", t.ID, size, dstBucket, dstKey)
 	
 	// 5. Transfer Loop
-	// If small, 1 chunk. If large, multipart.
-	// Simplified: Delegate to `transferFile`.
-	
 	err = transferFile(presignedSrc.URL, dstClient, dstBucket, dstKey, size, job.Metadata.Endpoint)
 	if err != nil {
+		log.Printf("Transfer failed for task %d: %v", t.ID, err)
 		updateTaskStatus(t.ID, "FAILED", err.Error())
 	} else {
+		log.Printf("Task %d completed successfully", t.ID)
 		updateTaskStatus(t.ID, "COMPLETED", "")
 	}
 }
