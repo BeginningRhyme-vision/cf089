@@ -149,7 +149,8 @@ func updateJobStatus(jobID uint, status string, lastScanTime *time.Time, msg str
 	req := UpdateStatusRequest{Status: status, LastScanTime: lastScanTime, ResultMessage: msg}
 	data, _ := json.Marshal(req)
 
-	reqObj, _ := http.NewRequest("PATCH", fmt.Sprintf("%s/jobs/%d/status", apiBaseURL, jobID), bytes.NewBuffer(data))	reqObj.Header.Set("Content-Type", "application/json")
+	reqObj, _ := http.NewRequest("PATCH", fmt.Sprintf("%s/jobs/%d/status", apiBaseURL, jobID), bytes.NewBuffer(data))
+	reqObj.Header.Set("Content-Type", "application/json")
 	
 	resp, err := http.DefaultClient.Do(reqObj)
 	if err != nil {
