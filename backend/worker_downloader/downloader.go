@@ -508,7 +508,7 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 	
 	// Retry logic
 	var lastErr error
-	for i := 0; i < 3; i++ {
+	for i := 0; i < 12; i++ {
 		resp, err := http.Post(cfg.Storage.DownloadServiceURL, "application/json", bytes.NewBuffer(body))
 		if err != nil {
 			lastErr = err
