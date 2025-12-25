@@ -33,7 +33,7 @@ func CreateTransferJob(c *gin.Context) {
 	
 	// If Incremental is selected but no interval is provided, default to 60s to ensure it acts as a periodic monitor
 	if job.IsIncremental && job.PeriodicInterval <= 0 {
-		job.PeriodicInterval = 60
+		job.PeriodicInterval = 600
 	}
 	
 	// Initial counts
