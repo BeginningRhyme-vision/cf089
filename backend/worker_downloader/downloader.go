@@ -524,6 +524,7 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 				if val, ok := resMap["etag"].(string); ok {
 					etag = val
 				}
+				log.Printf("%v", resMap)
 			}
 		} else {
 			lastErr = fmt.Errorf("HTTP status %d", resp.StatusCode)
