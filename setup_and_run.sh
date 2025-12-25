@@ -76,6 +76,7 @@ WORKER_DOWNLOADER_ID=$(docker run -d --rm \
     -e BACKEND_API_URL="http://backend:8080/api" \
     -v "$CONFIG_FILE:/app/config.yaml" \
     --name unbound-worker-downloader-instance \
+    --entrypoint "downloader" \
     unbound-worker-downloader)
 
 echo "  Worker Downloader started with ID: ${WORKER_DOWNLOADER_ID:0:12}"
@@ -87,9 +88,22 @@ WORKER_TRANSFER_ID=$(docker run -d --rm \
     -e BACKEND_API_URL="http://backend:8080/api" \
     -v "$CONFIG_FILE:/app/config.yaml" \
     --name unbound-worker-transfer-instance \
+    --entrypoint "transfer" \
     unbound-worker-transfer)
 
 echo "  Worker Transfer started with ID: ${WORKER_TRANSFER_ID:0:12}"
+
+echo ">>> Starting Worker Scanner Container..."
+WORKER_SCANNER_ID=$(docker run -d --rm \
+    --network unbound-net \
+    --network-alias worker_scanner \
+    -e BACKEND_API_URL="http://backend:8080/api" \
+    -v "$CONFIG_FILE:/app/config.yaml" \
+    --name unbound-worker-scanner-instance \
+    --entrypoint "scanner" \
+    unbound-worker-transfer)
+
+echo "  Worker Scanner started with ID: ${WORKER_SCANNER_ID:0:12}"
 
 # --- Cleanup Trap ---
 
@@ -100,6 +114,7 @@ cleanup() {
     docker stop "$FRONTEND_ID" >/dev/null 2>&1 || true
     docker stop "$WORKER_DOWNLOADER_ID" >/dev/null 2>&1 || true
     docker stop "$WORKER_TRANSFER_ID" >/dev/null 2>&1 || true
+    docker stop "$WORKER_SCANNER_ID" >/dev/null 2>&1 || true
     echo ">>> Stopped."
 }
 
