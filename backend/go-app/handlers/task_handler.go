@@ -16,11 +16,22 @@ import (
 
 // Global Buffer Manager
 var (
-	jobBuffers = make(map[int64]chan models.YoutubeTask)
+	jobBuffers   = make(map[int64]chan models.YoutubeTask)
 	txJobBuffers = make(map[int64]chan models.TransferTask)
-	bufferMutex sync.RWMutex
-	fillingMap sync.Map // prevent concurrent fills for same job
+	bufferMutex  sync.RWMutex
+	fillingMap   sync.Map // prevent concurrent fills for same job
+
+	// Stats Buffer for Postgres Sync
+	statsBuffer = make(map[int64]*JobDelta)
+	statsMutex  sync.Mutex
 )
+
+type JobDelta struct {
+	Pending int
+	Running int
+	Success int
+	Failed  int
+}
 
 const (
 	BufferSize     = 1000
@@ -36,8 +47,92 @@ func StartBufferService() {
 		for range ticker.C {
 			checkAndRefillBuffers()
 			checkAndRefillTxBuffers()
+			flushStats()
 		}
 	}()
+}
+
+func flushStats() {
+	statsMutex.Lock()
+	if len(statsBuffer) == 0 {
+		statsMutex.Unlock()
+		return
+	}
+
+	// Copy and clear
+	snapshot := make(map[int64]JobDelta)
+	for k, v := range statsBuffer {
+		snapshot[k] = *v
+	}
+	statsBuffer = make(map[int64]*JobDelta)
+	statsMutex.Unlock()
+
+	// Execute updates
+	for jobID, delta := range snapshot {
+		// Construct query
+		// Using raw SQL for atomic updates
+		query := "UPDATE youtube_jobs SET pending_count = pending_count + ?, running_count = running_count + ?, success_count = success_count + ?, failed_count = failed_count + ? WHERE id = ?"
+		database.DB.Exec(query, delta.Pending, delta.Running, delta.Success, delta.Failed, jobID)
+	}
+}
+
+func trackStatusChange(jobID int64, oldStatus, newStatus string) {
+	if oldStatus == newStatus {
+		return
+	}
+
+	statsMutex.Lock()
+	defer statsMutex.Unlock()
+
+	if _, ok := statsBuffer[jobID]; !ok {
+		statsBuffer[jobID] = &JobDelta{}
+	}
+	d := statsBuffer[jobID]
+
+	// Helper to map status to bucket
+	getBucket := func(s string) string {
+		switch s {
+		case "PENDING":
+			return "PENDING"
+		case "COMPLETED":
+			return "COMPLETED"
+		case "FAILED":
+			return "FAILED"
+		default:
+			return "RUNNING" // Everything else (METADATA_FETCHED, RUNNING, etc.) is running
+		}
+	}
+
+	oldBucket := getBucket(oldStatus)
+	newBucket := getBucket(newStatus)
+
+	if oldBucket == newBucket {
+		return
+	}
+
+	// Decrement old
+	switch oldBucket {
+	case "PENDING":
+		d.Pending--
+	case "RUNNING":
+		d.Running--
+	case "COMPLETED":
+		d.Success--
+	case "FAILED":
+		d.Failed--
+	}
+
+	// Increment new
+	switch newBucket {
+	case "PENDING":
+		d.Pending++
+	case "RUNNING":
+		d.Running++
+	case "COMPLETED":
+		d.Success++
+	case "FAILED":
+		d.Failed++
+	}
 }
 
 func checkAndRefillBuffers() {
@@ -240,6 +335,8 @@ func BatchUpdate(c *gin.Context) {
 			continue
 		}
 
+		oldStatus := existing.Status
+
 		// 2. Merge fields (only update if provided/valid)
 		if u.Status != "" {
 			existing.Status = u.Status
@@ -262,6 +359,11 @@ func BatchUpdate(c *gin.Context) {
 		}
 		if u.VideoID != "" {
 			existing.VideoID = u.VideoID
+		}
+
+		// Track Status Change
+		if u.Status != "" && existing.JobID != 0 {
+			trackStatusChange(existing.JobID, oldStatus, existing.Status)
 		}
 
 		existing.UpdatedAt = time.Now()
@@ -412,7 +514,7 @@ func BatchFetch(c *gin.Context) {
 	type FetchRequest struct {
 		JobID  int64 `json:"job_id"`
 		Limit  int   `json:"limit"`
-		Offset int   `json:"offset"` // Ignored in new logic
+		Offset int   `json:"offset"`
 	}
 
 	var req FetchRequest
@@ -421,53 +523,66 @@ func BatchFetch(c *gin.Context) {
 		return
 	}
 
-	// Ensure buffer exists (lazy init if not yet created by background)
-	ensureBuffer(req.JobID)
+	ctx := context.Background()
+	jobKey := fmt.Sprintf("job:%d:tasks", req.JobID)
 
-	bufferMutex.RLock()
-	ch, exists := jobBuffers[req.JobID]
-	bufferMutex.RUnlock()
-
-	if !exists {
-		// Should not happen after ensureBuffer
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Buffer initialization failed"})
+	// Get Total Count
+	total, err := database.RDB.ZCard(ctx, jobKey).Result()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get count: " + err.Error()})
 		return
 	}
 
-    // Proactive refill trigger
-    if len(ch) < BufferLowWater {
-        triggerRefill(req.JobID)
-    }
+	if total == 0 {
+		c.JSON(http.StatusOK, gin.H{"tasks": []models.YoutubeTask{}, "total": 0})
+		return
+	}
+
+	// Fetch IDs (Pagination)
+	// Using ZRange (0 to -1 is all, so we use start/stop)
+	start := int64(req.Offset)
+	stop := int64(req.Offset + req.Limit - 1)
+
+	ids, err := database.RDB.ZRange(ctx, jobKey, start, stop).Result()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch IDs: " + err.Error()})
+		return
+	}
+
+	if len(ids) == 0 {
+		c.JSON(http.StatusOK, gin.H{"tasks": []models.YoutubeTask{}, "total": total})
+		return
+	}
+
+	// Fetch details
+	var keys []string
+	for _, id := range ids {
+		keys = append(keys, fmt.Sprintf("task:%s", id))
+	}
+
+	jsonList, err := database.RDB.MGet(ctx, keys...).Result()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch details: " + err.Error()})
+		return
+	}
 
 	var tasks []models.YoutubeTask
+	for _, item := range jsonList {
+		if item == nil {
+			continue
+		}
+		str, ok := item.(string)
+		if !ok {
+			continue
+		}
 
-	// Timeout for initial fetch
-	timeout := time.After(30 * time.Second)
-
-	// 1. Fetch first item (blocking with timeout)
-	select {
-	case t := <-ch:
-		tasks = append(tasks, t)
-	case <-timeout:
-		// Return empty if timed out
-		c.JSON(http.StatusOK, gin.H{"tasks": tasks, "total": 0})
-		return
-	}
-
-	// 2. Fetch remaining up to Limit (non-blocking or short wait)
-	for len(tasks) < req.Limit {
-		select {
-		case t := <-ch:
+		var t models.YoutubeTask
+		if err := json.Unmarshal([]byte(str), &t); err == nil {
 			tasks = append(tasks, t)
-		default:
-			// No more items immediately available, return what we have
-			goto RESPONSE
 		}
 	}
 
-RESPONSE:
-    // We could fetch Total from Redis if needed, but for worker queue it might not be critical
-	c.JSON(http.StatusOK, gin.H{"tasks": tasks})
+	c.JSON(http.StatusOK, gin.H{"tasks": tasks, "total": total})
 }
 
 func BatchDelete(c *gin.Context) {
