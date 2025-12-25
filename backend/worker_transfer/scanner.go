@@ -179,7 +179,7 @@ func processJob(job TransferJob) {
 
 	// 3. List and Batch Insert
 	bucketName := getBucketFromEndpoint(cfg.Storage.Src.Endpoint)
-	prefix := job.SrcDir
+	prefix := strings.TrimSpace(job.SrcDir)
 	log.Printf("Listing objects for job %d in bucket '%s' with prefix '%s'", job.JobID, bucketName, prefix)
 
 	paginator := s3.NewListObjectsV2Paginator(s3Client, &s3.ListObjectsV2Input{
