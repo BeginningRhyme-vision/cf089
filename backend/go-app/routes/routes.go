@@ -10,6 +10,13 @@ func SetupRouter() *gin.Engine {
 
 	api := r.Group("/api")
 	{
+		// Auth
+		auth := api.Group("/auth")
+		{
+			auth.GET("/feishu/login_url", handlers.GetFeishuLoginURL)
+			auth.POST("/feishu/callback", handlers.FeishuCallback)
+		}
+
         // Transfer Jobs
 		jobs := api.Group("/jobs")
 		{

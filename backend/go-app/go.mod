@@ -7,6 +7,7 @@ toolchain go1.24.1
 require (
 	github.com/apache/arrow/go/v17 v17.0.0
 	github.com/gin-gonic/gin v1.11.0
+	github.com/golang-jwt/jwt/v5 v5.2.1
 	github.com/redis/go-redis/v9 v9.17.2
 	gopkg.in/yaml.v3 v3.0.1
 	gorm.io/driver/postgres v1.6.0
