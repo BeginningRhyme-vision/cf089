@@ -317,6 +317,9 @@ func getJobPrefix(jobID int64) (string, error) {
 }
 
 func processTask(t YoutubeTask) {
+	updateTaskStatus(t.ID, "RUNNING")
+	log.Printf("Task %d (%s) RUNNING", t.ID, t.VideoID)
+
 	prefix, err := getJobPrefix(t.JobID)
 	if err != nil {
 		reportError(t.ID, "Failed to get job info: "+err.Error())
@@ -504,28 +507,43 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 	body, _ := json.Marshal(payload)
 	
 	// Retry logic
+	var lastErr error
 	for i := 0; i < 3; i++ {
 		resp, err := http.Post(cfg.Storage.DownloadServiceURL, "application/json", bytes.NewBuffer(body))
 		if err != nil {
+			lastErr = err
+			log.Printf("Chunk %d retry %d error: %v", partNum, i+1, err)
 			time.Sleep(1 * time.Second)
 			continue
 		}
-		defer resp.Body.Close()
-
+		
+		etag := ""
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			var resMap map[string]interface{}
 			if err := json.NewDecoder(resp.Body).Decode(&resMap); err == nil {
-				if etag, ok := resMap["etag"].(string); ok {
-					return etag, nil
+				if val, ok := resMap["etag"].(string); ok {
+					etag = val
 				}
 			}
+		} else {
+			lastErr = fmt.Errorf("HTTP status %d", resp.StatusCode)
+			log.Printf("Chunk %d retry %d status: %d", partNum, i+1, resp.StatusCode)
+		}
+		resp.Body.Close()
+
+		if etag != "" {
+			return etag, nil
 		}
 		time.Sleep(1 * time.Second)
+	}
+	if lastErr != nil {
+		return "", fmt.Errorf("failed to upload chunk %d: %v", partNum, lastErr)
 	}
 	return "", fmt.Errorf("failed to upload chunk %d", partNum)
 }
 
 func reportError(id int64, msg string) {
+	log.Printf("Task %d FAILED: %s", id, msg)
 	updateTask(UpdateTaskRequest{
 		ID:           id,
 		Status:       "FAILED",
