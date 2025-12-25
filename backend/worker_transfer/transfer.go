@@ -319,15 +319,11 @@ func processTask(t TransferTask) {
 		size = *head.ContentLength
 	}
 	
-	// 4. Construct Public/Presigned URLs for Transfer Service
-	srcPresignClient := s3.NewPresignClient(srcClient)
-	presignedSrc, err := srcPresignClient.PresignGetObject(context.TODO(), &s3.GetObjectInput{
-		Bucket: aws.String(srcBucket),
-		Key:    aws.String(srcKey),
-	}, s3.WithPresignExpires(24*time.Hour))
+	// 4. Construct Public/Virtual-Hosted URLs for Transfer Service (Matches r2s3.go logic)
+	srcUrl, err := constructVirtualHostURL(cfg.Storage.Src.Endpoint, srcBucket, srcKey)
 	if err != nil {
-		log.Printf("Presign Src failed for task %d: %v", t.ID, err)
-		updateTaskStatus(t.ID, "FAILED", "Presign Src failed")
+		log.Printf("Failed to construct Src URL for task %d: %v", t.ID, err)
+		updateTaskStatus(t.ID, "FAILED", "Construct Src URL failed")
 		return
 	}
 	
@@ -335,7 +331,7 @@ func processTask(t TransferTask) {
 	log.Printf("Task %d: Transferring %d bytes to bucket '%s' key '%s'", t.ID, size, dstBucket, dstKey)
 	
 	// 5. Transfer Loop
-	err = transferFile(presignedSrc.URL, dstClient, dstBucket, dstKey, size, job.Metadata.Endpoint)
+	err = transferFile(srcUrl, dstClient, dstBucket, dstKey, size, job.Metadata.Endpoint)
 	if err != nil {
 		log.Printf("Transfer failed for task %d: %v", t.ID, err)
 		updateTaskStatus(t.ID, "FAILED", err.Error())
@@ -359,24 +355,13 @@ func processTask(t TransferTask) {
 }
 
 func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string, size int64, dstEndpoint string) error {
+	dstUrl, err := constructVirtualHostURL(dstEndpoint, dstBucket, dstKey)
+	if err != nil {
+		return err
+	}
+
 	if size < defaultPartSize {
-		// Single Put? No, we need to COPY.
-		// If using `transfer_service`, we send `r2Key` (Src URL) and `s3Url` (Dst URL).
-		// We can construct a PRESIGNED PUT for Dest?
-		// `downloader.go` logic used Presigned PUT for Dest.
-		// Let's do that.
-		
-		presignDst := s3.NewPresignClient(dstClient)
-		req, err := presignDst.PresignPutObject(context.TODO(), &s3.PutObjectInput{
-			Bucket: aws.String(dstBucket),
-			Key:    aws.String(dstKey),
-			ContentLength: aws.Int64(size),
-		}, s3.WithPresignExpires(24*time.Hour))
-		if err != nil {
-			return err
-		}
-		
-		_, err = callTransferService(srcURL, req.URL, size, 0, "", -1)
+		_, err = callTransferService(srcURL, dstUrl, size, 0, "", -1)
 		return err
 	}
 	
@@ -398,8 +383,6 @@ func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string,
 	
 	sem := make(chan struct{}, 4)
 	
-	presignDst := s3.NewPresignClient(dstClient)
-	
 	for i := 0; i < numParts; i++ {
 		start := int64(i) * partSize
 		end := start + partSize - 1
@@ -412,19 +395,8 @@ func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string,
 			sem <- struct{}{}
 			defer func() { <-sem }()
 			
-			// Presign Upload Part
-			req, err := presignDst.PresignUploadPart(context.TODO(), &s3.UploadPartInput{
-				Bucket: aws.String(dstBucket),
-				Key:    aws.String(dstKey),
-				UploadId: aws.String(uploadID),
-				PartNumber: aws.Int32(pNum),
-				ContentLength: aws.Int64(e - s + 1),
-			}, s3.WithPresignExpires(24*time.Hour))
-			if err != nil {
-				select { case errAbort <- err: default: }; return
-			}
-			
-			etag, err := callTransferService(srcURL, req.URL, e-s+1, s, uploadID, int(pNum))
+			// Use clean URLs, no presigning
+			etag, err := callTransferService(srcURL, dstUrl, e-s+1, s, uploadID, int(pNum))
 			if err != nil {
 				select { case errAbort <- err: default: }; return
 			}
@@ -518,4 +490,34 @@ func getBucketFromEndpoint(endpoint string) string {
 	}
 	
 	return strings.Trim(u.Path, "/")
+}
+
+func constructVirtualHostURL(endpointStr, bucket, key string) (string, error) {
+	// Mimic r2s3.go logic for creating scheme://bucket.host/key
+	
+	// Normalize just to parse host/scheme cleanly if needed, but r2s3 uses simple parsing
+	normalized := endpointStr
+	isS3 := strings.HasPrefix(endpointStr, "s3://")
+	if isS3 {
+		normalized = "http://" + strings.TrimPrefix(endpointStr, "s3://")
+	}
+	if !strings.Contains(normalized, "://") {
+		normalized = "http://" + normalized
+	}
+
+	u, err := url.Parse(normalized)
+	if err != nil {
+		return "", err
+	}
+
+	host := u.Host
+	if isS3 {
+		parts := strings.SplitN(u.Host, ".", 2)
+		if len(parts) == 2 {
+			host = parts[1]
+		}
+	}
+	
+	// r2s3 style: fmt.Sprintf("%s://%s.%s/%s", u.Scheme, srcCfg.Bucket, u.Host, obj.Key)
+	return fmt.Sprintf("%s://%s.%s/%s", u.Scheme, bucket, host, key), nil
 }
