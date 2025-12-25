@@ -326,7 +326,7 @@ func AcquireTasks(c *gin.Context) {
 	}
 
 	ctx := context.Background()
-	var tasks []models.YoutubeTask
+	tasks := []models.YoutubeTask{}
 
 	if req.Stage == "download" {
 		// Pop from download queue
@@ -826,7 +826,7 @@ func AcquireTransferTasks(c *gin.Context) {
 	}
 	if req.Limit <= 0 { req.Limit = 10 }
 
-	var tasks []models.TransferTask
+	tasks := []models.TransferTask{}
 
 	bufferMutex.RLock()
 	var jobIDs []int64

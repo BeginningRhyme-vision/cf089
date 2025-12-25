@@ -352,6 +352,7 @@ func processTask(t YoutubeTask) {
 		reportError(t.ID, strings.Join(errs, "; "))
 	} else {
 		updateTaskStatus(t.ID, "COMPLETED")
+		log.Printf("Task %d (%s) COMPLETED", t.ID, t.VideoID)
 	}
 }
 
@@ -464,6 +465,9 @@ func transferFile(sourceURL, key string) error {
 			Parts: completedParts,
 		},
 	})
+	if err == nil {
+		log.Printf("Successfully uploaded: %s", key)
+	}
 	
 	return err
 }

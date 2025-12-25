@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/redis/go-redis/v9"
 	"unbound-future-backend/database"
 	"unbound-future-backend/models"
 )
@@ -340,9 +339,14 @@ func CreateYoutubeJob(c *gin.Context) {
 
 func ListYoutubeJobs(c *gin.Context) {
 	var jobs []models.YoutubeJob
-	// page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-	// limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
-	// offset := (page - 1) * limit
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
+	offset := (page - 1) * limit
+
+	if err := database.DB.Order("created_at desc").Offset(offset).Limit(limit).Find(&jobs).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 
 	c.JSON(http.StatusOK, jobs)
 }
