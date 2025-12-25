@@ -82,7 +82,9 @@ const YoutubeJobDetail = () => {
     PENDING: 'default',
     RUNNING: 'processing',
     COMPLETED: 'success',
-    FAILED: 'error'
+    FAILED: 'error',
+    PAUSED: 'warning',
+    STOPPED: 'warning'
   };
 
   const columns = [
@@ -95,7 +97,7 @@ const YoutubeJobDetail = () => {
       dataIndex: 'status', 
       key: 'status',
       width: 100,
-      render: (status) => <Tag color={statusColors[status]}>{status}</Tag>
+      render: (status) => <Tag color={statusColors[status] || 'default'}>{status}</Tag>
     },
     { 
       title: 'Error Message', 
@@ -117,30 +119,50 @@ const YoutubeJobDetail = () => {
       </Breadcrumb>
 
       <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h2>Job Details: {job?.r2_prefix}</h2>
-        <Button icon={<ReloadOutlined />} onClick={() => { fetchJob(); fetchRecords(pagination.current, pagination.pageSize); }}>Refresh</Button>
+        <h2>
+          Job Details: {job?.r2_prefix}
+          {job && <Tag color={statusColors[job.status] || 'default'} style={{ marginLeft: 12 }}>{job.status}</Tag>}
+        </h2>
+        <div>
+          {job && <span style={{ marginRight: 16, color: '#888' }}>Created: {new Date(job.created_at).toLocaleString()}</span>}
+          <Button icon={<ReloadOutlined />} onClick={() => { fetchJob(); fetchRecords(pagination.current, pagination.pageSize); }}>Refresh</Button>
+        </div>
       </div>
 
       {job && (
         <Row gutter={16} style={{ marginBottom: 24 }}>
-          <Col span={6}>
-            <Card>
+          <Col span={4}>
+            <Card size="small">
               <Statistic title="Total" value={job.total_count} />
             </Card>
           </Col>
-          <Col span={6}>
-            <Card>
+          <Col span={4}>
+            <Card size="small">
               <Statistic title="Success" value={job.success_count} valueStyle={{ color: '#3f8600' }} />
             </Card>
           </Col>
-          <Col span={6}>
-            <Card>
+          <Col span={4}>
+            <Card size="small">
               <Statistic title="Failed" value={job.failed_count} valueStyle={{ color: '#cf1322' }} />
             </Card>
           </Col>
-          <Col span={6}>
-            <Card>
+          <Col span={4}>
+            <Card size="small">
+              <Statistic title="Running" value={job.running_count} valueStyle={{ color: '#faad14' }} />
+            </Card>
+          </Col>
+          <Col span={4}>
+            <Card size="small">
               <Statistic title="Pending" value={job.pending_count} valueStyle={{ color: '#1890ff' }} />
+            </Card>
+          </Col>
+          <Col span={4}>
+            <Card size="small">
+              <Statistic 
+                title="Job Status" 
+                value={job.status} 
+                formatter={(val) => <Tag color={statusColors[val] || 'default'}>{val}</Tag>} 
+              />
             </Card>
           </Col>
         </Row>

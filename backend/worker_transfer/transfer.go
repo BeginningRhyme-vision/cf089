@@ -85,7 +85,11 @@ var (
 	statsMutex  sync.Mutex
 )
 
-const WorkerID = "go-transfer-1"
+const (
+	WorkerID             = "go-transfer-1"
+	MaxConcurrentWorkers = 100
+	TaskBufferSize       = 100
+)
 
 func main() {
 	loadConfig()
@@ -99,31 +103,48 @@ func main() {
 
 	log.Println("Transfer Worker Started")
 
-	for {
-		tasks, err := acquireTasks()
-		if err != nil {
-			log.Printf("Error acquiring tasks: %v", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
+	taskChan := make(chan TransferTask, TaskBufferSize)
 
-		if len(tasks) == 0 {
-			time.Sleep(60 * time.Second)
-			continue
-		}
+	// Start Fetcher
+	go func() {
+		for {
+			// Backpressure: if channel is mostly full, wait a bit
+			if len(taskChan) >= TaskBufferSize-20 {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
 
-		log.Printf("Acquired %d tasks", len(tasks))
-		var wg sync.WaitGroup
-		for _, t := range tasks {
-			wg.Add(1)
-			go func(task TransferTask) {
-				defer wg.Done()
-				processTask(task)
-			}(t)
-			time.Sleep(10 * time.Milliseconds)
+			tasks, err := acquireTasks()
+			if err != nil {
+				log.Printf("Error acquiring tasks: %v", err)
+				time.Sleep(5 * time.Second)
+				continue
+			}
+
+			if len(tasks) == 0 {
+				time.Sleep(5 * time.Second)
+				continue
+			}
+
+			log.Printf("Acquired %d tasks", len(tasks))
+			for _, t := range tasks {
+				taskChan <- t
+			}
 		}
-		wg.Wait()
+	}()
+
+	// Start Workers
+	var wg sync.WaitGroup
+	for i := 0; i < MaxConcurrentWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for t := range taskChan {
+				processTask(t)
+			}
+		}()
 	}
+	wg.Wait()
 }
 
 func initStatsFlusher() {
@@ -171,12 +192,20 @@ func updateJobStats(jobID int64, incSuccess, incFailed int) {
 	statsBuffer[jobID].Failed += incFailed
 }
 
+type UpdateJobStatusRequest struct {
+	Status        string     `json:"status,omitempty"`
+	LastScanTime  *time.Time `json:"last_scan_time,omitempty"`
+	ResultMessage string     `json:"result_message,omitempty"`
+	IncSuccess    int        `json:"inc_success,omitempty"`
+	IncFailed     int        `json:"inc_failed,omitempty"`
+}
+
 func sendJobStatsUpdate(jobID int64, incSuccess, incFailed int) {
-	payload := map[string]interface{}{
-		"inc_success": incSuccess,
-		"inc_failed":  incFailed,
+	reqPayload := UpdateJobStatusRequest{
+		IncSuccess: incSuccess,
+		IncFailed:  incFailed,
 	}
-	data, _ := json.Marshal(payload)
+	data, _ := json.Marshal(reqPayload)
 
 	req, _ := http.NewRequest("PATCH", fmt.Sprintf("%s/jobs/%d/status", apiBaseURL, jobID), bytes.NewBuffer(data))
 	req.Header.Set("Content-Type", "application/json")
@@ -541,7 +570,7 @@ func createS3Client(endpoint, ak, sk string) (*s3.Client, error) {
 func acquireTasks() ([]TransferTask, error) {
 	payload := map[string]interface{}{
 		"worker_id": WorkerID,
-		"limit":     500,
+		"limit":     TaskBufferSize,
 	}
 	data, _ := json.Marshal(payload)
 
