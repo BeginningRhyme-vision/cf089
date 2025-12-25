@@ -45,6 +45,8 @@ type TransferJob struct {
 	Metadata         TransferMetadata `json:"metadata"`
 	Status           string           `json:"status"`
 	PeriodicInterval int              `json:"periodic_interval"`
+	IsIncremental    bool             `json:"is_incremental"`
+	LastScanTime     *time.Time       `json:"last_scan_time"`
 }
 
 type TransferMetadata struct {
@@ -157,9 +159,12 @@ func updateJobStatus(jobID uint, status string, lastScanTime *time.Time) error {
 }
 
 func processJob(job TransferJob) {
-	log.Printf("Processing Job %d (Src: %s, Periodic: %v)", job.JobID, job.SrcDir, job.PeriodicInterval > 0)
+	startTime := time.Now()
+	log.Printf("Processing Job %d (Src: %s, Periodic: %v, Incremental: %v, LastScan: %v)", 
+		job.JobID, job.SrcDir, job.PeriodicInterval > 0, job.IsIncremental, job.LastScanTime)
 
 	// 1. Update status to RUNNING (if not already, or to confirm heartbeat)
+	// We don't update LastScanTime here, we wait until we finish the scan.
 	if err := updateJobStatus(job.JobID, "RUNNING", nil); err != nil {
 		log.Printf("Failed to set RUNNING for job %d: %v", job.JobID, err)
 		return
@@ -181,6 +186,7 @@ func processJob(job TransferJob) {
 
 	var batch []string
 	count := 0
+	skipped := 0
 
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(context.TODO())
@@ -194,6 +200,18 @@ func processJob(job TransferJob) {
 			if strings.HasSuffix(key, "/") {
 				continue
 			}
+
+			// Incremental Check
+			if job.IsIncremental && job.LastScanTime != nil && obj.LastModified != nil {
+				// If object hasn't been modified since last scan, skip it.
+				// We use .After to be safe, or !Before?
+				// If ModTime <= LastScanTime -> Skip.
+				if !obj.LastModified.After(*job.LastScanTime) {
+					skipped++
+					continue
+				}
+			}
+
 			batch = append(batch, key)
 			if len(batch) >= 1000 {
 				if err := sendBatch(job.JobID, batch); err != nil {
@@ -212,20 +230,14 @@ func processJob(job TransferJob) {
 		count += len(batch)
 	}
 
-	log.Printf("Job %d scanned. Total tasks: %d", job.JobID, count)
+	log.Printf("Job %d scanned. New tasks: %d, Skipped (old): %d", job.JobID, count, skipped)
 	
 	if job.PeriodicInterval > 0 {
-		now := time.Now()
-		updateJobStatus(job.JobID, "RUNNING", &now)
+		updateJobStatus(job.JobID, "RUNNING", &startTime)
 		log.Printf("Job %d is periodic. Next scan in %d seconds.", job.JobID, job.PeriodicInterval)
-	} else if count == 0 {
-		// If not periodic and no tasks (or finished scanning all and backend deduped them), mark COMPLETED?
-		// Note: If count > 0, we still might want to mark COMPLETED?
-		// Usually "COMPLETED" means "Scanning Completed". The Transfer Worker handles the rest.
-		updateJobStatus(job.JobID, "COMPLETED", nil)
 	} else {
-		// Scanned tasks, mark COMPLETED so we don't scan again.
-		updateJobStatus(job.JobID, "COMPLETED", nil)
+		// Scanned tasks, mark COMPLETED. Update LastScanTime for future incremental runs.
+		updateJobStatus(job.JobID, "COMPLETED", &startTime)
 	}
 }
 
