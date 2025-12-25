@@ -87,8 +87,8 @@ var (
 
 const (
 	WorkerID             = "go-transfer-1"
-	MaxConcurrentWorkers = 100
-	TaskBufferSize       = 100
+	MaxConcurrentWorkers = 500
+	TaskBufferSize       = 500
 )
 
 func main() {

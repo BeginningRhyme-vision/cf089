@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"math"
+	"math/rand"
 	"net/http"
 	"os"
 	"strings"
@@ -44,11 +45,13 @@ var (
 	bucketName string
 	apiBaseURL string
 	jobCache   sync.Map // map[int64]string (JobID -> R2Prefix)
+	workerID   string
 )
 
 const (
-	ChunkSize = 6 * 1024 * 1024 // 6MB
-	WorkerID  = "go-downloader-1"
+	ChunkSize            = 6 * 1024 * 1024 // 6MB
+	MaxConcurrentWorkers = 20
+	TaskBufferSize       = 100
 )
 
 // --- Models ---
@@ -86,32 +89,58 @@ func main() {
 		apiBaseURL = "http://localhost:8080/api"
 	}
 
-	log.Println("Go Downloader Worker Started")
-
-	for {
-		tasks, err := acquireTasks()
-		if err != nil {
-			log.Printf("Error acquiring tasks: %v", err)
-			time.Sleep(5 * time.Second)
-			continue
-		}
-
-		if len(tasks) == 0 {
-			time.Sleep(2 * time.Second)
-			continue
-		}
-
-		log.Printf("Acquired %d tasks", len(tasks))
-		var wg sync.WaitGroup
-		for _, t := range tasks {
-			wg.Add(1)
-			go func(task YoutubeTask) {
-				defer wg.Done()
-				processTask(task)
-			}(t)
-		}
-		wg.Wait()
+	// Initialize WorkerID
+	workerID = os.Getenv("WORKER_ID")
+	if workerID == "" {
+		// Seed random generator (Go 1.20+ seeds global random automatically, but explicit seeding is safe for older versions)
+		rand.Seed(time.Now().UnixNano())
+		workerID = fmt.Sprintf("go-downloader-%04d", rand.Intn(10000))
 	}
+
+	log.Printf("Go Downloader Worker Started as %s", workerID)
+
+	taskChan := make(chan YoutubeTask, TaskBufferSize)
+
+	// Start Fetcher
+	go func() {
+		for {
+			// Backpressure: if channel is mostly full, wait a bit
+			if len(taskChan) >= TaskBufferSize-20 {
+				time.Sleep(100 * time.Millisecond)
+				continue
+			}
+
+			tasks, err := acquireTasks()
+			if err != nil {
+				log.Printf("Error acquiring tasks: %v", err)
+				time.Sleep(5 * time.Second)
+				continue
+			}
+
+			if len(tasks) == 0 {
+				time.Sleep(2 * time.Second)
+				continue
+			}
+
+			log.Printf("Acquired %d tasks", len(tasks))
+			for _, t := range tasks {
+				taskChan <- t
+			}
+		}
+	}()
+
+	// Start Workers
+	var wg sync.WaitGroup
+	for i := 0; i < MaxConcurrentWorkers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for t := range taskChan {
+				processTask(t)
+			}
+		}()
+	}
+	wg.Wait()
 }
 
 // --- Logic ---
@@ -215,9 +244,9 @@ func initS3() {
 
 func acquireTasks() ([]YoutubeTask, error) {
 	reqBody, _ := json.Marshal(map[string]interface{}{
-		"worker_id": WorkerID,
+		"worker_id": workerID,
 		"stage":     "download",
-		"limit":     10,
+		"limit":     TaskBufferSize,
 	})
 
 	resp, err := http.Post(apiBaseURL+"/tasks/acquire", "application/json", bytes.NewBuffer(reqBody))

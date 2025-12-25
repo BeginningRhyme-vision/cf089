@@ -177,6 +177,23 @@ const JobList = () => {
           <Form.Item name="is_incremental" valuePropName="checked">
             <Checkbox>Incremental Transfer (Continuous Sync)</Checkbox>
           </Form.Item>
+          <Form.Item
+            noStyle
+            shouldUpdate={(prev, current) => prev.is_incremental !== current.is_incremental}
+          >
+            {({ getFieldValue }) =>
+              getFieldValue('is_incremental') ? (
+                <Form.Item
+                  name="periodic_interval"
+                  label="Periodic Interval (Seconds)"
+                  rules={[{ required: true, message: 'Please set interval' }]}
+                  initialValue={600}
+                >
+                  <Input type="number" />
+                </Form.Item>
+              ) : null
+            }
+          </Form.Item>
         </Form>
       </Modal>
 
@@ -197,9 +214,17 @@ const JobList = () => {
             <Descriptions.Item label="Exclude">{selectedJob.exclude || '-'}</Descriptions.Item>
             <Descriptions.Item label="Delete Source">{selectedJob.delete_source ? 'Yes' : 'No'}</Descriptions.Item>
             <Descriptions.Item label="Incremental">{selectedJob.is_incremental ? 'Yes' : 'No'}</Descriptions.Item>
+            {selectedJob.is_incremental && (
+              <Descriptions.Item label="Periodic Interval">{selectedJob.periodic_interval} s</Descriptions.Item>
+            )}
             <Descriptions.Item label="Status">
               <Tag color={statusColors[selectedJob.status]}>{selectedJob.status}</Tag>
             </Descriptions.Item>
+            <Descriptions.Item label="Total Count">{selectedJob.total_count}</Descriptions.Item>
+            <Descriptions.Item label="Pending Count">{selectedJob.pending_count}</Descriptions.Item>
+            <Descriptions.Item label="Running Count">{selectedJob.running_count}</Descriptions.Item>
+            <Descriptions.Item label="Success Count">{selectedJob.success_count}</Descriptions.Item>
+            <Descriptions.Item label="Failed Count">{selectedJob.failed_count}</Descriptions.Item>
             <Descriptions.Item label="Start Time">{selectedJob.start_time || '-'}</Descriptions.Item>
             <Descriptions.Item label="End Time">{selectedJob.end_time || '-'}</Descriptions.Item>
             <Descriptions.Item label="Duration">{selectedJob.duration_seconds} seconds</Descriptions.Item>

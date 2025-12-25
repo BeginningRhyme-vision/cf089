@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"path"
 	"strings"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -61,7 +62,23 @@ func main() {
 		Prefix: aws.String(Prefix),
 	})
 
+	// Test Filter Pattern
+	includePattern := "*.mp4"
+	excludePattern := ""
+
+	fmt.Printf("Testing Filters - Include: '%s', Exclude: '%s'\n", includePattern, excludePattern)
+
 	count := 0
+	matchedCount := 0
+	
+	// Helper function for matching (PROPOSED FIX)
+	match := func(pattern, name string) (bool, error) {
+		if strings.Contains(pattern, "/") {
+			return path.Match(pattern, name)
+		}
+		return path.Match(pattern, path.Base(name))
+	}
+
 	for paginator.HasMorePages() {
 		page, err := paginator.NextPage(context.TODO())
 		if err != nil {
@@ -69,10 +86,35 @@ func main() {
 		}
 
 		for _, obj := range page.Contents {
-			fmt.Printf("Found: %s (Size: %d)\n", *obj.Key, obj.Size)
+			key := *obj.Key
+			
+			// Logic from scanner.go
+			isIncluded := true
+			
+			if includePattern != "" {
+				matched, err := match(includePattern, key)
+				if err == nil && !matched {
+					isIncluded = false
+				}
+			}
+			if excludePattern != "" {
+				matched, err := match(excludePattern, key)
+				if err == nil && matched {
+					isIncluded = false
+				}
+			}
+
+			if count < 20 { // Limit output
+				fmt.Printf("Found: %s (Size: %d) -> Included: %v\n", key, obj.Size, isIncluded)
+			}
 			count++
+			if isIncluded {
+				matchedCount++
+			}
 		}
+		// Stop after first page for testing
+		break 
 	}
 
-	fmt.Printf("Total objects found: %d\n", count)
+	fmt.Printf("Total objects checked (first page): %d. Matched: %d\n", count, matchedCount)
 }

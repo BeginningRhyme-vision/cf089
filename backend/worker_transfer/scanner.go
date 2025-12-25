@@ -222,14 +222,21 @@ func processJob(job TransferJob) {
 			}
 
 			// 3.1 Filter Include/Exclude
+			match := func(pattern, name string) (bool, error) {
+				if strings.Contains(pattern, "/") {
+					return path.Match(pattern, name)
+				}
+				return path.Match(pattern, path.Base(name))
+			}
+
 			if job.Include != "" {
-				matched, err := path.Match(job.Include, key)
+				matched, err := match(job.Include, key)
 				if err == nil && !matched {
 					continue
 				}
 			}
 			if job.Exclude != "" {
-				matched, err := path.Match(job.Exclude, key)
+				matched, err := match(job.Exclude, key)
 				if err == nil && matched {
 					continue
 				}

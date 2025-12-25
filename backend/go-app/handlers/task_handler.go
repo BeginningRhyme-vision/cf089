@@ -214,33 +214,89 @@ func BatchUpdate(c *gin.Context) {
 	}
 
 	ctx := context.Background()
+
+	// 1. Fetch existing tasks to merge updates
+	var keys []string
+	for _, u := range updates {
+		keys = append(keys, fmt.Sprintf("task:%d", u.ID))
+	}
+
+	existingJSONs, err := database.RDB.MGet(ctx, keys...).Result()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch existing tasks: " + err.Error()})
+		return
+	}
+
 	pipe := database.RDB.Pipeline()
 
-	for _, u := range updates {
-		data, err := json.Marshal(u)
+	for i, u := range updates {
+		val := existingJSONs[i]
+		if val == nil {
+			continue // Task not found
+		}
+		
+		var existing models.YoutubeTask
+		if err := json.Unmarshal([]byte(val.(string)), &existing); err != nil {
+			continue
+		}
+
+		// 2. Merge fields (only update if provided/valid)
+		if u.Status != "" {
+			existing.Status = u.Status
+		}
+		if u.ErrorMessage != "" {
+			existing.ErrorMessage = u.ErrorMessage
+		}
+		if u.WorkerID != "" {
+			existing.WorkerID = u.WorkerID
+		}
+		// Metadata fields
+		if u.AudioURL != "" {
+			existing.AudioURL = u.AudioURL
+		}
+		if u.VideoURL != "" {
+			existing.VideoURL = u.VideoURL
+		}
+		if u.Title != "" {
+			existing.Title = u.Title
+		}
+		if u.VideoID != "" {
+			existing.VideoID = u.VideoID
+		}
+
+		existing.UpdatedAt = time.Now()
+		if u.Status == "RUNNING" && existing.StartedAt.IsZero() {
+			existing.StartedAt = time.Now()
+		}
+		if (u.Status == "COMPLETED" || u.Status == "FAILED") && existing.CompletedAt.IsZero() {
+			existing.CompletedAt = time.Now()
+		}
+
+		// 3. Save back
+		data, err := json.Marshal(existing)
 		if err != nil {
 			continue
 		}
 		
-		taskKey := fmt.Sprintf("task:%d", u.ID)
+		taskKey := fmt.Sprintf("task:%d", existing.ID)
 		pipe.Set(ctx, taskKey, data, 0)
-        // Also ensure it's in the job list if it wasn't for some reason, 
-        // though usually updates are for existing tasks.
-        if u.JobID != 0 {
-             jobKey := fmt.Sprintf("job:%d:tasks", u.JobID)
+        
+        // Ensure in Job ZSet (idempotent)
+        if existing.JobID != 0 {
+             jobKey := fmt.Sprintf("job:%d:tasks", existing.JobID)
              pipe.ZAdd(ctx, jobKey, redis.Z{
-                Score:  float64(u.ID),
-                Member: u.ID,
+                Score:  float64(existing.ID),
+                Member: existing.ID,
              })
         }
 
 		// Status Machine Transition: METADATA_FETCHED -> Ready for Download
 		if u.Status == "METADATA_FETCHED" {
-			pipe.RPush(ctx, "queue:youtube:download_ready", u.ID)
+			pipe.RPush(ctx, "queue:youtube:download_ready", existing.ID)
 		}
 	}
 
-	_, err := pipe.Exec(ctx)
+	_, err = pipe.Exec(ctx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update tasks: " + err.Error()})
 		return
@@ -308,7 +364,7 @@ func AcquireTasks(c *gin.Context) {
 		bufferMutex.RUnlock()
 
 		if len(jobIDs) == 0 {
-			c.JSON(http.StatusOK, gin.H{"tasks": tasks})
+			c.JSON(http.StatusOK, []models.YoutubeTask{})
 			return
 		}
 

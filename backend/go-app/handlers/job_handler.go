@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -95,9 +94,15 @@ func StartTransferJob(c *gin.Context) {
 		return
 	}
 
-	job.Status = models.StatusPending
-	// Reset result message or counters if needed
-	if err := database.DB.Save(&job).Error; err != nil {
+	updates := map[string]interface{}{
+		"status":           models.StatusPending,
+		"start_time":       nil,
+		"end_time":         nil,
+		"duration_seconds": 0,
+		"result_message":   "",
+	}
+
+	if err := database.DB.Model(&job).Updates(updates).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
@@ -140,6 +145,10 @@ type UpdateJobStatusRequest struct {
 	ResultMessage string           `json:"result_message"`
 	IncSuccess    int              `json:"inc_success"`
 	IncFailed     int              `json:"inc_failed"`
+	StartTime     *time.Time       `json:"start_time"`
+	EndTime       *time.Time       `json:"end_time"`
+	TotalCount    *int             `json:"total_count"`
+	IncExecution  bool             `json:"inc_execution"`
 }
 
 func UpdateTransferJobStatus(c *gin.Context) {
@@ -166,6 +175,27 @@ func UpdateTransferJobStatus(c *gin.Context) {
 	if req.ResultMessage != "" {
 		updates["result_message"] = req.ResultMessage
 	}
+	if req.StartTime != nil {
+		updates["start_time"] = req.StartTime
+	}
+	if req.TotalCount != nil {
+		updates["total_count"] = *req.TotalCount
+	}
+	if req.EndTime != nil {
+		updates["end_time"] = req.EndTime
+		// Calculate duration
+		var startTime time.Time
+		if req.StartTime != nil {
+			startTime = *req.StartTime
+		} else if job.StartTime != nil {
+			startTime = *job.StartTime
+		}
+
+		if !startTime.IsZero() {
+			duration := req.EndTime.Sub(startTime)
+			updates["duration_seconds"] = int(duration.Seconds())
+		}
+	}
 
 	if len(updates) > 0 {
 		if err := database.DB.Model(&job).Updates(updates).Error; err != nil {
@@ -179,6 +209,13 @@ func UpdateTransferJobStatus(c *gin.Context) {
 		totalDec := req.IncSuccess + req.IncFailed
 		err := database.DB.Exec("UPDATE transfer_jobs SET success_count = success_count + ?, failed_count = failed_count + ?, pending_count = GREATEST(0, pending_count - ?) WHERE job_id = ?", req.IncSuccess, req.IncFailed, totalDec, id).Error
 		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
+	if req.IncExecution {
+		if err := database.DB.Exec("UPDATE transfer_jobs SET execution_count = execution_count + 1 WHERE job_id = ?", id).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
@@ -290,47 +327,13 @@ func CreateYoutubeJob(c *gin.Context) {
         return
     }
     
-    // 2. Create Tasks in Redis (Async)
-    go func(jobID uint, urls []string) {
-        var tasks []models.YoutubeTask
-        now := time.Now()
-        for i, url := range urls {
-            tasks = append(tasks, models.YoutubeTask{
-                ID: int64(jobID)*1000000 + int64(i), // Simple ID generation
-                JobID: int64(jobID),
-                URL: url,
-                Status: "PENDING",
-                CreatedAt: now,
-                UpdatedAt: now,
-            })
+    // 2. Create Tasks in Redis (Sync to ensure order/consistency)
+    if len(req.Tasks) > 0 {
+        _, err := AddTasksToJob(int64(job.ID), req.Tasks)
+        if err != nil {
+            fmt.Printf("Error adding tasks to Redis for job %d: %v\n", job.ID, err)
         }
-        
-        if len(tasks) > 0 {
-            ctx := context.Background()
-            pipe := database.RDB.Pipeline()
-            
-            for _, task := range tasks {
-                data, err := json.Marshal(task)
-                if err != nil {
-                    continue
-                }
-                
-                taskKey := fmt.Sprintf("task:%d", task.ID)
-                jobKey := fmt.Sprintf("job:%d:tasks", task.JobID)
-                
-                pipe.Set(ctx, taskKey, data, 0)
-                pipe.ZAdd(ctx, jobKey, redis.Z{
-                    Score:  float64(task.ID),
-                    Member: task.ID,
-                })
-            }
-            
-            _, err := pipe.Exec(ctx)
-            if err != nil {
-                fmt.Printf("Error saving tasks to Redis for job %d: %v\n", jobID, err)
-            }
-        }
-    }(job.ID, req.Tasks)
+    }
     
     c.JSON(http.StatusCreated, job)
 }

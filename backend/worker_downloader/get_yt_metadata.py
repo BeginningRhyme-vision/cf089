@@ -6,11 +6,25 @@ import concurrent.futures
 import requests
 import uuid
 import os
+import yaml
 
 WORKER_ID = f"worker-meta-{uuid.uuid4()}"
 
 # API Configuration
 API_BASE_URL = os.environ.get("BACKEND_API_URL", "http://localhost:8080/api")
+
+def load_config():
+    # Try multiple paths to find config.yaml
+    paths = ["../../config.yaml", "../config.yaml", "config.yaml"]
+    for p in paths:
+        if os.path.exists(p):
+            try:
+                with open(p, 'r') as f:
+                    return yaml.safe_load(f)
+            except Exception as e:
+                print(f"Error loading config from {p}: {e}")
+    print("Warning: config.yaml not found")
+    return {}
 
 def api_acquire_tasks(limit=10):
     try:
@@ -19,7 +33,11 @@ def api_acquire_tasks(limit=10):
             json={"worker_id": WORKER_ID, "limit": limit, "stage": "metadata"}
         )
         if resp.status_code == 200:
-            return resp.json() # Expecting list of tasks
+            data = resp.json()
+            if isinstance(data, list):
+                return data
+            print(f"Unexpected API response format: {type(data)}")
+            return []
         elif resp.status_code == 404:
             return []
         else:
@@ -90,9 +108,13 @@ def process_metadata(task, ydl_opts):
     return result
 
 def main():
-    proxy_address = None
-    if len(sys.argv) > 1:
-        proxy_address = sys.argv[1]
+    config = load_config()
+    proxy_address = config.get('worker', {}).get('proxy_url')
+    
+    if proxy_address:
+        print(f"Using proxy: {proxy_address}")
+    else:
+        print("No proxy configured.")
 
     # yt-dlp options
     ydl_opts = {
@@ -105,7 +127,7 @@ def main():
     if proxy_address:
         ydl_opts['proxy'] = proxy_address
 
-    max_workers = 16
+    max_workers = 128
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
 
     print(f"Metadata Worker {WORKER_ID} started.")
