@@ -466,5 +466,11 @@ func callTransferService(srcUrl, dstUrl string, size, offset int64, uploadID str
 
 func getBucketFromEndpoint(endpoint string) string {
 	u, _ := http.NewRequest("GET", endpoint, nil)
+	if u.URL.Scheme == "s3" {
+		parts := strings.Split(u.URL.Host, ".")
+		if len(parts) > 0 {
+			return parts[0]
+		}
+	}
 	return strings.Trim(u.URL.Path, "/")
 }
