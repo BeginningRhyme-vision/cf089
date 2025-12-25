@@ -141,8 +141,9 @@ func initSourceClient() {
 func createS3Client(endpoint, ak, sk string) (*s3.Client, error) {
 	// Normalize endpoint to http/https as AWS SDK BaseEndpoint requires a web URI
 	normalized := endpoint
-	if strings.HasPrefix(normalized, "s3://") {
-		normalized = "http://" + strings.TrimPrefix(normalized, "s3://")
+	isS3 := strings.HasPrefix(endpoint, "s3://")
+	if isS3 {
+		normalized = "http://" + strings.TrimPrefix(endpoint, "s3://")
 	}
 	if !strings.Contains(normalized, "://") {
 		normalized = "http://" + normalized
@@ -152,7 +153,16 @@ func createS3Client(endpoint, ak, sk string) (*s3.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	baseEndpoint := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
+
+	host := u.Host
+	if isS3 {
+		parts := strings.SplitN(u.Host, ".", 2)
+		if len(parts) == 2 {
+			host = parts[1]
+		}
+	}
+
+	baseEndpoint := fmt.Sprintf("%s://%s", u.Scheme, host)
 
 	c, err := awsconfig.LoadDefaultConfig(context.TODO(),
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(ak, sk, "")),

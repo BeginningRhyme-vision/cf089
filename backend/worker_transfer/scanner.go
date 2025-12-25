@@ -274,7 +274,8 @@ func sendBatch(jobID uint, tasks []TransferTaskInput) error {
 func initSourceS3() (*s3.Client, error) {
 	// Normalize endpoint to http/https as AWS SDK BaseEndpoint requires a web URI
 	normalized := cfg.Storage.Src.Endpoint
-	if strings.HasPrefix(normalized, "s3://") {
+	isS3 := strings.HasPrefix(normalized, "s3://")
+	if isS3 {
 		normalized = "http://" + strings.TrimPrefix(normalized, "s3://")
 	}
 	if !strings.Contains(normalized, "://") {
@@ -285,7 +286,16 @@ func initSourceS3() (*s3.Client, error) {
 	if err != nil {
 		return nil, err
 	}
-	baseEndpoint := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
+
+	host := u.Host
+	if isS3 {
+		parts := strings.SplitN(u.Host, ".", 2)
+		if len(parts) == 2 {
+			host = parts[1]
+		}
+	}
+
+	baseEndpoint := fmt.Sprintf("%s://%s", u.Scheme, host)
 
 	c, err := awsconfig.LoadDefaultConfig(context.TODO(),
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
