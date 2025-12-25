@@ -93,8 +93,10 @@ def process_metadata(task, ydl_opts):
             
             if best_audio:
                 result["audio_url"] = best_audio.get('url')
+                result["audio_size"] = best_audio.get('filesize') or best_audio.get('filesize_approx')
             if best_video:
                 result["video_url"] = best_video.get('url')
+                result["video_size"] = best_video.get('filesize') or best_video.get('filesize_approx')
 
             if not best_audio and not best_video:
                 # Fallback to mixed if separate not found (rare for yt-dlp)

@@ -9,6 +9,7 @@ import (
 	"math"
 	"math/rand"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -26,6 +27,11 @@ import (
 
 type Config struct {
 	Storage StorageConfig `yaml:"storage"`
+	Worker  WorkerConfig  `yaml:"worker"`
+}
+
+type WorkerConfig struct {
+	ProxyURL string `yaml:"proxy_url"`
 }
 
 type StorageConfig struct {
@@ -46,12 +52,29 @@ var (
 	apiBaseURL string
 	jobCache   sync.Map // map[int64]string (JobID -> R2Prefix)
 	workerID   string
+	downloadClient *http.Client
 )
+
+func initDownloadClient() {
+	transport := &http.Transport{}
+	if cfg.Worker.ProxyURL != "" {
+		proxyURL, err := url.Parse(cfg.Worker.ProxyURL)
+		if err != nil {
+			log.Printf("Invalid proxy URL: %v", err)
+		} else {
+			transport.Proxy = http.ProxyURL(proxyURL)
+		}
+	}
+	downloadClient = &http.Client{
+		Transport: transport,
+		Timeout:   30 * time.Second,
+	}
+}
 
 const (
 	ChunkSize            = 6 * 1024 * 1024 // 6MB
-	MaxConcurrentWorkers = 20
-	TaskBufferSize       = 100
+	MaxConcurrentWorkers = 200
+	TaskBufferSize       = 200
 )
 
 // --- Models ---
@@ -61,7 +84,9 @@ type YoutubeTask struct {
 	JobID     int64  `json:"job_id"`
 	URL       string `json:"url"`
 	AudioURL  string `json:"audio_url"`
+	AudioSize int64  `json:"audio_size"`
 	VideoURL  string `json:"video_url"`
+	VideoSize int64  `json:"video_size"`
 	Title     string `json:"title"`
 	VideoID   string `json:"video_id"`
 	Status    string `json:"status"`
@@ -82,6 +107,7 @@ type UpdateTaskRequest struct {
 
 func main() {
 	loadConfig()
+	initDownloadClient()
 	initS3()
 
 	apiBaseURL = os.Getenv("BACKEND_API_URL")
@@ -309,17 +335,12 @@ func processTask(t YoutubeTask) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			// Generate filename: {video_id}_audio.{ext?}
-			// We don't have ext easily from URL sometimes, but let's assume or peek.
-			// Or just use .m4a / .webm?
-			// Python script used info['ext']. We didn't save ext.
-			// Let's guess or check URL.
 			ext := "m4a" // Default
 			if strings.Contains(t.AudioURL, ".webm") {
 				ext = "webm"
 			}
 			key := fmt.Sprintf("%s%s_audio.%s", prefix, t.VideoID, ext)
-			if err := transferFile(t.AudioURL, key); err != nil {
+			if err := transferFile(t.AudioURL, key, t.AudioSize); err != nil {
 				errChan <- fmt.Errorf("audio failed: %w", err)
 			}
 		}()
@@ -334,7 +355,7 @@ func processTask(t YoutubeTask) {
 				ext = "webm"
 			}
 			key := fmt.Sprintf("%s%s_video.%s", prefix, t.VideoID, ext)
-			if err := transferFile(t.VideoURL, key); err != nil {
+			if err := transferFile(t.VideoURL, key, t.VideoSize); err != nil {
 				errChan <- fmt.Errorf("video failed: %w", err)
 			}
 		}()
@@ -355,16 +376,12 @@ func processTask(t YoutubeTask) {
 		log.Printf("Task %d (%s) COMPLETED", t.ID, t.VideoID)
 	}
 }
+			
+func transferFile(sourceURL, key string, providedSize int64) error {
+	size := providedSize
 
-func transferFile(sourceURL, key string) error {
-	// 1. Get Size
-	resp, err := http.Head(sourceURL)
-	if err != nil {
-		return err
-	}
-	size := resp.ContentLength
 	if size <= 0 {
-		return fmt.Errorf("invalid content length")
+		return fmt.Errorf("invalid content length: %d", size)
 	}
 
 	// 2. Initiate Multipart
@@ -439,16 +456,6 @@ func transferFile(sourceURL, key string) error {
 	}
 
 	// Sort parts
-	// ... sort logic needed because AWS requires order? 
-	// Actually CompletedMultipartUpload expects parts sorted by PartNumber.
-	// We need to sort `completedParts`.
-	// Simple bubble sort or slice sort.
-	// Optimization: Pre-allocate slice and assign by index if we know size? 
-	// But appending is safer with mutex. We'll sort after.
-	// Implementing sort is verbose in Go without generics (Go 1.25 has them!).
-	// But let's just use a simple sort loop.
-	
-	// Sort
 	for i := 0; i < len(completedParts); i++ {
 		for j := i + 1; j < len(completedParts); j++ {
 			if *completedParts[i].PartNumber > *completedParts[j].PartNumber {
@@ -468,7 +475,7 @@ func transferFile(sourceURL, key string) error {
 	if err == nil {
 		log.Printf("Successfully uploaded: %s", key)
 	}
-	
+
 	return err
 }
 

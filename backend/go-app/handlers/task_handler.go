@@ -351,8 +351,14 @@ func BatchUpdate(c *gin.Context) {
 		if u.AudioURL != "" {
 			existing.AudioURL = u.AudioURL
 		}
+		if u.AudioSize != 0 {
+			existing.AudioSize = u.AudioSize
+		}
 		if u.VideoURL != "" {
 			existing.VideoURL = u.VideoURL
+		}
+		if u.VideoSize != 0 {
+			existing.VideoSize = u.VideoSize
 		}
 		if u.Title != "" {
 			existing.Title = u.Title
