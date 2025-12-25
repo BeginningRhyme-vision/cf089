@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"strings"
 	"time"
 
@@ -43,6 +44,9 @@ type TransferJob struct {
 	JobID            uint             `json:"job_id"`
 	SrcDir           string           `json:"src_dir"`
 	DstDir           string           `json:"dst_dir"`
+	Include          string           `json:"include"`
+	Exclude          string           `json:"exclude"`
+	DeleteSource     bool             `json:"delete_source"`
 	Metadata         TransferMetadata `json:"metadata"`
 	Status           string           `json:"status"`
 	PeriodicInterval int              `json:"periodic_interval"`
@@ -58,8 +62,9 @@ type TransferMetadata struct {
 }
 
 type UpdateStatusRequest struct {
-	Status       string     `json:"status"`
-	LastScanTime *time.Time `json:"last_scan_time,omitempty"`
+	Status        string     `json:"status"`
+	LastScanTime  *time.Time `json:"last_scan_time,omitempty"`
+	ResultMessage string     `json:"result_message,omitempty"`
 }
 
 var (
@@ -140,12 +145,11 @@ func getPendingJobs() ([]TransferJob, error) {
 	return jobs, nil
 }
 
-func updateJobStatus(jobID uint, status string, lastScanTime *time.Time) error {
-	req := UpdateStatusRequest{Status: status, LastScanTime: lastScanTime}
+func updateJobStatus(jobID uint, status string, lastScanTime *time.Time, msg string) error {
+	req := UpdateStatusRequest{Status: status, LastScanTime: lastScanTime, ResultMessage: msg}
 	data, _ := json.Marshal(req)
-	
-	reqObj, _ := http.NewRequest("PATCH", fmt.Sprintf("%s/jobs/%d/status", apiBaseURL, jobID), bytes.NewBuffer(data))
-	reqObj.Header.Set("Content-Type", "application/json")
+
+	reqObj, _ := http.NewRequest("PATCH", fmt.Sprintf("%s/jobs/%d/status", apiBaseURL, jobID), bytes.NewBuffer(data))	reqObj.Header.Set("Content-Type", "application/json")
 	
 	resp, err := http.DefaultClient.Do(reqObj)
 	if err != nil {
@@ -170,7 +174,7 @@ func processJob(job TransferJob) {
 	log.Printf("Processing Job: %s", string(jobJSON))
 
 	// 1. Update status to RUNNING
-	if err := updateJobStatus(job.JobID, "RUNNING", nil); err != nil {
+	if err := updateJobStatus(job.JobID, "RUNNING", nil, ""); err != nil {
 		log.Printf("Failed to set RUNNING for job %d: %v", job.JobID, err)
 		return
 	}
@@ -179,7 +183,7 @@ func processJob(job TransferJob) {
 	s3Client, err := initSourceS3()
 	if err != nil {
 		log.Printf("Failed to init S3 for job %d: %v", job.JobID, err)
-		updateJobStatus(job.JobID, "FAILED", nil)
+		updateJobStatus(job.JobID, "FAILED", nil, fmt.Sprintf("Init S3 failed: %v", err))
 		return
 	}
 
@@ -204,7 +208,7 @@ func processJob(job TransferJob) {
 		page, err := paginator.NextPage(context.TODO())
 		if err != nil {
 			log.Printf("ListObjectsV2 failed for job %d on page %d: %v", job.JobID, pages, err)
-			updateJobStatus(job.JobID, "FAILED", nil) // Mark as failed on list error
+			updateJobStatus(job.JobID, "FAILED", nil, fmt.Sprintf("List failed on page %d: %v", pages, err)) // Mark as failed on list error
 			return
 		}
 
@@ -213,6 +217,20 @@ func processJob(job TransferJob) {
 			key := *obj.Key
 			if strings.HasSuffix(key, "/") {
 				continue
+			}
+
+			// 3.1 Filter Include/Exclude
+			if job.Include != "" {
+				matched, err := path.Match(job.Include, key)
+				if err == nil && !matched {
+					continue
+				}
+			}
+			if job.Exclude != "" {
+				matched, err := path.Match(job.Exclude, key)
+				if err == nil && matched {
+					continue
+				}
 			}
 
 			if job.IsIncremental && job.LastScanTime != nil && obj.LastModified != nil {
@@ -246,12 +264,13 @@ func processJob(job TransferJob) {
 	}
 
 	log.Printf("Job %d scanned. Total pages: %d. New tasks: %d, Skipped (old): %d", job.JobID, pages, count, skipped)
+	resultMsg := fmt.Sprintf("Scanned %d pages. Tasks: %d, Skipped: %d", pages, count, skipped)
 
 	if job.PeriodicInterval > 0 {
-		updateJobStatus(job.JobID, "RUNNING", &startTime)
+		updateJobStatus(job.JobID, "RUNNING", &startTime, resultMsg)
 		log.Printf("Job %d is periodic. Next scan in %d seconds.", job.JobID, job.PeriodicInterval)
 	} else {
-		updateJobStatus(job.JobID, "COMPLETED", &startTime)
+		updateJobStatus(job.JobID, "COMPLETED", &startTime, resultMsg)
 	}
 }
 

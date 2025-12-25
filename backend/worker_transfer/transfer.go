@@ -49,10 +49,11 @@ type TransferTask struct {
 }
 
 type JobInfo struct {
-	JobID    uint             `json:"job_id"`
-	Metadata TransferMetadata `json:"metadata"`
-	DstDir   string           `json:"dst_dir"`
-	SrcDir   string           `json:"src_dir"`
+	JobID        uint             `json:"job_id"`
+	Metadata     TransferMetadata `json:"metadata"`
+	DstDir       string           `json:"dst_dir"`
+	SrcDir       string           `json:"src_dir"`
+	DeleteSource bool             `json:"delete_source"`
 }
 
 type TransferMetadata struct {
@@ -340,6 +341,19 @@ func processTask(t TransferTask) {
 		updateTaskStatus(t.ID, "FAILED", err.Error())
 	} else {
 		log.Printf("Task %d completed successfully", t.ID)
+		
+		if job.DeleteSource {
+			_, err := srcClient.DeleteObject(context.TODO(), &s3.DeleteObjectInput{
+				Bucket: aws.String(srcBucket),
+				Key:    aws.String(srcKey),
+			})
+			if err != nil {
+				log.Printf("Failed to delete source object %s for task %d: %v", srcKey, t.ID, err)
+			} else {
+				log.Printf("Deleted source object %s for task %d", srcKey, t.ID)
+			}
+		}
+
 		updateTaskStatus(t.ID, "COMPLETED", "")
 	}
 }
