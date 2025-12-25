@@ -202,6 +202,7 @@ func processJob(job TransferJob) {
 	count := 0
 	skipped := 0
 	pages := 0
+	lastUpdate := time.Now()
 
 	for paginator.HasMorePages() {
 		pages++
@@ -255,6 +256,31 @@ func processJob(job TransferJob) {
 				batch = nil
 			}
 		}
+		
+		// Periodic Job Update (Heartbeat / Metadata Refresh)
+		if time.Since(lastUpdate) > 10*time.Second { // Check every 10s roughly (per page)
+			// Refresh Job Config
+			latestJob, err := getJob(job.JobID)
+			if err == nil {
+				// Update filters if changed
+				job.Include = latestJob.Include
+				job.Exclude = latestJob.Exclude
+				job.IsIncremental = latestJob.IsIncremental
+				
+				// Optional: Check status. If Cancelled, abort?
+				if latestJob.Status != "RUNNING" && latestJob.Status != "PENDING" {
+					log.Printf("Job %d status changed to %s. Aborting scan.", job.JobID, latestJob.Status)
+					return // Stop scanning
+				}
+			} else {
+				log.Printf("Failed to refresh job %d: %v", job.JobID, err)
+			}
+			
+			// Update Status / Heartbeat
+			msg := fmt.Sprintf("Scanning... Pages: %d, Tasks: %d, Skipped: %d", pages, count, skipped)
+			updateJobStatus(job.JobID, "RUNNING", nil, msg)
+			lastUpdate = time.Now()
+		}
 	}
 
 	if len(batch) > 0 {
@@ -273,6 +299,24 @@ func processJob(job TransferJob) {
 	} else {
 		updateJobStatus(job.JobID, "COMPLETED", &startTime, resultMsg)
 	}
+}
+
+func getJob(jobID uint) (*TransferJob, error) {
+	resp, err := http.Get(fmt.Sprintf("%s/jobs/%d", apiBaseURL, jobID))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("status %d", resp.StatusCode)
+	}
+
+	var job TransferJob
+	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
+		return nil, err
+	}
+	return &job, nil
 }
 
 func sendBatch(jobID uint, tasks []TransferTaskInput) error {

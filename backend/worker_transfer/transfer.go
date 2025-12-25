@@ -62,10 +62,15 @@ type TransferMetadata struct {
 	SKEncrypted string `json:"sk_encrypted"`
 }
 
+type cachedJob struct {
+	info   JobInfo
+	expiry time.Time
+}
+
 var (
 	cfg        *Config
 	apiBaseURL string
-	jobCache   sync.Map // JobID -> JobInfo
+	jobCache   sync.Map // JobID -> cachedJob
 	
 	defaultPartSize int64 = 16 * 1024 * 1024
 	s3Clients  sync.Map // Endpoint -> *s3.Client (Cache for Destinations)
@@ -213,9 +218,12 @@ func acquireTasks() ([]TransferTask, error) {
 }
 
 func getJobInfo(jobID int64) (*JobInfo, error) {
+	now := time.Now()
 	if val, ok := jobCache.Load(jobID); ok {
-		j := val.(JobInfo)
-		return &j, nil
+		cj := val.(cachedJob)
+		if now.Before(cj.expiry) {
+			return &cj.info, nil
+		}
 	}
 
 	resp, err := http.Get(fmt.Sprintf("%s/jobs/%d", apiBaseURL, jobID))
@@ -233,7 +241,11 @@ func getJobInfo(jobID int64) (*JobInfo, error) {
 		return nil, err
 	}
 
-	jobCache.Store(jobID, job)
+	// Cache for 30 seconds
+	jobCache.Store(jobID, cachedJob{
+		info:   job,
+		expiry: now.Add(30 * time.Second),
+	})
 	return &job, nil
 }
 
