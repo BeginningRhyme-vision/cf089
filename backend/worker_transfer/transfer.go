@@ -120,6 +120,7 @@ func main() {
 				defer wg.Done()
 				processTask(task)
 			}(t)
+			time.Sleep(10 * time.Milliseconds)
 		}
 		wg.Wait()
 	}
@@ -540,7 +541,7 @@ func createS3Client(endpoint, ak, sk string) (*s3.Client, error) {
 func acquireTasks() ([]TransferTask, error) {
 	payload := map[string]interface{}{
 		"worker_id": WorkerID,
-		"limit":     100,
+		"limit":     500,
 	}
 	data, _ := json.Marshal(payload)
 
@@ -629,7 +630,7 @@ func updateTaskStatus(t TransferTask, status string, msg string) {
 
 func calculatePartSize(size int64) int64 {
 	// Max parts: 10000
-	minPartSize := int64(5 * 1024 * 1024) // 5MB
+	minPartSize := int64(6 * 1024 * 1024) // 5MB
 	
 	partSize := size / 10000
 	if partSize < minPartSize {
