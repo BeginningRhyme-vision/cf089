@@ -246,10 +246,17 @@ func sendBatch(jobID uint, tasks []string) error {
 }
 
 func initSourceS3() (*s3.Client, error) {
+	// Parse the full endpoint to get the base URL (scheme + host)
+	u, err := http.NewRequest("GET", cfg.Storage.Src.Endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	baseEndpoint := fmt.Sprintf("%s://%s", u.URL.Scheme, u.URL.Host)
+
 	// Custom Resolver for R2
 	r2Resolver := aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
 		return aws.Endpoint{
-			URL: cfg.Storage.Src.Endpoint,
+			URL: baseEndpoint,
 		}, nil
 	})
 

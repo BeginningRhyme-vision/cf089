@@ -74,6 +74,7 @@ WORKER_DOWNLOADER_ID=$(docker run -d --rm \
     --network unbound-net \
     --network-alias worker_downloader \
     -e BACKEND_API_URL="http://backend:8080/api" \
+    -v "$CONFIG_FILE:/app/config.yaml" \
     --name unbound-worker-downloader-instance \
     unbound-worker-downloader)
 
@@ -84,6 +85,7 @@ WORKER_TRANSFER_ID=$(docker run -d --rm \
     --network unbound-net \
     --network-alias worker_transfer \
     -e BACKEND_API_URL="http://backend:8080/api" \
+    -v "$CONFIG_FILE:/app/config.yaml" \
     --name unbound-worker-transfer-instance \
     unbound-worker-transfer)
 

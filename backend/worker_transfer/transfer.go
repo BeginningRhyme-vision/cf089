@@ -138,8 +138,15 @@ func initSourceClient() {
 }
 
 func createS3Client(endpoint, ak, sk string) (*s3.Client, error) {
+	// Parse the full endpoint to get the base URL (scheme + host)
+	u, err := http.NewRequest("GET", endpoint, nil)
+	if err != nil {
+		return nil, err
+	}
+	baseEndpoint := fmt.Sprintf("%s://%s", u.URL.Scheme, u.URL.Host)
+
 	r2Resolver := aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
-		return aws.Endpoint{URL: endpoint}, nil
+		return aws.Endpoint{URL: baseEndpoint}, nil
 	})
 
 	c, err := awsconfig.LoadDefaultConfig(context.TODO(),
