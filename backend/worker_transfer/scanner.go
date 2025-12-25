@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -261,12 +262,20 @@ func sendBatch(jobID uint, tasks []string) error {
 }
 
 func initSourceS3() (*s3.Client, error) {
-	// Parse the full endpoint to get the base URL (scheme + host)
-	u, err := http.NewRequest("GET", cfg.Storage.Src.Endpoint, nil)
+	// Normalize endpoint to http/https as AWS SDK BaseEndpoint requires a web URI
+	normalized := cfg.Storage.Src.Endpoint
+	if strings.HasPrefix(normalized, "s3://") {
+		normalized = "http://" + strings.TrimPrefix(normalized, "s3://")
+	}
+	if !strings.Contains(normalized, "://") {
+		normalized = "http://" + normalized
+	}
+
+	u, err := url.Parse(normalized)
 	if err != nil {
 		return nil, err
 	}
-	baseEndpoint := fmt.Sprintf("%s://%s", u.URL.Scheme, u.URL.Host)
+	baseEndpoint := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
 
 	c, err := awsconfig.LoadDefaultConfig(context.TODO(),
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(
@@ -287,12 +296,19 @@ func initSourceS3() (*s3.Client, error) {
 }
 
 func getBucketFromEndpoint(endpoint string) string {
-	// Simple heuristic: assuming path contains bucket if path style used?
-	// Or assume endpoint is just domain and bucket is not needed for list if not provided?
-	// But ListObjects requires Bucket.
-	// Python script had `parsed_url.path.strip('/')`.
-	// config.yaml: `endpoint: "https://<account>.r2.cloudflarestorage.com/bucket-name"` ??
-	// Let's assume endpoint URL contains the bucket in path.
-	u, _ := http.NewRequest("GET", endpoint, nil)
-	return strings.Trim(u.URL.Path, "/")
+	// Handle s3:// scheme specifically before normalization
+	if strings.HasPrefix(endpoint, "s3://") {
+		host := strings.TrimPrefix(endpoint, "s3://")
+		parts := strings.Split(host, ".")
+		if len(parts) > 0 {
+			return parts[0]
+		}
+	}
+
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return ""
+	}
+	
+	return strings.Trim(u.Path, "/")
 }

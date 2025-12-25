@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -137,12 +138,20 @@ func initSourceClient() {
 }
 
 func createS3Client(endpoint, ak, sk string) (*s3.Client, error) {
-	// Parse the full endpoint to get the base URL (scheme + host)
-	u, err := http.NewRequest("GET", endpoint, nil)
+	// Normalize endpoint to http/https as AWS SDK BaseEndpoint requires a web URI
+	normalized := endpoint
+	if strings.HasPrefix(normalized, "s3://") {
+		normalized = "http://" + strings.TrimPrefix(normalized, "s3://")
+	}
+	if !strings.Contains(normalized, "://") {
+		normalized = "http://" + normalized
+	}
+
+	u, err := url.Parse(normalized)
 	if err != nil {
 		return nil, err
 	}
-	baseEndpoint := fmt.Sprintf("%s://%s", u.URL.Scheme, u.URL.Host)
+	baseEndpoint := fmt.Sprintf("%s://%s", u.Scheme, u.Host)
 
 	c, err := awsconfig.LoadDefaultConfig(context.TODO(),
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(ak, sk, "")),
@@ -465,12 +474,19 @@ func callTransferService(srcUrl, dstUrl string, size, offset int64, uploadID str
 }
 
 func getBucketFromEndpoint(endpoint string) string {
-	u, _ := http.NewRequest("GET", endpoint, nil)
-	if u.URL.Scheme == "s3" {
-		parts := strings.Split(u.URL.Host, ".")
+	// Handle s3:// scheme specifically before normalization
+	if strings.HasPrefix(endpoint, "s3://") {
+		host := strings.TrimPrefix(endpoint, "s3://")
+		parts := strings.Split(host, ".")
 		if len(parts) > 0 {
 			return parts[0]
 		}
 	}
-	return strings.Trim(u.URL.Path, "/")
+
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return ""
+	}
+	
+	return strings.Trim(u.Path, "/")
 }
