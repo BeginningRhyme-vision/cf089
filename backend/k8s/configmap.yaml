@@ -1,0 +1,40 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: unbound-backend-config
+  namespace: default
+data:
+  config.yaml: |
+    app:
+      name: "Unbound Future Admin"
+    
+    # Update these values for your K8s environment
+    redis:
+      url: "redis://redis-service:6379/0"
+
+    database:
+      url: "postgresql://user:password@postgres-service:5432/unbound_future_db"
+
+    feishu:
+      app_id: "cli_a9b405c22b389cc5"
+      app_secret: "your_app_secret"
+      redirect_uri: "http://your-domain.com/auth/callback"
+
+    security:
+      jwt_secret: "your_jwt_secret"
+      jwt_algorithm: "HS256"
+      access_token_expire_minutes: 1200
+
+    worker:
+      max_threads: 1024
+      # proxy_url: "http://user:pass@host:port"
+
+    storage:
+      # These URLs usually point to external services (e.g. Cloudflare Workers)
+      transfer_service_url: "http://r2-worker.cf022.workers.dev/initiate-copy"
+      download_service_url: "http://r2-worker.cf022.workers.dev/upload-part"
+      src:
+        endpoint: "https://<account_id>.r2.cloudflarestorage.com/bucket"
+        access_key: "your_access_key"
+        secret_key: "your_secret_key"
+        region: "auto"

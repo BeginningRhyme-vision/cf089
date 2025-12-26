@@ -17,6 +17,9 @@ import (
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.in/yaml.v3"
 )
 
@@ -70,10 +73,27 @@ type UpdateStatusRequest struct {
 var (
 	cfg        *Config
 	apiBaseURL string
+	
+	PagesScanned = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "scanner_pages_scanned_total",
+		Help: "Total number of S3 pages scanned",
+	})
+	
+	TasksDiscovered = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "scanner_tasks_discovered_total",
+		Help: "Total number of tasks discovered",
+	})
 )
 
 func main() {
 	loadConfig()
+	
+	go func() {
+		http.Handle("/metrics", promhttp.Handler())
+		log.Println("Metrics server listening on :9093")
+		http.ListenAndServe(":9093", nil)
+	}()
+	
 	apiBaseURL = os.Getenv("BACKEND_API_URL")
 	if apiBaseURL == "" {
 		apiBaseURL = "http://localhost:8080/api"
@@ -206,6 +226,7 @@ func processJob(job TransferJob) {
 
 	for paginator.HasMorePages() {
 		pages++
+		PagesScanned.Inc()
 		log.Printf("Requesting page %d for job %d...", pages, job.JobID)
 		page, err := paginator.NextPage(context.TODO())
 		if err != nil {
@@ -249,6 +270,7 @@ func processJob(job TransferJob) {
 			}
 
 			batch = append(batch, TransferTaskInput{Src: key, Size: size})
+			TasksDiscovered.Inc()
 			if len(batch) >= 1000 {
 				if err := sendBatch(job.JobID, batch); err != nil {
 					log.Printf("Failed to send batch for job %d: %v", job.JobID, err)

@@ -11,6 +11,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"unbound-future-backend/database"
+	"unbound-future-backend/metrics"
 	"unbound-future-backend/models"
 )
 
@@ -44,6 +45,9 @@ func CreateTransferJob(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+
+	metrics.JobCreatedTotal.WithLabelValues("transfer").Inc()
+	metrics.ActiveJobsGauge.WithLabelValues("transfer").Inc()
 
 	// Async add tasks
 	if len(req.Tasks) > 0 {
@@ -372,6 +376,9 @@ func CreateYoutubeJob(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create job in PG: " + err.Error()})
 		return
 	}
+
+	metrics.JobCreatedTotal.WithLabelValues("youtube").Inc()
+	metrics.ActiveJobsGauge.WithLabelValues("youtube").Inc()
 
 	// 2. Create Tasks in Redis (Sync to ensure order/consistency)
 	if len(req.Tasks) > 0 {

@@ -1,12 +1,32 @@
 package routes
 
 import (
+	"strconv"
+	"time"
+
 	"github.com/gin-gonic/gin"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"unbound-future-backend/handlers"
+	"unbound-future-backend/metrics"
 )
+
+func PrometheusMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		c.Next()
+		duration := time.Since(start).Seconds()
+		status := strconv.Itoa(c.Writer.Status())
+		
+		metrics.HttpReqDuration.WithLabelValues(c.Request.Method, c.FullPath(), status).Observe(duration)
+		metrics.HttpReqTotal.WithLabelValues(c.Request.Method, c.FullPath(), status).Inc()
+	}
+}
 
 func SetupRouter() *gin.Engine {
 	r := gin.Default()
+	r.Use(PrometheusMiddleware())
+
+	r.GET("/metrics", gin.WrapH(promhttp.Handler()))
 
 	api := r.Group("/api")
 	{

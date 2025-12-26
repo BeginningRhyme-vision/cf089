@@ -20,6 +20,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.in/yaml.v3"
 )
 
@@ -53,6 +56,17 @@ var (
 	jobCache   sync.Map // map[int64]string (JobID -> R2Prefix)
 	workerID   string
 	downloadClient *http.Client
+	
+	// Metrics
+	TasksProcessed = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "worker_downloader_tasks_processed_total",
+		Help: "The total number of processed tasks",
+	}, []string{"status"})
+	
+	DownloadDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name: "worker_downloader_duration_seconds",
+		Help: "Duration of downloads",
+	})
 )
 
 func initDownloadClient() {
@@ -109,6 +123,13 @@ func main() {
 	loadConfig()
 	initDownloadClient()
 	initS3()
+
+	// Start Metrics Server
+	go func() {
+		http.Handle("/metrics", promhttp.Handler())
+		log.Println("Metrics server listening on :9091")
+		http.ListenAndServe(":9091", nil)
+	}()
 
 	apiBaseURL = os.Getenv("BACKEND_API_URL")
 	if apiBaseURL == "" {
@@ -317,6 +338,11 @@ func getJobPrefix(jobID int64) (string, error) {
 }
 
 func processTask(t YoutubeTask) {
+	start := time.Now()
+	defer func() {
+		DownloadDuration.Observe(time.Since(start).Seconds())
+	}()
+
 	updateTaskStatus(t.ID, "RUNNING")
 	log.Printf("Task %d (%s) RUNNING", t.ID, t.VideoID)
 
@@ -376,6 +402,7 @@ func processTask(t YoutubeTask) {
 		reportError(t.ID, strings.Join(errs, "; "))
 	} else {
 		updateTaskStatus(t.ID, "COMPLETED")
+		TasksProcessed.WithLabelValues("success").Inc()
 		log.Printf("Task %d (%s) COMPLETED", t.ID, t.VideoID)
 	}
 }
@@ -544,6 +571,7 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 
 func reportError(id int64, msg string) {
 	log.Printf("Task %d FAILED: %s", id, msg)
+	TasksProcessed.WithLabelValues("failed").Inc()
 	updateTask(UpdateTaskRequest{
 		ID:           id,
 		Status:       "FAILED",

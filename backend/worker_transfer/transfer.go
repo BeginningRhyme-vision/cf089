@@ -18,6 +18,9 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"gopkg.in/yaml.v3"
 )
 
@@ -83,6 +86,22 @@ var (
 
 	statsBuffer = make(map[int64]*JobStatsDelta)
 	statsMutex  sync.Mutex
+	
+	// Metrics
+	BytesTransferred = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "transfer_bytes_transferred_total",
+		Help: "Total bytes transferred",
+	})
+	
+	TasksTransferred = promauto.NewCounterVec(prometheus.CounterOpts{
+		Name: "transfer_tasks_transferred_total",
+		Help: "Total tasks processed",
+	}, []string{"status"})
+	
+	TransferDuration = promauto.NewHistogram(prometheus.HistogramOpts{
+		Name: "transfer_duration_seconds",
+		Help: "Duration of transfers",
+	})
 )
 
 const (
@@ -93,6 +112,13 @@ const (
 
 func main() {
 	loadConfig()
+	
+	go func() {
+		http.Handle("/metrics", promhttp.Handler())
+		log.Println("Metrics server listening on :9094")
+		http.ListenAndServe(":9094", nil)
+	}()
+
 	apiBaseURL = os.Getenv("BACKEND_API_URL")
 	if apiBaseURL == "" {
 		apiBaseURL = "http://localhost:8080/api"
@@ -222,11 +248,14 @@ func sendJobStatsUpdate(jobID int64, incSuccess, incFailed int) {
 }
 
 func processTask(t TransferTask) {
+	start := time.Now()
+	
 	job, err := getJobInfo(t.JobID)
 	if err != nil {
 		log.Printf("Failed to get job info for task %d: %v", t.ID, err)
 		updateTaskStatus(t, "FAILED", err.Error())
 		updateJobStats(t.JobID, 0, 1)
+		TasksTransferred.WithLabelValues("failed").Inc()
 		return
 	}
 
@@ -246,6 +275,7 @@ func processTask(t TransferTask) {
 		log.Printf("Dst client init failed for task %d: %v", t.ID, err)
 		updateTaskStatus(t, "FAILED", "Dst client init failed")
 		updateJobStats(t.JobID, 0, 1)
+		TasksTransferred.WithLabelValues("failed").Inc()
 		return
 	}
 	
@@ -287,6 +317,7 @@ func processTask(t TransferTask) {
 			log.Printf("HeadObject failed for %s/%s: %v", srcBucket, srcKey, err)
 			updateTaskStatus(t, "FAILED", "HeadObject failed: "+err.Error())
 			updateJobStats(t.JobID, 0, 1)
+			TasksTransferred.WithLabelValues("failed").Inc()
 			return
 		}
 		size = *head.ContentLength
@@ -298,6 +329,7 @@ func processTask(t TransferTask) {
 		log.Printf("Failed to construct Src URL for task %d: %v", t.ID, err)
 		updateTaskStatus(t, "FAILED", "Construct Src URL failed")
 		updateJobStats(t.JobID, 0, 1)
+		TasksTransferred.WithLabelValues("failed").Inc()
 		return
 	}
 	
@@ -310,6 +342,7 @@ func processTask(t TransferTask) {
 		log.Printf("Transfer failed for task %d: %v", t.ID, err)
 		updateTaskStatus(t, "FAILED", err.Error())
 		updateJobStats(t.JobID, 0, 1)
+		TasksTransferred.WithLabelValues("failed").Inc()
 	} else {
 		log.Printf("Task %d completed successfully", t.ID)
 		
@@ -327,6 +360,12 @@ func processTask(t TransferTask) {
 
 		updateTaskStatus(t, "COMPLETED", "")
 		updateJobStats(t.JobID, 1, 0)
+		
+		// Metrics
+		duration := time.Since(start).Seconds()
+		TransferDuration.Observe(duration)
+		BytesTransferred.Add(float64(size))
+		TasksTransferred.WithLabelValues("success").Inc()
 	}
 }
 

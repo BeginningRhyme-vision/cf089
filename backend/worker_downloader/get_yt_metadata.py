@@ -7,8 +7,13 @@ import requests
 import uuid
 import os
 import yaml
+from prometheus_client import start_http_server, Counter, Histogram
 
 WORKER_ID = f"worker-meta-{uuid.uuid4()}"
+
+# Metrics
+TASKS_PROCESSED = Counter('worker_meta_tasks_processed_total', 'Total metadata tasks processed', ['status'])
+TASK_DURATION = Histogram('worker_meta_task_duration_seconds', 'Duration of metadata extraction')
 
 # API Configuration
 API_BASE_URL = os.environ.get("BACKEND_API_URL", "http://localhost:8080/api")
@@ -55,9 +60,11 @@ def api_update_task_batch(updates):
     except Exception as e:
         print(f"Failed to update tasks due to connection error: {e}")
 
+@TASK_DURATION.time()
 def process_metadata(task, ydl_opts):
     url = task.get('url')
     if not url:
+        TASKS_PROCESSED.labels(status="failed").inc()
         return None
         
     print(f"Processing Task {task['id']}: {url}")
@@ -101,15 +108,22 @@ def process_metadata(task, ydl_opts):
             if not best_audio and not best_video:
                 # Fallback to mixed if separate not found (rare for yt-dlp)
                 pass
+        
+        TASKS_PROCESSED.labels(status="success").inc()
 
     except Exception as e:
         print(f"Error processing {url}: {e}")
         result["status"] = "FAILED"
         result["error_message"] = str(e)
+        TASKS_PROCESSED.labels(status="failed").inc()
         
     return result
 
 def main():
+    # Start metrics server
+    start_http_server(9092)
+    print("Metrics server listening on :9092")
+
     config = load_config()
     proxy_address = config.get('worker', {}).get('proxy_url')
     

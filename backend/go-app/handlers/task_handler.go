@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 	"unbound-future-backend/database"
+	"unbound-future-backend/metrics"
 	"unbound-future-backend/models"
 )
 
@@ -127,6 +128,8 @@ func trackStatusChange(jobID int64, oldStatus, newStatus string) {
 	if oldBucket == newBucket {
 		return
 	}
+
+	metrics.TaskStatusChangeTotal.WithLabelValues("youtube", newBucket).Inc()
 
 	// Decrement old
 	switch oldBucket {
