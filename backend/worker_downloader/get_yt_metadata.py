@@ -129,45 +129,79 @@ def main():
     if proxy_address:
         ydl_opts['proxy'] = proxy_address
 
-    max_workers = 128
+    max_workers = 512
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
 
-    print(f"Metadata Worker {WORKER_ID} started.")
+    print(f"Metadata Worker {WORKER_ID} started with {max_workers} workers.")
+    
+    futures = set()
+    pending_updates = []
+    last_flush_time = time.time()
+    
+    # Threshold to fetch new tasks (avoid spamming acquire for 1 task)
+    FETCH_THRESHOLD = 50 
 
     while True:
         try:
-            tasks = api_acquire_tasks(limit=max_workers)
+            # 1. Process completed tasks
+            wait_timeout = 0.1 
+            if len(futures) >= max_workers:
+                wait_timeout = None # Block if full
             
-            if not tasks:
-                time.sleep(2)
-                continue
-                
-            print(f"Acquired {len(tasks)} tasks.")
+            if futures:
+                done, _ = concurrent.futures.wait(futures, timeout=wait_timeout, return_when=concurrent.futures.FIRST_COMPLETED)
+            else:
+                done = []
+            
+            for f in done:
+                futures.remove(f)
+                try:
+                    res = f.result()
+                    if res:
+                        pending_updates.append(res)
+                except Exception as e:
+                    print(f"Task execution error: {e}")
 
-            # Immediately mark tasks as RUNNING
-            running_updates = []
-            for t in tasks:
-                running_updates.append({
-                    "id": t['id'],
-                    "job_id": t['job_id'],
-                    "status": "RUNNING",
-                    "worker_id": WORKER_ID
-                })
-            if running_updates:
-                api_update_task_batch(running_updates)
-            
-            futures = {executor.submit(process_metadata, t, ydl_opts): t for t in tasks}
-            
-            updates = []
-            for future in concurrent.futures.as_completed(futures):
-                res = future.result()
-                if res:
-                    updates.append(res)
-            
-            if updates:
-                api_update_task_batch(updates)
-                print(f"Updated {len(updates)} tasks.")
+            # 2. Flush updates
+            now = time.time()
+            if (len(pending_updates) >= 20 or 
+                (pending_updates and (now - last_flush_time > 2)) or 
+                (pending_updates and not futures)):
                 
+                api_update_task_batch(pending_updates)
+                print(f"Updated {len(pending_updates)} tasks.")
+                pending_updates = []
+                last_flush_time = now
+                
+            # 3. Refill tasks
+            slots = max_workers - len(futures)
+            should_fetch = slots >= FETCH_THRESHOLD or (slots > 0 and len(futures) == 0)
+            
+            if should_fetch:
+                tasks = api_acquire_tasks(limit=slots)
+                if tasks:
+                    print(f"Acquired {len(tasks)} tasks. (Running: {len(futures)})")
+                    
+                    # Mark RUNNING
+                    running_updates = [{
+                        "id": t['id'],
+                        "job_id": t['job_id'],
+                        "status": "RUNNING",
+                        "worker_id": WORKER_ID
+                    } for t in tasks]
+                    api_update_task_batch(running_updates)
+                    
+                    # Submit
+                    for t in tasks:
+                        f = executor.submit(process_metadata, t, ydl_opts)
+                        futures.add(f)
+                else:
+                    # No tasks available
+                    if not futures:
+                        time.sleep(2)
+                    else:
+                        time.sleep(1)
+
         except KeyboardInterrupt:
             print("Stopping...")
             break
