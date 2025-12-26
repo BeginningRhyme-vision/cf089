@@ -697,43 +697,59 @@ func AddTasksToJob(jobID int64, urls []string) (int, error) {
 		startID++ // Start from next
 	}
 
-	var tasks []models.YoutubeTask
 	now := time.Now()
+	batchSize := 10000
+	totalAdded := 0
 
-	// 2. Prepare tasks
-	for i, url := range urls {
-		tasks = append(tasks, models.YoutubeTask{
-			ID:        startID + int64(i),
-			JobID:     jobID,
-			URL:       url,
-			Status:    "PENDING",
-			CreatedAt: now,
-			UpdatedAt: now,
-		})
-	}
-
-	// 3. Pipeline Insert
-	pipe := database.RDB.Pipeline()
-	for _, task := range tasks {
-		data, err := json.Marshal(task)
-		if err != nil {
-			continue
+	// 2. Process in batches to reduce memory usage and pipeline size
+	for i := 0; i < len(urls); i += batchSize {
+		end := i + batchSize
+		if end > len(urls) {
+			end = len(urls)
 		}
 
-		taskKey := fmt.Sprintf("task:%d", task.ID)
-		pipe.Set(ctx, taskKey, data, 0)
-		pipe.ZAdd(ctx, jobKey, redis.Z{
-			Score:  float64(task.ID),
-			Member: task.ID,
-		})
+		batchUrls := urls[i:end]
+		var zMembers []redis.Z
+		pipe := database.RDB.Pipeline()
+
+		for j, url := range batchUrls {
+			taskID := startID + int64(i+j)
+			task := models.YoutubeTask{
+				ID:        taskID,
+				JobID:     jobID,
+				URL:       url,
+				Status:    "PENDING",
+				CreatedAt: now,
+				UpdatedAt: now,
+			}
+
+			data, err := json.Marshal(task)
+			if err != nil {
+				continue
+			}
+
+			taskKey := fmt.Sprintf("task:%d", task.ID)
+			pipe.Set(ctx, taskKey, data, 0)
+
+			zMembers = append(zMembers, redis.Z{
+				Score:  float64(task.ID),
+				Member: task.ID,
+			})
+		}
+
+		if len(zMembers) > 0 {
+			// Optimize: Single ZAdd for the whole batch
+			pipe.ZAdd(ctx, jobKey, zMembers...)
+
+			_, err := pipe.Exec(ctx)
+			if err != nil {
+				return totalAdded, err
+			}
+			totalAdded += len(zMembers)
+		}
 	}
 
-	_, err = pipe.Exec(ctx)
-	if err != nil {
-		return 0, err
-	}
-
-	return len(tasks), nil
+	return totalAdded, nil
 }
 
 type TransferTaskInput struct {

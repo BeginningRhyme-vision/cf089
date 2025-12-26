@@ -380,12 +380,14 @@ func CreateYoutubeJob(c *gin.Context) {
 	metrics.JobCreatedTotal.WithLabelValues("youtube").Inc()
 	metrics.ActiveJobsGauge.WithLabelValues("youtube").Inc()
 
-	// 2. Create Tasks in Redis (Sync to ensure order/consistency)
+	// 2. Create Tasks in Redis (Async)
 	if len(req.Tasks) > 0 {
-		_, err := AddTasksToJob(int64(job.ID), req.Tasks)
-		if err != nil {
-			fmt.Printf("Error adding tasks to Redis for job %d: %v\n", job.ID, err)
-		}
+		go func(jobID int64, tasks []string) {
+			_, err := AddTasksToJob(jobID, tasks)
+			if err != nil {
+				fmt.Printf("Error adding tasks to Redis for job %d: %v\n", jobID, err)
+			}
+		}(int64(job.ID), req.Tasks)
 	}
 
 	c.JSON(http.StatusCreated, job)
