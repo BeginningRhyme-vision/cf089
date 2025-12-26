@@ -57,10 +57,14 @@ apply-k8s:
 	kubectl apply -f k8s/worker-transfer-scanner.yaml
 	kubectl apply -f k8s/worker-transfer-agent.yaml
 
-restart-k8s:
-	kubectl rollout restart deployment/backend-api
-	kubectl rollout restart deployment/frontend
-	kubectl rollout restart deployment/worker-downloader-go
-	kubectl rollout restart deployment/worker-downloader-py
-	kubectl rollout restart deployment/worker-transfer-scanner
-	kubectl rollout restart deployment/worker-transfer-agent
+restart-master:
+	kubectl rollout restart deployment/backend-api -n unbound-future
+	kubectl rollout restart deployment/frontend -n unbound-future
+
+restart-worker:
+	kubectl rollout restart deployment/backend-api -n unbound-future
+	kubectl rollout restart deployment/frontend -n unbound-future
+	kubectl rollout restart deployment/worker-downloader-go -n unbound-future
+	kubectl rollout restart deployment/worker-downloader-py -n unbound-future
+	kubectl rollout restart deployment/worker-transfer-scanner -n unbound-future
+	kubectl rollout restart deployment/worker-transfer-agent -n unbound-future

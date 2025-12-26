@@ -29,26 +29,20 @@ kind: Service
 metadata:
   name: frontend
   namespace: unbound-future
+  labels:
+    service.cloud.tencent.com/loadbalance-type: OPEN
+  annotations:
+    service.kubernetes.io/service.extensiveParameters: '{"AddressIPVersion":"IPV4","InternetAccessible":{"InternetChargeType":"TRAFFIC_POSTPAID_BY_HOUR","InternetMaxBandwidthOut":10}}'
 spec:
   selector:
     app: frontend
   ports:
-  - protocol: TCP
+  - name: http
+    protocol: TCP
     port: 80
     targetPort: 80
-  type: ClusterIP
----
-# Alias Service for backend-api to match frontend nginx config (http://backend:8080)
-apiVersion: v1
-kind: Service
-metadata:
-  name: backend
-  namespace: unbound-future
-spec:
-  selector:
-    app: backend-api
-  ports:
-  - protocol: TCP
-    port: 8080
-    targetPort: 8080
-  type: ClusterIP
+  - name: callback
+    protocol: TCP
+    port: 3000
+    targetPort: 80
+  type: LoadBalancer
