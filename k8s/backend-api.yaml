@@ -19,6 +19,8 @@ spec:
         prometheus.io/port: "8080"
         prometheus.io/path: "/metrics"
     spec:
+      imagePullSecrets:
+      - name: unbound-registry-secret
       containers:
       - name: backend-api
         image: image.unboundfuture.ai/unbound-backend:latest

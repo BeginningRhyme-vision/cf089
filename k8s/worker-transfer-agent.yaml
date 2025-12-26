@@ -19,6 +19,8 @@ spec:
         prometheus.io/port: "9094"
         prometheus.io/path: "/metrics"
     spec:
+      imagePullSecrets:
+      - name: unbound-registry-secret
       containers:
       - name: worker-transfer-agent
         image: image.unboundfuture.ai/unbound-worker-transfer:latest

@@ -19,6 +19,8 @@ spec:
         prometheus.io/port: "9092"
         prometheus.io/path: "/metrics"
     spec:
+      imagePullSecrets:
+      - name: unbound-registry-secret
       containers:
       - name: worker-downloader-py
         image: image.unboundfuture.ai/unbound-worker-downloader:latest

@@ -47,6 +47,8 @@ push-transfer:
 # --- Deploy (Optional K8s helpers) ---
 
 apply-k8s:
+	kubectl apply -f k8s/namespace.yaml
+	kubectl apply -f k8s/registry-secret.yaml
 	kubectl apply -f k8s/configmap.yaml
 	kubectl apply -f k8s/backend-api.yaml
 	kubectl apply -f k8s/frontend.yaml

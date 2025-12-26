@@ -5,6 +5,7 @@ on:
     branches: [ "feat/golang" ]
     paths:
       - 'backend/**'
+      - 'frontend/**'
       - '.github/workflows/docker-publish.yml'
   workflow_dispatch:
 
@@ -28,6 +29,15 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ secrets.REGISTRY_USERNAME }}
           password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build and push Frontend
+        uses: docker/build-push-action@v5
+        with:
+          context: frontend
+          push: true
+          tags: ${{ env.REGISTRY }}/unbound-frontend:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
       - name: Build and push Backend API
         uses: docker/build-push-action@v5
