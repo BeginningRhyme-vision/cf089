@@ -71,8 +71,26 @@ func flushStats() {
 	for jobID, delta := range snapshot {
 		// Construct query
 		// Using raw SQL for atomic updates
-		query := "UPDATE youtube_jobs SET pending_count = pending_count + ?, running_count = running_count + ?, success_count = success_count + ?, failed_count = failed_count + ? WHERE id = ?"
-		database.DB.Exec(query, delta.Pending, delta.Running, delta.Success, delta.Failed, jobID)
+		// We also update status based on the *new* counts
+		query := `
+			UPDATE youtube_jobs SET 
+				pending_count = pending_count + ?, 
+				running_count = running_count + ?, 
+				success_count = success_count + ?, 
+				failed_count = failed_count + ?,
+				status = CASE 
+					WHEN status = 'PENDING' AND (running_count + ?) > 0 THEN 'RUNNING'
+					WHEN status = 'RUNNING' AND (pending_count + ?) <= 0 AND (running_count + ?) <= 0 THEN 'COMPLETED'
+					ELSE status 
+				END
+			WHERE id = ?
+		`
+		database.DB.Exec(query, 
+			delta.Pending, delta.Running, delta.Success, delta.Failed, // For count updates
+			delta.Running, // For PENDING->RUNNING check
+			delta.Pending, delta.Running, // For RUNNING->COMPLETED check
+			jobID,
+		)
 	}
 }
 

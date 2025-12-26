@@ -143,6 +143,18 @@ def main():
                 continue
                 
             print(f"Acquired {len(tasks)} tasks.")
+
+            # Immediately mark tasks as RUNNING
+            running_updates = []
+            for t in tasks:
+                running_updates.append({
+                    "id": t['id'],
+                    "job_id": t['job_id'],
+                    "status": "RUNNING",
+                    "worker_id": WORKER_ID
+                })
+            if running_updates:
+                api_update_task_batch(running_updates)
             
             futures = {executor.submit(process_metadata, t, ydl_opts): t for t in tasks}
             
