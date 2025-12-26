@@ -19,6 +19,7 @@ function App() {
     <Routes>
       <Route path="/login" element={<Login />} />
       <Route path="/auth/callback" element={<AuthCallback />} />
+      <Route path="/auth/finish" element={<AuthCallback />} />
       
       <Route path="/" element={<PrivateRoute><Dashboard /></PrivateRoute>}>
         <Route index element={<Navigate to="/jobs" replace />} />

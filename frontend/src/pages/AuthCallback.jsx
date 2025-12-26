@@ -17,6 +17,36 @@ const AuthCallback = () => {
         return;
     }
     
+    // Check for direct token from backend redirect (via /auth/finish)
+    const accessToken = searchParams.get('access_token');
+    const userStr = searchParams.get('user');
+
+    if (accessToken && userStr) {
+        try {
+            // Decode Base64 URL safe string
+            // Replace - with + and _ with /
+            let base64 = userStr.replace(/-/g, '+').replace(/_/g, '/');
+            // Add padding if needed
+            const pad = base64.length % 4;
+            if (pad) {
+                if (pad === 1) throw new Error("Invalid base64 length");
+                base64 += new Array(5 - pad).join('=');
+            }
+            const userJson = atob(base64);
+            const user = JSON.parse(userJson);
+            
+            setAuth(accessToken, user);
+            message.success('Login successful');
+            navigate('/');
+            return;
+        } catch (e) {
+            console.error("Failed to parse user info", e);
+            message.error('Login failed: Invalid user data');
+            navigate('/login');
+            return;
+        }
+    }
+
     const code = searchParams.get('code');
     if (code) {
       if (calledRef.current) return;

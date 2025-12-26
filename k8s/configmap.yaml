@@ -20,7 +20,7 @@ data:
     feishu:
       app_id: "cli_a9b405c22b389cc5"
       app_secret: "JZ9xqEBUVOwre5zttlXgKfLxhm4D1AMO"
-      redirect_uri: "http://admin.unboundfuture.ai:3000/auth/callback"
+      redirect_uri: "http://admin.unboundfuture.ai/auth/callback"
     
     security:
       jwt_secret: "unbound_future_admin"

@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"encoding/json"
+	"encoding/base64"
 	"io"
 	"net/http"
 	"net/url"
@@ -168,15 +169,21 @@ func FeishuCallback(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"access_token": tokenString,
-		"user": gin.H{
-			"id":     user.ID,
-			"name":   user.Name,
-			"avatar": user.AvatarURL,
-			"email":  user.Email,
-		},
-	})
+	userData := gin.H{
+		"id":     user.ID,
+		"name":   user.Name,
+		"avatar": user.AvatarURL,
+		"email":  user.Email,
+	}
+	userBytes, _ := json.Marshal(userData)
+	userStr := base64.URLEncoding.EncodeToString(userBytes)
+
+	// Redirect to frontend
+	// Assuming frontend is served from the same domain or we know the host.
+	// We can use the Referer or a configured Frontend URL.
+	// For now, let's assume relative redirect works if served from same domain via Nginx
+	// Or use /auth/finish
+	c.Redirect(http.StatusFound, "/auth/finish?access_token="+tokenString+"&user="+userStr)
 }
 
 func generateJWT(user models.User, cfg *config.Config) (string, error) {
