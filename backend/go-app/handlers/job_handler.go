@@ -309,6 +309,7 @@ func AddTasksToTransferJob(c *gin.Context) {
 
 type CreateYoutubeJobRequest struct {
 	R2Prefix string   `json:"r2_prefix" form:"r2_prefix"`
+	FileUrl  string   `json:"file_url" form:"file_url"`
 	Tasks    []string `json:"tasks" form:"-"` // List of URLs
 }
 
@@ -324,6 +325,7 @@ func CreateYoutubeJob(c *gin.Context) {
 		}
 	} else if strings.Contains(contentType, "multipart/form-data") {
 		req.R2Prefix = c.PostForm("r2_prefix")
+		req.FileUrl = c.PostForm("file_url")
 
 		// Handle file upload
 		file, err := c.FormFile("file")
@@ -362,6 +364,33 @@ func CreateYoutubeJob(c *gin.Context) {
 	} else {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Unsupported Content-Type"})
 		return
+	}
+
+	// Handle File URL if provided
+	if req.FileUrl != "" {
+		resp, err := http.Get(req.FileUrl)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to download file from URL: " + err.Error()})
+			return
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != http.StatusOK {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Failed to download file from URL, status: %d", resp.StatusCode)})
+			return
+		}
+
+		scanner := bufio.NewScanner(resp.Body)
+		for scanner.Scan() {
+			line := strings.TrimSpace(scanner.Text())
+			if line != "" {
+				req.Tasks = append(req.Tasks, line)
+			}
+		}
+		if err := scanner.Err(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read downloaded file: " + err.Error()})
+			return
+		}
 	}
 
 	// 1. Create Job in PG

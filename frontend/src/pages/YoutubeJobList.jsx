@@ -39,6 +39,9 @@ const YoutubeJobList = () => {
         const formData = new FormData();
         formData.append('r2_prefix', values.r2_prefix);
         formData.append('file', fileList[0]);
+        if (values.file_url) {
+            formData.append('file_url', values.file_url);
+        }
         if (values.urls) {
             formData.append('tasks', values.urls);
         }
@@ -54,14 +57,15 @@ const YoutubeJobList = () => {
             tasks = [...tasks, ...textUrls];
         }
 
-        if (tasks.length === 0) {
-            message.error('Please enter URLs or upload a file containing URLs');
+        if (tasks.length === 0 && !values.file_url) {
+            message.error('Please enter URLs, provide a File URL, or upload a file');
             return;
         }
 
         const payload = {
             r2_prefix: values.r2_prefix,
-            tasks: tasks
+            tasks: tasks,
+            file_url: values.file_url
         };
 
         await api.post('/youtube-jobs/', payload);
@@ -207,6 +211,13 @@ const YoutubeJobList = () => {
             help="e.g. 'my-channel-uploads/'"
           >
             <Input placeholder="my-folder/" />
+          </Form.Item>
+          <Form.Item 
+            name="file_url" 
+            label="File URL (Optional)" 
+            help="URL to a text file containing Youtube URLs (one per line)"
+          >
+            <Input placeholder="https://example.com/my-urls.txt" />
           </Form.Item>
           <Form.Item 
             name="urls" 
