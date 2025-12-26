@@ -1,37 +1,34 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: worker-downloader-go
+  name: worker-downloader-py
+  namespace: unbound-future
   labels:
-    app: worker-downloader-go
+    app: worker-downloader-py
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: worker-downloader-go
+      app: worker-downloader-py
   template:
     metadata:
       labels:
-        app: worker-downloader-go
+        app: worker-downloader-py
       annotations:
         prometheus.io/scrape: "true"
-        prometheus.io/port: "9091"
+        prometheus.io/port: "9092"
         prometheus.io/path: "/metrics"
     spec:
       containers:
-      - name: worker-downloader-go
+      - name: worker-downloader-py
         image: image.unboundfuture.ai/unbound-worker-downloader:latest
         imagePullPolicy: Always
-        command: ["downloader"]
+        command: ["python", "get_yt_metadata.py"]
         env:
         - name: BACKEND_API_URL
           value: "http://backend-api:8080/api"
-        - name: WORKER_ID
-          valueFrom:
-            fieldRef:
-              fieldPath: metadata.name
         ports:
-        - containerPort: 9091
+        - containerPort: 9092
         volumeMounts:
         - name: config-volume
           mountPath: /app/config.yaml
@@ -44,12 +41,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: worker-downloader-go
+  name: worker-downloader-py
+  namespace: unbound-future
 spec:
   selector:
-    app: worker-downloader-go
+    app: worker-downloader-py
   ports:
   - protocol: TCP
-    port: 9091
-    targetPort: 9091
+    port: 9092
+    targetPort: 9092
   type: ClusterIP

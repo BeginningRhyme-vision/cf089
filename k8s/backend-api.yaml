@@ -1,37 +1,40 @@
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: worker-transfer-scanner
+  name: backend-api
+  namespace: unbound-future
   labels:
-    app: worker-transfer-scanner
+    app: backend-api
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: worker-transfer-scanner
+      app: backend-api
   template:
     metadata:
       labels:
-        app: worker-transfer-scanner
+        app: backend-api
       annotations:
         prometheus.io/scrape: "true"
-        prometheus.io/port: "9093"
+        prometheus.io/port: "8080"
         prometheus.io/path: "/metrics"
     spec:
       containers:
-      - name: worker-transfer-scanner
-        image: image.unboundfuture.ai/unbound-worker-transfer:latest
+      - name: backend-api
+        image: image.unboundfuture.ai/unbound-backend:latest
         imagePullPolicy: Always
-        command: ["scanner"]
-        env:
-        - name: BACKEND_API_URL
-          value: "http://backend-api:8080/api"
         ports:
-        - containerPort: 9093
+        - containerPort: 8080
         volumeMounts:
         - name: config-volume
           mountPath: /app/config.yaml
           subPath: config.yaml
+        livenessProbe:
+          httpGet:
+            path: /metrics
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
       volumes:
       - name: config-volume
         configMap:
@@ -40,12 +43,13 @@ spec:
 apiVersion: v1
 kind: Service
 metadata:
-  name: worker-transfer-scanner
+  name: backend-api
+  namespace: unbound-future
 spec:
   selector:
-    app: worker-transfer-scanner
+    app: backend-api
   ports:
   - protocol: TCP
-    port: 9093
-    targetPort: 9093
+    port: 8080
+    targetPort: 8080
   type: ClusterIP
