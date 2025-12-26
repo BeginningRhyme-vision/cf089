@@ -2,7 +2,7 @@ name: Build and Push Docker Images
 
 on:
   push:
-    branches: [ "*" ]
+    branches: [ "feat/golang" ]
     paths:
       - 'backend/**'
       - '.github/workflows/docker-publish.yml'
