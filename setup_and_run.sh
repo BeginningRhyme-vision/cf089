@@ -40,6 +40,9 @@ docker build -t unbound-worker-downloader "$ROOT_DIR/backend/worker_downloader"
 echo ">>> Building Worker Transfer Docker Image..."
 docker build -t unbound-worker-transfer "$ROOT_DIR/backend/worker_transfer"
 
+echo ">>> Building Worker FFmpeg Docker Image..."
+docker build -t unbound-worker-ffmpeg "$ROOT_DIR/backend/worker_ffmpeg"
+
 # --- Run Containers ---
 
 echo ">>> Creating Docker Network..."
@@ -116,6 +119,16 @@ WORKER_SCANNER_ID=$(docker run -d --rm \
 
 echo "  Worker Scanner started with ID: ${WORKER_SCANNER_ID:0:12}"
 
+echo ">>> Starting Worker FFmpeg Container..."
+WORKER_FFMPEG_ID=$(docker run -d --rm \
+    --network unbound-net \
+    --network-alias worker_ffmpeg \
+    -e BACKEND_API_URL="http://backend:8080/api" \
+    --name unbound-worker-ffmpeg-instance \
+    unbound-worker-ffmpeg)
+
+echo "  Worker FFmpeg started with ID: ${WORKER_FFMPEG_ID:0:12}"
+
 # --- Cleanup Trap ---
 
 cleanup() {
@@ -127,6 +140,7 @@ cleanup() {
     docker stop "$WORKER_METADATA_ID" >/dev/null 2>&1 || true
     docker stop "$WORKER_TRANSFER_ID" >/dev/null 2>&1 || true
     docker stop "$WORKER_SCANNER_ID" >/dev/null 2>&1 || true
+    docker stop "$WORKER_FFMPEG_ID" >/dev/null 2>&1 || true
     echo ">>> Stopped."
 }
 
