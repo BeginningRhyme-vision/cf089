@@ -78,6 +78,17 @@ const YoutubeJobDetail = () => {
     fetchRecords(newPagination.current, newPagination.pageSize);
   };
 
+  const handleRetry = async () => {
+    try {
+      const res = await api.post(`/youtube-jobs/${jobId}/retry`);
+      message.success(`Retried ${res.data.reset_count} tasks`);
+      fetchJob();
+      fetchRecords(pagination.current, pagination.pageSize);
+    } catch (error) {
+      message.error('Failed to retry tasks');
+    }
+  };
+
   const statusColors = {
     PENDING: 'default',
     RUNNING: 'processing',
@@ -125,6 +136,9 @@ const YoutubeJobDetail = () => {
         </h2>
         <div>
           {job && <span style={{ marginRight: 16, color: '#888' }}>Created: {new Date(job.created_at).toLocaleString()}</span>}
+          {job && job.failed_count > 0 && (
+            <Button onClick={handleRetry} style={{ marginRight: 8 }} danger>Retry Failed</Button>
+          )}
           <Button icon={<ReloadOutlined />} onClick={() => { fetchJob(); fetchRecords(pagination.current, pagination.pageSize); }}>Refresh</Button>
         </div>
       </div>

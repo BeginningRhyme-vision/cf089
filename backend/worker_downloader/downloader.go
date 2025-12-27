@@ -133,6 +133,7 @@ type UpdateTaskRequest struct {
 	ID           int64  `json:"id"`
 	Status       string `json:"status"`
 	ErrorMessage string `json:"error_message,omitempty"`
+	IsDownloadFail bool   `json:"is_download_fail,omitempty"`
 }
 
 // --- Main ---
@@ -595,6 +596,7 @@ func reportError(id int64, msg string) {
 		ID:           id,
 		Status:       "FAILED",
 		ErrorMessage: msg,
+		IsDownloadFail: true,
 	})
 }
 

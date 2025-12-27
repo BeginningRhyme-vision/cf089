@@ -370,6 +370,14 @@ func BatchUpdate(c *gin.Context) {
 		if u.WorkerID != "" {
 			existing.WorkerID = u.WorkerID
 		}
+		if u.IsDownloadFail {
+			existing.IsDownloadFail = true
+		}
+		// Clear error/failure flags if restarting
+		if u.Status == "RUNNING" || u.Status == "PENDING" {
+			existing.IsDownloadFail = false
+			existing.ErrorMessage = ""
+		}
 		// Metadata fields
 		if u.AudioURL != "" {
 			existing.AudioURL = u.AudioURL

@@ -664,6 +664,89 @@ func DeletePendingYoutubeJobs(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("Deleted %d pending jobs", len(jobs))})
 }
 
+func RetryFailedYoutubeTasks(c *gin.Context) {
+	id := c.Param("id")
+	jobID, _ := strconv.Atoi(id)
+
+	var job models.YoutubeJob
+	if err := database.DB.First(&job, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Job not found"})
+		return
+	}
+
+	ctx := context.Background()
+	jobKey := fmt.Sprintf("job:%d:tasks", jobID)
+	
+	batchSize := 1000
+	var cursor int64 = 0
+	resetCount := 0
+
+	for {
+		ids, err := database.RDB.ZRange(ctx, jobKey, cursor, cursor+int64(batchSize)-1).Result()
+		if err != nil || len(ids) == 0 {
+			break
+		}
+
+		var keys []string
+		for _, tid := range ids {
+			keys = append(keys, fmt.Sprintf("task:%s", tid))
+		}
+
+		results, err := database.RDB.MGet(ctx, keys...).Result()
+		if err != nil {
+			cursor += int64(batchSize)
+			continue
+		}
+
+		pipe := database.RDB.Pipeline()
+		hasUpdates := false
+
+		for i, val := range results {
+			if val == nil { continue }
+			str, ok := val.(string)
+			if !ok { continue }
+
+			var task models.YoutubeTask
+			if err := json.Unmarshal([]byte(str), &task); err == nil {
+				// Retry if FAILED and IsDownloadFail is true
+				if task.Status == "FAILED" && task.IsDownloadFail {
+					task.Status = "PENDING"
+					task.IsDownloadFail = false
+					task.ErrorMessage = ""
+					task.UpdatedAt = time.Now()
+					
+					data, _ := json.Marshal(task)
+					pipe.Set(ctx, keys[i], data, 0)
+					// Push back to download queue
+					pipe.RPush(ctx, "queue:youtube:download_ready", task.ID)
+					
+					hasUpdates = true
+					resetCount++
+				}
+			}
+		}
+
+		if hasUpdates {
+			pipe.Exec(ctx)
+		}
+
+		cursor += int64(batchSize)
+		if len(ids) < batchSize {
+			break
+		}
+	}
+
+	if resetCount > 0 {
+		database.DB.Exec("UPDATE youtube_jobs SET failed_count = failed_count - ?, pending_count = pending_count + ? WHERE id = ?", resetCount, resetCount, jobID)
+
+		if job.Status == models.StatusCompleted || job.Status == models.StatusFailed {
+			database.DB.Model(&job).Update("status", models.StatusPending)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"reset_count": resetCount})
+}
+
 // --- Ffmpeg Jobs ---
 
 type CreateFfmpegJobRequest struct {

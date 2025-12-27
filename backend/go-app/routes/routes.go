@@ -59,6 +59,7 @@ func SetupRouter() *gin.Engine {
             ytJobs.GET("/", handlers.ListYoutubeJobs)
             ytJobs.GET("/:id", handlers.GetYoutubeJob)
             ytJobs.POST("/:id/tasks", handlers.AddTasksToYoutubeJob)
+            ytJobs.POST("/:id/retry", handlers.RetryFailedYoutubeTasks)
             ytJobs.DELETE("/pending", handlers.DeletePendingYoutubeJobs)
             ytJobs.DELETE("/:id", handlers.DeleteYoutubeJob)
         }

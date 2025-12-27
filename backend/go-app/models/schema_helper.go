@@ -20,6 +20,7 @@ var TaskArrowSchema = arrow.NewSchema(
 		{Name: "video_id", Type: arrow.BinaryTypes.String},
 		{Name: "error_message", Type: arrow.BinaryTypes.String},
 		{Name: "worker_id", Type: arrow.BinaryTypes.String},
+		{Name: "is_download_fail", Type: arrow.FixedWidthTypes.Boolean},
 		// Using Timestamp(Microsecond) for times
 		{Name: "started_at", Type: arrow.FixedWidthTypes.Timestamp_us},
 		{Name: "completed_at", Type: arrow.FixedWidthTypes.Timestamp_us},
@@ -45,10 +46,11 @@ func ToArrowRecord(tasks []YoutubeTask) (arrow.Record, error) {
 	bVideoID := builder.Field(7).(*array.StringBuilder)
 	bError := builder.Field(8).(*array.StringBuilder)
 	bWorker := builder.Field(9).(*array.StringBuilder)
-	bStarted := builder.Field(10).(*array.TimestampBuilder)
-	bCompleted := builder.Field(11).(*array.TimestampBuilder)
-	bCreated := builder.Field(12).(*array.TimestampBuilder)
-	bUpdated := builder.Field(13).(*array.TimestampBuilder)
+	bIsDownloadFail := builder.Field(10).(*array.BooleanBuilder)
+	bStarted := builder.Field(11).(*array.TimestampBuilder)
+	bCompleted := builder.Field(12).(*array.TimestampBuilder)
+	bCreated := builder.Field(13).(*array.TimestampBuilder)
+	bUpdated := builder.Field(14).(*array.TimestampBuilder)
 
 	for _, t := range tasks {
 		bID.Append(t.ID)
@@ -61,6 +63,7 @@ func ToArrowRecord(tasks []YoutubeTask) (arrow.Record, error) {
 		bVideoID.Append(t.VideoID)
 		bError.Append(t.ErrorMessage)
 		bWorker.Append(t.WorkerID)
+		bIsDownloadFail.Append(t.IsDownloadFail)
 
 		appendTime(bStarted, t.StartedAt)
 		appendTime(bCompleted, t.CompletedAt)

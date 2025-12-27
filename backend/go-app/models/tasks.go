@@ -18,6 +18,7 @@ type YoutubeTask struct {
 	VideoID      string    `json:"video_id"`
 	ErrorMessage string    `json:"error_message"`
 	WorkerID     string    `json:"worker_id"`
+	IsDownloadFail bool      `json:"is_download_fail"`
 	StartedAt    time.Time `json:"started_at"`
 	CompletedAt  time.Time `json:"completed_at"`
 	CreatedAt    time.Time `json:"created_at"`

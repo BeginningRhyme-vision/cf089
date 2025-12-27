@@ -109,12 +109,20 @@ def process_metadata(task, ydl_opts):
                 # Fallback to mixed if separate not found (rare for yt-dlp)
                 pass
         
-        TASKS_PROCESSED.labels(status="success").inc()
+        if not result.get("audio_url") and not result.get("video_url"):
+            result["status"] = "FAILED"
+            result["error_message"] = "No video or audio URL found"
+            result["is_download_fail"] = True
+            TASKS_PROCESSED.labels(status="failed").inc()
+        else:
+            TASKS_PROCESSED.labels(status="success").inc()
 
     except Exception as e:
         print(f"Error processing {url}: {e}")
         result["status"] = "FAILED"
         result["error_message"] = str(e)
+        if "Sign in to confirm you’re not a bot" in str(e):
+            result["is_download_fail"] = True
         TASKS_PROCESSED.labels(status="failed").inc()
         
     return result
