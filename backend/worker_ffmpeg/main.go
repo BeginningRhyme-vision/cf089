@@ -24,6 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -34,7 +35,14 @@ var (
 	apiBaseURL     string
 	workerID       string
 	CurrentTempDir string
+	maxThreads     int = 512
 )
+
+type Config struct {
+	Worker struct {
+		MaxThreads int `yaml:"max_threads"`
+	} `yaml:"worker"`
+}
 
 type FfmpegTask struct {
 	ID             int64  `json:"id"`
@@ -57,6 +65,9 @@ func main() {
 		apiBaseURL = "http://localhost:8080/api"
 	}
 
+	// Load config
+	loadConfig()
+
 	// Determine TempDir
 	CurrentTempDir = DefaultTempDir
 	if _, err := os.Stat(CurrentTempDir); os.IsNotExist(err) {
@@ -69,7 +80,7 @@ func main() {
 	if err != nil {
 		log.Printf("Failed to get disk capacity for %s: %v", CurrentTempDir, err)
 	} else {
-		log.Printf("FFmpeg Worker %s Started. TempDir: %s, Capacity: %d bytes\n", workerID, CurrentTempDir, capacity)
+		log.Printf("FFmpeg Worker %s Started. TempDir: %s, Capacity: %d bytes, MaxThreads: %d\n", workerID, CurrentTempDir, capacity, maxThreads)
 	}
 
 	for {
@@ -88,6 +99,31 @@ func main() {
 		for _, task := range tasks {
 			processTask(task)
 		}
+	}
+}
+
+func loadConfig() {
+	cfgFile := "config.yaml"
+	if _, err := os.Stat(cfgFile); err != nil {
+		log.Printf("Config file %s not found, using defaults", cfgFile)
+		return
+	}
+
+	data, err := os.ReadFile(cfgFile)
+	if err != nil {
+		log.Printf("Failed to read config file %s: %v", cfgFile, err)
+		return
+	}
+
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		log.Printf("Failed to unmarshal config: %v", err)
+		return
+	}
+
+	if cfg.Worker.MaxThreads > 0 {
+		maxThreads = cfg.Worker.MaxThreads
+		log.Printf("Loaded MaxThreads from config: %d", maxThreads)
 	}
 }
 
@@ -179,8 +215,8 @@ func processTask(t FfmpegTask) {
 	var failCount int32
 	var wg sync.WaitGroup
 
-	// Limit concurrency to 4
-	sem := make(chan struct{}, 32)
+	// Limit concurrency from config
+	sem := make(chan struct{}, maxThreads)
 	var currentProcessingBytes int64
 
 	// Start periodic status reporter
@@ -228,7 +264,7 @@ func processTask(t FfmpegTask) {
 		wg.Add(1)
 		go func(id string, files *FilePair, reqSpace int64) {
 			defer wg.Done()
-			
+
 			// Release space when done
 			defer atomic.AddInt64(&currentProcessingBytes, -reqSpace)
 
