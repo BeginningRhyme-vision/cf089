@@ -32,6 +32,7 @@ func InitPostgres(cfg *config.Config) error {
 		&models.TransferMetadata{},
 		&models.TransferJob{},
 		&models.YoutubeJob{},
+		&models.FfmpegJob{},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to migrate postgres schema: %w", err)
