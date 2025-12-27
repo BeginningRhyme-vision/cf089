@@ -15,6 +15,22 @@ env:
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: Frontend
+            context: frontend
+            image: unbound-frontend
+          - component: Backend API
+            context: backend/go-app
+            image: unbound-backend
+          - component: Worker Downloader
+            context: backend/worker_downloader
+            image: unbound-worker-downloader
+          - component: Worker Transfer
+            context: backend/worker_transfer
+            image: unbound-worker-transfer
     
     steps:
       - name: Checkout repository
@@ -30,38 +46,11 @@ jobs:
           username: ${{ secrets.REGISTRY_USERNAME }}
           password: ${{ secrets.REGISTRY_PASSWORD }}
 
-      - name: Build and push Frontend
+      - name: Build and push ${{ matrix.component }}
         uses: docker/build-push-action@v5
         with:
-          context: frontend
+          context: ${{ matrix.context }}
           push: true
-          tags: ${{ env.REGISTRY }}/unbound-frontend:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build and push Backend API
-        uses: docker/build-push-action@v5
-        with:
-          context: backend/go-app
-          push: true
-          tags: ${{ env.REGISTRY }}/unbound-backend:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build and push Worker Downloader
-        uses: docker/build-push-action@v5
-        with:
-          context: backend/worker_downloader
-          push: true
-          tags: ${{ env.REGISTRY }}/unbound-worker-downloader:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build and push Worker Transfer
-        uses: docker/build-push-action@v5
-        with:
-          context: backend/worker_transfer
-          push: true
-          tags: ${{ env.REGISTRY }}/unbound-worker-transfer:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ env.REGISTRY }}/${{ matrix.image }}:latest
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}

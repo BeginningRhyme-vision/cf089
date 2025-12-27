@@ -47,6 +47,10 @@ kind: Service
 metadata:
   name: backend-api
   namespace: unbound-future
+  labels:
+    service.cloud.tencent.com/loadbalance-type: OPEN
+  annotations:
+    service.kubernetes.io/service.extensiveParameters: '{"AddressIPVersion":"IPV4","InternetAccessible":{"InternetChargeType":"TRAFFIC_POSTPAID_BY_HOUR","InternetMaxBandwidthOut":10}}'
 spec:
   selector:
     app: backend-api
@@ -54,4 +58,4 @@ spec:
   - protocol: TCP
     port: 8080
     targetPort: 8080
-  type: ClusterIP
+  type: LoadBalancer
