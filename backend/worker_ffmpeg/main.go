@@ -54,8 +54,11 @@ type FfmpegTask struct {
 	S3AK           string `json:"s3_ak"`
 	S3SK           string `json:"s3_sk"`
 	Status         string `json:"status"`
-	TotalPairs     int    `json:"total_pairs"`
-	ProcessedPairs int    `json:"processed_pairs"`
+	
+	// Stats for progress
+	TotalCount   int `json:"total_count"`
+	SuccessCount int `json:"success_count"`
+	FailedCount  int `json:"failed_count"`
 }
 
 func main() {
@@ -176,6 +179,7 @@ func updateTaskStatus(task FfmpegTask, status string) {
 
 func processTask(t FfmpegTask) {
 	log.Printf("Processing Task %d: %s", t.ID, t.S3Prefix)
+	// Don't send counts yet, just status
 	updateTaskStatus(t, "RUNNING")
 
 	s3Client, err := createS3Client(t.S3Endpoint, t.S3AK, t.S3SK)
@@ -201,7 +205,7 @@ func processTask(t FfmpegTask) {
 	}
 
 	log.Printf("Found %d pairs to process", len(pairs))
-	t.TotalPairs = len(pairs)
+	t.TotalCount = len(pairs)
 	// Initial update with total count
 	updateTaskStatus(t, "RUNNING")
 
@@ -231,11 +235,14 @@ func processTask(t FfmpegTask) {
 			case <-reportCtx.Done():
 				return
 			case <-ticker.C:
-				processed := atomic.LoadInt32(&successCount) + atomic.LoadInt32(&failCount)
-				// Create a copy to update stats without race on original struct if it were shared (passed by value here so safe to modify copy)
-				tCopy := t
-				tCopy.ProcessedPairs = int(processed)
-				updateTaskStatus(tCopy, "RUNNING")
+				s := atomic.LoadInt32(&successCount)
+				f := atomic.LoadInt32(&failCount)
+				
+				// Create a copy to update stats without race on original struct
+			tCopy := t
+			tCopy.SuccessCount = int(s)
+			tCopy.FailedCount = int(f)
+			updateTaskStatus(tCopy, "RUNNING")
 			}
 		}
 	}()
@@ -292,7 +299,8 @@ func processTask(t FfmpegTask) {
 	wg.Wait()
 
 	// Final status update
-	t.ProcessedPairs = int(successCount + failCount)
+	t.SuccessCount = int(successCount)
+	t.FailedCount = int(failCount)
 	log.Printf("Task %d completed. Success: %d, Failed: %d", t.ID, successCount, failCount)
 	if failCount > 0 && successCount == 0 {
 		updateTaskStatus(t, "FAILED")

@@ -56,4 +56,9 @@ type FfmpegTask struct {
 	CompletedAt  time.Time `json:"completed_at"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+
+	// Progress reporting
+	TotalCount   int `json:"total_count"`
+	SuccessCount int `json:"success_count"`
+	FailedCount  int `json:"failed_count"`
 }

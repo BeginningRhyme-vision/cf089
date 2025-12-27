@@ -1715,67 +1715,7 @@ func BatchUpdateTransfer(c *gin.Context) {
 
 	
 
-			// Sync to Postgres if status changed
-
-	
-
-			if oldStatus != newStatus {
-
-	
-
-				jobID := existing.JobID
-
-	
-
-				
-
-	
-
-				// Simple logic assuming 1 task per job or simple counters
-
-	
-
-				// We execute raw SQL updates to avoid race conditions
-
-	
-
-				
-
-	
-
-				var pendingDelta, runningDelta, successDelta, failedDelta int
-
-	
-
-				
-
-	
-
-				// Decrement old
-
-	
-
-				switch oldStatus {
-
-	
-
-				case "PENDING": pendingDelta--
-
-	
-
-				case "RUNNING": runningDelta--
-
-	
-
-				case "COMPLETED": successDelta--
-
-	
-
-				case "FAILED": failedDelta--
-
-	
-
-				}
+					// Sync to Postgres if status changed or progress update
 
 	
 
@@ -1783,31 +1723,7 @@ func BatchUpdateTransfer(c *gin.Context) {
 
 	
 
-				// Increment new
-
-	
-
-				switch newStatus {
-
-	
-
-				case "PENDING": pendingDelta++
-
-	
-
-				case "RUNNING": runningDelta++
-
-	
-
-				case "COMPLETED": successDelta++
-
-	
-
-				case "FAILED": failedDelta++
-
-	
-
-				}
+					if oldStatus != newStatus || u.TotalCount > 0 || u.SuccessCount > 0 || u.FailedCount > 0 {
 
 	
 
@@ -1815,75 +1731,439 @@ func BatchUpdateTransfer(c *gin.Context) {
 
 	
 
-				// Construct status update logic
+						jobID := existing.JobID
 
 	
 
-				// If RUNNING -> set job to RUNNING
+	
 
 	
 
-				// If COMPLETED/FAILED -> Check if all done? (But we just update counts here, let job status be derived or simple 1:1)
+			
 
 	
 
-				// For FfmpegJob which is 1:1 with this task, we can just set the status directly to newStatus
+	
 
 	
 
-				
+						// If status changed, use status logic
 
 	
 
-				query := `
+	
 
 	
 
-					UPDATE ffmpeg_jobs SET 
+						// BUT if we have progress counts, use them to update counts absolutely.
 
 	
 
-						pending_count = pending_count + ?, 
+	
 
 	
 
-						running_count = running_count + ?, 
+						
 
 	
 
-						success_count = success_count + ?, 
+	
 
 	
 
-						failed_count = failed_count + ?,
+						// We prioritize absolute counts if provided (from worker reporting)
 
 	
 
-						status = ?,
+	
 
 	
 
-						updated_at = NOW()
+						if u.TotalCount > 0 || u.SuccessCount > 0 || u.FailedCount > 0 {
 
 	
 
-					WHERE id = ?
+	
 
 	
 
-				`
+							pending := u.TotalCount - (u.SuccessCount + u.FailedCount)
 
 	
 
-				// Note: For 1:1 mapping, status of Job = status of Task
+	
 
 	
 
-				database.DB.Exec(query, pendingDelta, runningDelta, successDelta, failedDelta, newStatus, jobID)
+							if pending < 0 { pending = 0 }
 
 	
 
-			}
+	
+
+	
+
+			
+
+	
+
+	
+
+	
+
+							query := `
+
+	
+
+	
+
+	
+
+								UPDATE ffmpeg_jobs SET 
+
+	
+
+	
+
+	
+
+									total_count = GREATEST(total_count, ?),
+
+	
+
+	
+
+	
+
+									success_count = ?, 
+
+	
+
+	
+
+	
+
+									failed_count = ?,
+
+	
+
+	
+
+	
+
+									pending_count = ?,
+
+	
+
+	
+
+	
+
+									status = ?,
+
+	
+
+	
+
+	
+
+									updated_at = NOW()
+
+	
+
+	
+
+	
+
+								WHERE id = ?
+
+	
+
+	
+
+	
+
+							`
+
+	
+
+	
+
+	
+
+							database.DB.Exec(query, u.TotalCount, u.SuccessCount, u.FailedCount, pending, newStatus, jobID)
+
+	
+
+	
+
+	
+
+			
+
+	
+
+	
+
+	
+
+						} else if oldStatus != newStatus {
+
+	
+
+	
+
+	
+
+							// Legacy status-based delta update (if no counts provided)
+
+	
+
+	
+
+	
+
+							var pendingDelta, runningDelta, successDelta, failedDelta int
+
+	
+
+	
+
+	
+
+			
+
+	
+
+	
+
+	
+
+							// Decrement old
+
+	
+
+	
+
+	
+
+							switch oldStatus {
+
+	
+
+	
+
+	
+
+							case "PENDING": pendingDelta--
+
+	
+
+	
+
+	
+
+							case "RUNNING": runningDelta--
+
+	
+
+	
+
+	
+
+							case "COMPLETED": successDelta--
+
+	
+
+	
+
+	
+
+							case "FAILED": failedDelta--
+
+	
+
+	
+
+	
+
+							}
+
+	
+
+	
+
+	
+
+			
+
+	
+
+	
+
+	
+
+							// Increment new
+
+	
+
+	
+
+	
+
+							switch newStatus {
+
+	
+
+	
+
+	
+
+							case "PENDING": pendingDelta++
+
+	
+
+	
+
+	
+
+							case "RUNNING": runningDelta++
+
+	
+
+	
+
+	
+
+							case "COMPLETED": successDelta++
+
+	
+
+	
+
+	
+
+							case "FAILED": failedDelta++
+
+	
+
+	
+
+	
+
+							}
+
+	
+
+	
+
+	
+
+			
+
+	
+
+	
+
+	
+
+							query := `
+
+	
+
+	
+
+	
+
+								UPDATE ffmpeg_jobs SET 
+
+	
+
+	
+
+	
+
+									pending_count = pending_count + ?, 
+
+	
+
+	
+
+	
+
+									running_count = running_count + ?, 
+
+	
+
+	
+
+	
+
+									success_count = success_count + ?, 
+
+	
+
+	
+
+	
+
+									failed_count = failed_count + ?,
+
+	
+
+	
+
+	
+
+									status = ?,
+
+	
+
+	
+
+	
+
+									updated_at = NOW()
+
+	
+
+	
+
+	
+
+								WHERE id = ?
+
+	
+
+	
+
+	
+
+							`
+
+	
+
+	
+
+	
+
+							database.DB.Exec(query, pendingDelta, runningDelta, successDelta, failedDelta, newStatus, jobID)
+
+	
+
+	
+
+	
+
+						}
+
+	
+
+	
+
+	
+
+					}
 
 	
 
