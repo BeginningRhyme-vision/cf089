@@ -45,17 +45,12 @@ docker build -t unbound-worker-ffmpeg "$ROOT_DIR/backend/worker_ffmpeg"
 
 # --- Run Containers ---
 
-echo ">>> Creating Docker Network..."
-# Create network if it doesn't exist
-docker network create unbound-net 2>/dev/null || true
-
 echo ">>> Starting Backend Container..."
 # Mount config.yaml to /app/config.yaml
 # Run in detached mode first to get ID
 BACKEND_ID=$(docker run -d --rm \
-    --network unbound-net \
-    --network-alias backend \
-    -p 8080:8080 \
+    --network host \
+    --network-alias backend-api \
     -v "$CONFIG_FILE:/app/config.yaml" \
     --name unbound-backend-instance \
     unbound-backend)
@@ -63,67 +58,66 @@ BACKEND_ID=$(docker run -d --rm \
 echo "  Backend started with ID: ${BACKEND_ID:0:12}"
 
 echo ">>> Starting Frontend Container..."
-# Map host port 3000 to container port 80
+# Frontend runs on host network (listens on port 80 inside container, so port 80 on host)
 FRONTEND_ID=$(docker run -d --rm \
-    --network unbound-net \
-    -p 3000:80 \
+    --network host \
     --name unbound-frontend-instance \
     unbound-frontend)
 
 echo "  Frontend started with ID: ${FRONTEND_ID:0:12}"
 
-echo ">>> Starting Worker Downloader Container..."
-WORKER_DOWNLOADER_ID=$(docker run -d --rm \
-    --network unbound-net \
-    --network-alias worker_downloader \
-    -e BACKEND_API_URL="http://backend:8080/api" \
-    -v "$CONFIG_FILE:/app/config.yaml" \
-    --name unbound-worker-downloader-instance \
-    --entrypoint "downloader" \
-    unbound-worker-downloader)
+# echo ">>> Starting Worker Downloader Container..."
+# WORKER_DOWNLOADER_ID=$(docker run -d --rm \
+#     --network host \
+#     --network-alias worker_downloader \
+#     -e BACKEND_API_URL="http://localhost:8080/api" \
+#     -v "$CONFIG_FILE:/app/config.yaml" \
+#     --name unbound-worker-downloader-instance \
+#     --entrypoint "downloader" \
+#     unbound-worker-downloader)
 
-echo "  Worker Downloader started with ID: ${WORKER_DOWNLOADER_ID:0:12}"
+# echo "  Worker Downloader started with ID: ${WORKER_DOWNLOADER_ID:0:12}"
 
-echo ">>> Starting Worker Metadata Container..."
-WORKER_METADATA_ID=$(docker run -d --rm \
-    --network unbound-net \
-    --network-alias worker_metadata \
-    -e BACKEND_API_URL="http://backend:8080/api" \
-    -v "$CONFIG_FILE:/app/config.yaml" \
-    --name unbound-worker-metadata-instance \
-    unbound-worker-downloader)
+# echo ">>> Starting Worker Metadata Container..."
+# WORKER_METADATA_ID=$(docker run -d --rm \
+#     --network host \
+#     --network-alias worker_metadata \
+#     -e BACKEND_API_URL="http://localhost:8080/api" \
+#     -v "$CONFIG_FILE:/app/config.yaml" \
+#     --name unbound-worker-metadata-instance \
+#     unbound-worker-downloader)
 
-echo "  Worker Metadata started with ID: ${WORKER_METADATA_ID:0:12}"
+# echo "  Worker Metadata started with ID: ${WORKER_METADATA_ID:0:12}"
 
-echo ">>> Starting Worker Transfer Container..."
-WORKER_TRANSFER_ID=$(docker run -d --rm \
-    --network unbound-net \
-    --network-alias worker_transfer \
-    -e BACKEND_API_URL="http://backend:8080/api" \
-    -v "$CONFIG_FILE:/app/config.yaml" \
-    --name unbound-worker-transfer-instance \
-    --entrypoint "transfer" \
-    unbound-worker-transfer)
+# echo ">>> Starting Worker Transfer Container..."
+# WORKER_TRANSFER_ID=$(docker run -d --rm \
+#     --network host \
+#     --network-alias worker_transfer \
+#     -e BACKEND_API_URL="http://localhost:8080/api" \
+#     -v "$CONFIG_FILE:/app/config.yaml" \
+#     --name unbound-worker-transfer-instance \
+#     --entrypoint "transfer" \
+#     unbound-worker-transfer)
 
-echo "  Worker Transfer started with ID: ${WORKER_TRANSFER_ID:0:12}"
+# echo "  Worker Transfer started with ID: ${WORKER_TRANSFER_ID:0:12}"
 
-echo ">>> Starting Worker Scanner Container..."
-WORKER_SCANNER_ID=$(docker run -d --rm \
-    --network unbound-net \
-    --network-alias worker_scanner \
-    -e BACKEND_API_URL="http://backend:8080/api" \
-    -v "$CONFIG_FILE:/app/config.yaml" \
-    --name unbound-worker-scanner-instance \
-    --entrypoint "scanner" \
-    unbound-worker-transfer)
+# echo ">>> Starting Worker Scanner Container..."
+# WORKER_SCANNER_ID=$(docker run -d --rm \
+#     --network host \
+#     --network-alias worker_scanner \
+#     -e BACKEND_API_URL="http://localhost:8080/api" \
+#     -v "$CONFIG_FILE:/app/config.yaml" \
+#     --name unbound-worker-scanner-instance \
+#     --entrypoint "scanner" \
+#     unbound-worker-transfer)
 
-echo "  Worker Scanner started with ID: ${WORKER_SCANNER_ID:0:12}"
+# echo "  Worker Scanner started with ID: ${WORKER_SCANNER_ID:0:12}"
 
 echo ">>> Starting Worker FFmpeg Container..."
 WORKER_FFMPEG_ID=$(docker run -d --rm \
-    --network unbound-net \
+    --network host \
     --network-alias worker_ffmpeg \
-    -e BACKEND_API_URL="http://backend:8080/api" \
+    -e BACKEND_API_URL="http://localhost:8080/api" \
     --name unbound-worker-ffmpeg-instance \
     unbound-worker-ffmpeg)
 
@@ -149,7 +143,7 @@ trap cleanup SIGINT SIGTERM
 echo ""
 echo ">>> Setup Complete!"
 echo "Backend API: http://localhost:8080"
-echo "Frontend UI: http://localhost:3000"
+echo "Frontend UI: http://localhost"
 echo "Press CTRL+C to stop."
 
 # Wait for both containers to exit (or script interruption)
