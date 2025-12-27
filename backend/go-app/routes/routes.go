@@ -46,6 +46,7 @@ func SetupRouter() *gin.Engine {
 			jobs.GET("/:id", handlers.GetTransferJob)
 			jobs.POST("/:id/start", handlers.StartTransferJob)
 			jobs.POST("/:id/stop", handlers.StopTransferJob)
+			jobs.POST("/:id/retry", handlers.RetryFailedTransferTasks)
 			jobs.PATCH("/:id/status", handlers.UpdateTransferJobStatus)
 			jobs.POST("/:id/tasks", handlers.AddTasksToTransferJob)
 			jobs.DELETE("/:id", handlers.DeleteTransferJob)
@@ -87,6 +88,23 @@ func SetupRouter() *gin.Engine {
         {
             txTasks.POST("/acquire", handlers.AcquireTransferTasks)
             txTasks.POST("/update", handlers.BatchUpdateTransfer)
+        }
+
+        // Ffmpeg Jobs
+        ffJobs := api.Group("/ffmpeg-jobs")
+        {
+            ffJobs.POST("/", handlers.CreateFfmpegJob)
+            ffJobs.GET("/", handlers.ListFfmpegJobs)
+            ffJobs.GET("/:id", handlers.GetFfmpegJob)
+            ffJobs.PATCH("/:id/status", handlers.UpdateFfmpegJobStatus)
+            ffJobs.DELETE("/:id", handlers.DeleteFfmpegJob)
+        }
+        
+        // Ffmpeg Tasks
+        ffTasks := api.Group("/ffmpeg-tasks")
+        {
+            ffTasks.POST("/acquire", handlers.AcquireFfmpegTasks)
+            ffTasks.POST("/update", handlers.BatchUpdateFfmpeg)
         }
 	}
 

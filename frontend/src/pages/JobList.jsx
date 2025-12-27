@@ -121,8 +121,11 @@ const JobList = () => {
           {record.status === 'RUNNING' && (
             <Button icon={<StopOutlined />} size="small" danger onClick={() => handleAction(record.job_id, 'stop')}>Stop</Button>
           )}
+          {record.failed_count > 0 && (
+            <Button icon={<ReloadOutlined />} size="small" onClick={() => handleAction(record.job_id, 'retry')}>Retry Failed</Button>
+          )}
           <Popconfirm 
-            title="Are you sure delete this job?" 
+            title="Are you sure delete this job?"  
             onConfirm={() => handleDelete(record.job_id)} 
             okText="Yes" 
             cancelText="No"
@@ -201,7 +204,12 @@ const JobList = () => {
         title="Job Details"
         open={detailVisible}
         onCancel={() => setDetailVisible(false)}
-        footer={[<Button key="close" onClick={() => setDetailVisible(false)}>Close</Button>]}
+        footer={[
+          <Button key="close" onClick={() => setDetailVisible(false)}>Close</Button>,
+          selectedJob && selectedJob.failed_count > 0 && (
+            <Button key="retry" icon={<ReloadOutlined />} onClick={() => handleAction(selectedJob.job_id, 'retry')}>Retry Failed</Button>
+          )
+        ]}
         width={700}
       >
         {selectedJob && (

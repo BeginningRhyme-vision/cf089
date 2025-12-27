@@ -31,6 +31,9 @@ jobs:
           - component: Worker Transfer
             context: backend/worker_transfer
             image: unbound-worker-transfer
+          - component: Worker FFmpeg
+            context: backend/worker_ffmpeg
+            image: unbound-worker-ffmpeg
     
     steps:
       - name: Checkout repository

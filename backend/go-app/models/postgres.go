@@ -86,3 +86,23 @@ type YoutubeJob struct {
 func (YoutubeJob) TableName() string {
 	return "youtube_jobs"
 }
+
+type FfmpegJob struct {
+	ID           uint             `gorm:"primaryKey" json:"id"`
+	MetadataID   uint             `gorm:"index" json:"metadata_id"`
+	S3Prefix     string           `gorm:"size:1024;not null" json:"s3_prefix"` // e.g., "s3://bucket/path/"
+	Status       JobStatus        `gorm:"type:varchar(50);default:'PENDING'" json:"status"`
+	TotalCount   int              `gorm:"default:0" json:"total_count"`
+	PendingCount int              `gorm:"default:0" json:"pending_count"`
+	RunningCount int              `gorm:"default:0" json:"running_count"`
+	SuccessCount int              `gorm:"default:0" json:"success_count"`
+	FailedCount  int              `gorm:"default:0" json:"failed_count"`
+	CreatedAt    time.Time        `gorm:"autoCreateTime" json:"created_at"`
+	UpdatedAt    time.Time        `gorm:"autoUpdateTime" json:"updated_at"`
+
+	Metadata TransferMetadata `gorm:"foreignKey:MetadataID" json:"metadata"`
+}
+
+func (FfmpegJob) TableName() string {
+	return "ffmpeg_jobs"
+}

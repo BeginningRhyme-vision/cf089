@@ -7,7 +7,8 @@ import {
   LogoutOutlined,
   MenuUnfoldOutlined,
   MenuFoldOutlined,
-  VideoCameraOutlined
+  VideoCameraOutlined,
+  PlaySquareOutlined
 } from '@ant-design/icons';
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { useAuthStore } from '../store';
@@ -48,6 +49,11 @@ const Dashboard = () => {
       key: '/youtube-jobs',
       icon: <VideoCameraOutlined />,
       label: 'Youtube Jobs',
+    },
+    {
+      key: '/ffmpeg-jobs',
+      icon: <PlaySquareOutlined />,
+      label: 'FFmpeg Jobs',
     },
   ];
 

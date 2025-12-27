@@ -37,3 +37,21 @@ type TransferTask struct {
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
 }
+
+type FfmpegTask struct {
+	ID           int64     `json:"id"`
+	JobID        int64     `json:"job_id"`
+	S3Endpoint   string    `json:"s3_endpoint"`
+	S3Bucket     string    `json:"s3_bucket"`
+	S3Prefix     string    `json:"s3_prefix"`
+	S3AK         string    `json:"s3_ak"`
+	S3SK         string    `json:"s3_sk"`
+	Region       string    `json:"region"`
+	Status       string    `json:"status"` // PENDING, RUNNING, COMPLETED, FAILED
+	ErrorMessage string    `json:"error_message"`
+	WorkerID     string    `json:"worker_id"`
+	StartedAt    time.Time `json:"started_at"`
+	CompletedAt  time.Time `json:"completed_at"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}

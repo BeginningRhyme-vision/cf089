@@ -3,6 +3,7 @@ package handlers
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -142,6 +143,86 @@ func ListPendingTransferJobs(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, jobs)
+}
+
+func RetryFailedTransferTasks(c *gin.Context) {
+	id := c.Param("id")
+	jobID, _ := strconv.Atoi(id)
+
+	var job models.TransferJob
+	if err := database.DB.First(&job, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Job not found"})
+		return
+	}
+
+	ctx := context.Background()
+	jobKey := fmt.Sprintf("tx:job:%d:tasks", jobID)
+	
+	batchSize := 1000
+	var cursor int64 = 0
+	resetCount := 0
+
+	for {
+		ids, err := database.RDB.ZRange(ctx, jobKey, cursor, cursor+int64(batchSize)-1).Result()
+		if err != nil || len(ids) == 0 {
+			break
+		}
+
+		var keys []string
+		for _, tid := range ids {
+			keys = append(keys, fmt.Sprintf("tx:task:%s", tid))
+		}
+
+		results, err := database.RDB.MGet(ctx, keys...).Result()
+		if err != nil {
+			cursor += int64(batchSize)
+			continue
+		}
+
+		pipe := database.RDB.Pipeline()
+		hasUpdates := false
+
+		for i, val := range results {
+			if val == nil { continue }
+			str, ok := val.(string)
+			if !ok { continue }
+
+			var task models.TransferTask
+			if err := json.Unmarshal([]byte(str), &task); err == nil {
+				if task.Status == "FAILED" {
+					task.Status = "PENDING"
+					task.UpdatedAt = time.Now()
+					task.ErrorMessage = ""
+					
+					data, _ := json.Marshal(task)
+					pipe.Set(ctx, keys[i], data, 0)
+					hasUpdates = true
+					resetCount++
+				}
+			}
+		}
+
+		if hasUpdates {
+			pipe.Exec(ctx)
+		}
+
+		cursor += int64(batchSize)
+		if len(ids) < batchSize {
+			break
+		}
+	}
+
+	if resetCount > 0 {
+		database.DB.Exec("UPDATE transfer_jobs SET failed_count = failed_count - ?, pending_count = pending_count + ? WHERE job_id = ?", resetCount, resetCount, jobID)
+		
+		database.RDB.Set(ctx, fmt.Sprintf("tx:job:%d:offset", jobID), 0, 0)
+
+		if job.Status == models.StatusCompleted || job.Status == models.StatusFailed {
+			database.DB.Model(&job).Update("status", models.StatusPending)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"reset_count": resetCount})
 }
 
 type UpdateJobStatusRequest struct {
@@ -581,4 +662,150 @@ func DeletePendingYoutubeJobs(c *gin.Context) {
 	}(jobs)
 
 	c.JSON(http.StatusOK, gin.H{"message": fmt.Sprintf("Deleted %d pending jobs", len(jobs))})
+}
+
+// --- Ffmpeg Jobs ---
+
+type CreateFfmpegJobRequest struct {
+	models.FfmpegJob
+}
+
+func CreateFfmpegJob(c *gin.Context) {
+	var req CreateFfmpegJobRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	job := req.FfmpegJob
+	job.Status = models.StatusPending
+	// Assuming 1 task per job initially (the job itself is the task context)
+	job.TotalCount = 1
+	job.PendingCount = 1
+
+	if err := database.DB.Create(&job).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Preload Metadata to get credentials
+	if err := database.DB.Preload("Metadata").First(&job, job.ID).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load metadata: " + err.Error()})
+		return
+	}
+
+	metrics.JobCreatedTotal.WithLabelValues("ffmpeg").Inc()
+	metrics.ActiveJobsGauge.WithLabelValues("ffmpeg").Inc()
+
+	// Create the single task for this job
+	go func(j models.FfmpegJob) {
+		task := models.FfmpegTask{
+			JobID:      int64(j.ID),
+			S3Endpoint: j.Metadata.Endpoint,
+			S3AK:       j.Metadata.AK,
+			S3SK:       j.Metadata.SKEncrypted, // Pass encrypted, worker decrypts? Or we decrypt here?
+			// worker_transfer passes it to job config. Let's pass it as is.
+			// Ideally worker decrypts.
+			S3Prefix: j.S3Prefix,
+			Status:   "PENDING",
+		}
+		
+		_, err := AddFfmpegTasksToJob(int64(j.ID), []models.FfmpegTask{task})
+		if err != nil {
+			fmt.Printf("Error adding ffmpeg task for job %d: %v\n", j.ID, err)
+		}
+	}(job)
+
+	c.JSON(http.StatusCreated, job)
+}
+
+func ListFfmpegJobs(c *gin.Context) {
+	var jobs []models.FfmpegJob
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
+	offset := (page - 1) * limit
+
+	if err := database.DB.Preload("Metadata").Order("created_at desc").Offset(offset).Limit(limit).Find(&jobs).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, jobs)
+}
+
+func GetFfmpegJob(c *gin.Context) {
+	id := c.Param("id")
+	var job models.FfmpegJob
+	if err := database.DB.Preload("Metadata").First(&job, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Job not found"})
+		return
+	}
+	c.JSON(http.StatusOK, job)
+}
+
+func UpdateFfmpegJobStatus(c *gin.Context) {
+	id := c.Param("id")
+	var req UpdateJobStatusRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	var job models.FfmpegJob
+	if err := database.DB.First(&job, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Job not found"})
+		return
+	}
+
+	updates := make(map[string]interface{})
+	if req.Status != "" {
+		updates["status"] = req.Status
+	}
+	
+	// Atomic counter updates if provided
+	if req.IncSuccess > 0 || req.IncFailed > 0 {
+		totalDec := req.IncSuccess + req.IncFailed
+		database.DB.Exec("UPDATE ffmpeg_jobs SET success_count = success_count + ?, failed_count = failed_count + ?, pending_count = GREATEST(0, pending_count - ?) WHERE id = ?", req.IncSuccess, req.IncFailed, totalDec, id)
+	}
+
+	if len(updates) > 0 {
+		if err := database.DB.Model(&job).Updates(updates).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+	}
+
+	database.DB.First(&job, id)
+	c.JSON(http.StatusOK, job)
+}
+
+func DeleteFfmpegJob(c *gin.Context) {
+	idStr := c.Param("id")
+	id, _ := strconv.Atoi(idStr)
+
+	if err := database.DB.Delete(&models.FfmpegJob{}, id).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Cleanup Redis
+	go func(jid uint) {
+		ctx := context.Background()
+		jobKey := fmt.Sprintf("ff:job:%d:tasks", jid)
+		
+		taskIDs, err := database.RDB.ZRange(ctx, jobKey, 0, -1).Result()
+		if err == nil && len(taskIDs) > 0 {
+			pipe := database.RDB.Pipeline()
+			for _, tid := range taskIDs {
+				pipe.Del(ctx, fmt.Sprintf("ff:task:%s", tid))
+			}
+			pipe.Exec(ctx)
+		}
+		
+		database.RDB.Del(ctx, jobKey)
+		database.RDB.Del(ctx, fmt.Sprintf("ff:job:%d:lock", jid))
+		database.RDB.Del(ctx, fmt.Sprintf("ff:job:%d:offset", jid))
+	}(uint(id))
+
+	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
 }
