@@ -149,6 +149,9 @@ const FfmpegJobList = () => {
           <Form.Item name="s3_prefix" label="S3 Prefix (Folder)" rules={[{ required: true }]} tooltip="Folder containing {id}_video.ext and {id}_audio.ext">
             <Input placeholder="raw_uploads/" />
           </Form.Item>
+          <Form.Item name="s3_upload_prefix" label="S3 Upload Prefix (Optional)" tooltip="Folder to upload output files. Defaults to source folder if empty.">
+            <Input placeholder="processed/" />
+          </Form.Item>
         </Form>
       </Modal>
 
@@ -164,6 +167,7 @@ const FfmpegJobList = () => {
             <Descriptions.Item label="Job ID">{selectedJob.id}</Descriptions.Item>
             <Descriptions.Item label="Metadata ID">{selectedJob.metadata_id}</Descriptions.Item>
             <Descriptions.Item label="S3 Prefix">{selectedJob.s3_prefix}</Descriptions.Item>
+            <Descriptions.Item label="S3 Upload Prefix">{selectedJob.s3_upload_prefix}</Descriptions.Item>
             <Descriptions.Item label="Status">
               <Tag color={statusColors[selectedJob.status]}>{selectedJob.status}</Tag>
             </Descriptions.Item>

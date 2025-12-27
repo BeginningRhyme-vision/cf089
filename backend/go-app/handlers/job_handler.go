@@ -790,6 +790,7 @@ func CreateFfmpegJob(c *gin.Context) {
 			// worker_transfer passes it to job config. Let's pass it as is.
 			// Ideally worker decrypts.
 			S3Prefix: j.S3Prefix,
+			S3UploadPrefix: j.S3UploadPrefix,
 			Status:   "PENDING",
 		}
 		

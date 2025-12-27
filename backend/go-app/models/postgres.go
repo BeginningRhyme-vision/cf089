@@ -91,6 +91,7 @@ type FfmpegJob struct {
 	ID           uint             `gorm:"primaryKey" json:"id"`
 	MetadataID   uint             `gorm:"index" json:"metadata_id"`
 	S3Prefix     string           `gorm:"size:1024;not null" json:"s3_prefix"` // e.g., "s3://bucket/path/"
+	S3UploadPrefix string         `gorm:"size:1024" json:"s3_upload_prefix"`   // e.g., "s3://bucket/upload_path/"
 	Status       JobStatus        `gorm:"type:varchar(50);default:'PENDING'" json:"status"`
 	TotalCount   int              `gorm:"default:0" json:"total_count"`
 	PendingCount int              `gorm:"default:0" json:"pending_count"`

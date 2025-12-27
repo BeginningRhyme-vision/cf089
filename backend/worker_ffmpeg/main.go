@@ -40,6 +40,7 @@ type FfmpegTask struct {
 	S3Endpoint   string    `json:"s3_endpoint"`
 	S3Bucket     string    `json:"s3_bucket"`
 	S3Prefix     string    `json:"s3_prefix"`
+	S3UploadPrefix string  `json:"s3_upload_prefix"`
 	S3AK         string    `json:"s3_ak"`
 	S3SK         string    `json:"s3_sk"`
 	Status       string    `json:"status"`
@@ -129,6 +130,10 @@ func processTask(t FfmpegTask) {
 
 	bucket := getBucketFromEndpoint(t.S3Endpoint)
 	prefix := t.S3Prefix
+	uploadPrefix := t.S3UploadPrefix
+	if uploadPrefix == "" {
+		uploadPrefix = prefix // Fallback
+	}
 	
 	// List objects
 	pairs, err := listPairs(s3Client, bucket, prefix)
@@ -159,7 +164,7 @@ func processTask(t FfmpegTask) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			err := processPair(s3Client, bucket, id, files.Video, files.Audio)
+			err := processPair(s3Client, bucket, uploadPrefix, id, files.Video, files.Audio)
 			if err != nil {
 				log.Printf("Failed to process %s: %v", id, err)
 				atomic.AddInt32(&failCount, 1)
@@ -249,14 +254,10 @@ func deleteObjects(client *s3.Client, bucket string, keys []string) error {
 	return err
 }
 
-func processPair(client *s3.Client, bucket, id, videoKey, audioKey string) error {
-	// Check if output exists
-	// Output: {prefix}/{id}.mp4 ? Or just {id}.mp4 in root of prefix?
-	// Assuming output goes to same folder: {prefix}/{id}.mp4
-	
-	// Determine output key
-	outputKey := filepath.Dir(videoKey) + "/" + id + ".mp4"
-	if outputKey == "./"+id+".mp4" { outputKey = id + ".mp4" } // Handle root
+func processPair(client *s3.Client, bucket, uploadPrefix, id, videoKey, audioKey string) error {
+	// Output: {uploadPrefix}/{id}.mp4
+	outputKey := strings.TrimRight(uploadPrefix, "/") + "/" + id + ".mp4"
+	if strings.HasPrefix(outputKey, "/") { outputKey = strings.TrimPrefix(outputKey, "/") }
     
 	// Check existence
 	_, err := client.HeadObject(context.TODO(), &s3.HeadObjectInput{

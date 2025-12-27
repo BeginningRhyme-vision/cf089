@@ -1493,60 +1493,430 @@ func BatchUpdateTransfer(c *gin.Context) {
 
 	func BatchUpdateFfmpeg(c *gin.Context) {
 
+	
+
 		var updates []models.FfmpegTask
+
+	
 
 		if err := c.ShouldBindJSON(&updates); err != nil {
 
+	
+
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+
+	
 
 			return
 
+	
+
 		}
+
+	
 
 		
 
+	
+
 		if len(updates) == 0 {
+
+	
 
 			c.JSON(http.StatusOK, gin.H{"status": "no updates"})
 
+	
+
 			return
 
+	
+
 		}
+
+	
+
+	
 
 	
 
 		ctx := context.Background()
 
-		pipe := database.RDB.Pipeline()
+	
+
+	
+
+	
+
+		// 1. Fetch existing tasks to compare status
+
+	
+
+		var keys []string
 
 	
 
 		for _, u := range updates {
 
-			u.UpdatedAt = time.Now()
+	
 
-			data, err := json.Marshal(u)
+			keys = append(keys, fmt.Sprintf("ff:task:%d", u.ID))
 
-			if err != nil { continue }
-
-			
-
-			pipe.Set(ctx, fmt.Sprintf("ff:task:%d", u.ID), data, 0)
+	
 
 		}
 
 	
 
-		_, err := pipe.Exec(ctx)
+	
+
+	
+
+		existingJSONs, err := database.RDB.MGet(ctx, keys...).Result()
+
+	
 
 		if err != nil {
 
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+	
+
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch existing tasks: " + err.Error()})
+
+	
 
 			return
 
+	
+
 		}
 
+	
+
+	
+
+	
+
+		pipe := database.RDB.Pipeline()
+
+	
+
+	
+
+	
+
+		for i, u := range updates {
+
+	
+
+			val := existingJSONs[i]
+
+	
+
+			if val == nil { continue }
+
+	
+
+			str, ok := val.(string)
+
+	
+
+			if !ok { continue }
+
+	
+
+	
+
+	
+
+			var existing models.FfmpegTask
+
+	
+
+			if err := json.Unmarshal([]byte(str), &existing); err != nil {
+
+	
+
+				continue
+
+	
+
+			}
+
+	
+
+	
+
+	
+
+			oldStatus := existing.Status
+
+	
+
+			newStatus := u.Status
+
+	
+
+	
+
+	
+
+			// Update fields
+
+	
+
+			existing.Status = newStatus
+
+	
+
+			existing.UpdatedAt = time.Now()
+
+	
+
+			if newStatus == "RUNNING" && existing.StartedAt.IsZero() {
+
+	
+
+				existing.StartedAt = time.Now()
+
+	
+
+			}
+
+	
+
+			if (newStatus == "COMPLETED" || newStatus == "FAILED") && existing.CompletedAt.IsZero() {
+
+	
+
+				existing.CompletedAt = time.Now()
+
+	
+
+			}
+
+	
+
+	
+
+	
+
+			// Save to Redis
+
+	
+
+			data, _ := json.Marshal(existing)
+
+	
+
+			pipe.Set(ctx, fmt.Sprintf("ff:task:%d", existing.ID), data, 0)
+
+	
+
+	
+
+	
+
+			// Sync to Postgres if status changed
+
+	
+
+			if oldStatus != newStatus {
+
+	
+
+				jobID := existing.JobID
+
+	
+
+				
+
+	
+
+				// Simple logic assuming 1 task per job or simple counters
+
+	
+
+				// We execute raw SQL updates to avoid race conditions
+
+	
+
+				
+
+	
+
+				var pendingDelta, runningDelta, successDelta, failedDelta int
+
+	
+
+				
+
+	
+
+				// Decrement old
+
+	
+
+				switch oldStatus {
+
+	
+
+				case "PENDING": pendingDelta--
+
+	
+
+				case "RUNNING": runningDelta--
+
+	
+
+				case "COMPLETED": successDelta--
+
+	
+
+				case "FAILED": failedDelta--
+
+	
+
+				}
+
+	
+
+	
+
+	
+
+				// Increment new
+
+	
+
+				switch newStatus {
+
+	
+
+				case "PENDING": pendingDelta++
+
+	
+
+				case "RUNNING": runningDelta++
+
+	
+
+				case "COMPLETED": successDelta++
+
+	
+
+				case "FAILED": failedDelta++
+
+	
+
+				}
+
+	
+
+	
+
+	
+
+				// Construct status update logic
+
+	
+
+				// If RUNNING -> set job to RUNNING
+
+	
+
+				// If COMPLETED/FAILED -> Check if all done? (But we just update counts here, let job status be derived or simple 1:1)
+
+	
+
+				// For FfmpegJob which is 1:1 with this task, we can just set the status directly to newStatus
+
+	
+
+				
+
+	
+
+				query := `
+
+	
+
+					UPDATE ffmpeg_jobs SET 
+
+	
+
+						pending_count = pending_count + ?, 
+
+	
+
+						running_count = running_count + ?, 
+
+	
+
+						success_count = success_count + ?, 
+
+	
+
+						failed_count = failed_count + ?,
+
+	
+
+						status = ?,
+
+	
+
+						updated_at = NOW()
+
+	
+
+					WHERE id = ?
+
+	
+
+				`
+
+	
+
+				// Note: For 1:1 mapping, status of Job = status of Task
+
+	
+
+				database.DB.Exec(query, pendingDelta, runningDelta, successDelta, failedDelta, newStatus, jobID)
+
+	
+
+			}
+
+	
+
+		}
+
+	
+
+	
+
+	
+
+		_, err = pipe.Exec(ctx)
+
+	
+
+		if err != nil {
+
+	
+
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+
+	
+
+			return
+
+	
+
+		}
+
+	
+
 		c.JSON(http.StatusOK, gin.H{"status": "updated"})
+
+	
 
 	}
