@@ -35,15 +35,15 @@ var (
 )
 
 type FfmpegTask struct {
-	ID           int64     `json:"id"`
-	JobID        int64     `json:"job_id"`
-	S3Endpoint   string    `json:"s3_endpoint"`
-	S3Bucket     string    `json:"s3_bucket"`
-	S3Prefix     string    `json:"s3_prefix"`
-	S3UploadPrefix string  `json:"s3_upload_prefix"`
-	S3AK         string    `json:"s3_ak"`
-	S3SK         string    `json:"s3_sk"`
-	Status       string    `json:"status"`
+	ID             int64  `json:"id"`
+	JobID          int64  `json:"job_id"`
+	S3Endpoint     string `json:"s3_endpoint"`
+	S3Bucket       string `json:"s3_bucket"`
+	S3Prefix       string `json:"s3_prefix"`
+	S3UploadPrefix string `json:"s3_upload_prefix"`
+	S3AK           string `json:"s3_ak"`
+	S3SK           string `json:"s3_sk"`
+	Status         string `json:"status"`
 }
 
 func main() {
@@ -52,7 +52,7 @@ func main() {
 	if apiBaseURL == "" {
 		apiBaseURL = "http://localhost:8080/api"
 	}
-	
+
 	// Check /dev/shm
 	if _, err := os.Stat(TempDir); os.IsNotExist(err) {
 		log.Println("/dev/shm not found, using /tmp")
@@ -107,7 +107,7 @@ func updateTaskStatus(task FfmpegTask, status string) {
 	task.Status = status
 	payload := []FfmpegTask{task}
 	data, _ := json.Marshal(payload)
-	
+
 	// We use fire-and-forget for simplicity or log error
 	resp, err := http.Post(apiBaseURL+"/ffmpeg-tasks/update", "application/json", bytes.NewBuffer(data))
 	if err != nil {
@@ -134,7 +134,7 @@ func processTask(t FfmpegTask) {
 	if uploadPrefix == "" {
 		uploadPrefix = prefix // Fallback
 	}
-	
+
 	// List objects
 	pairs, err := listPairs(s3Client, bucket, prefix)
 	if err != nil {
@@ -142,15 +142,15 @@ func processTask(t FfmpegTask) {
 		updateTaskStatus(t, "FAILED")
 		return
 	}
-	
+
 	log.Printf("Found %d pairs to process", len(pairs))
-	
+
 	var successCount int32
 	var failCount int32
 	var wg sync.WaitGroup
-	
+
 	// Limit concurrency to 4
-	sem := make(chan struct{}, 4)
+	sem := make(chan struct{}, 32)
 
 	for id, files := range pairs {
 		if files.Audio == "" || files.Video == "" {
@@ -181,9 +181,9 @@ func processTask(t FfmpegTask) {
 			}
 		}(id, files)
 	}
-	
+
 	wg.Wait()
-	
+
 	log.Printf("Task %d completed. Success: %d, Failed: %d", t.ID, successCount, failCount)
 	if failCount > 0 && successCount == 0 {
 		updateTaskStatus(t, "FAILED")
@@ -214,18 +214,22 @@ func listPairs(client *s3.Client, bucket, prefix string) (map[string]*FilePair, 
 		for _, obj := range page.Contents {
 			key := *obj.Key
 			name := filepath.Base(key)
-			
+
 			// Expected format: {id}_video.{ext} or {id}_audio.{ext}
 			// Example: dQw4w9WgXcQ_video.mp4, dQw4w9WgXcQ_audio.m4a
-			
+
 			if strings.Contains(name, "_video.") {
 				id := strings.Split(name, "_video.")[0]
-				if _, ok := pairs[id]; !ok { pairs[id] = &FilePair{} }
+				if _, ok := pairs[id]; !ok {
+					pairs[id] = &FilePair{}
+				}
 				pairs[id].Video = key
 				pairs[id].AllKeys = append(pairs[id].AllKeys, key)
 			} else if strings.Contains(name, "_audio.") {
 				id := strings.Split(name, "_audio.")[0]
-				if _, ok := pairs[id]; !ok { pairs[id] = &FilePair{} }
+				if _, ok := pairs[id]; !ok {
+					pairs[id] = &FilePair{}
+				}
 				pairs[id].Audio = key
 				pairs[id].AllKeys = append(pairs[id].AllKeys, key)
 			}
@@ -238,7 +242,7 @@ func deleteObjects(client *s3.Client, bucket string, keys []string) error {
 	if len(keys) == 0 {
 		return nil
 	}
-	
+
 	var objects []types.ObjectIdentifier
 	for _, k := range keys {
 		objects = append(objects, types.ObjectIdentifier{Key: aws.String(k)})
@@ -257,8 +261,10 @@ func deleteObjects(client *s3.Client, bucket string, keys []string) error {
 func processPair(client *s3.Client, bucket, uploadPrefix, id, videoKey, audioKey string) error {
 	// Output: {uploadPrefix}/{id}.mp4
 	outputKey := strings.TrimRight(uploadPrefix, "/") + "/" + id + ".mp4"
-	if strings.HasPrefix(outputKey, "/") { outputKey = strings.TrimPrefix(outputKey, "/") }
-    
+	if strings.HasPrefix(outputKey, "/") {
+		outputKey = strings.TrimPrefix(outputKey, "/")
+	}
+
 	// Check existence
 	_, err := client.HeadObject(context.TODO(), &s3.HeadObjectInput{
 		Bucket: aws.String(bucket),
@@ -278,7 +284,7 @@ func processPair(client *s3.Client, bucket, uploadPrefix, id, videoKey, audioKey
 	localVideo := filepath.Join(workDir, filepath.Base(videoKey))
 	localAudio := filepath.Join(workDir, filepath.Base(audioKey))
 	localOutput := filepath.Join(workDir, id+".mp4")
-	
+
 	defer os.Remove(localVideo)
 	defer os.Remove(localAudio)
 	defer os.Remove(localOutput)
@@ -391,6 +397,8 @@ func getBucketFromEndpoint(endpoint string) string {
 		}
 	}
 	u, err := url.Parse(endpoint)
-	if err != nil { return "" }
+	if err != nil {
+		return ""
+	}
 	return strings.Trim(u.Path, "/")
 }

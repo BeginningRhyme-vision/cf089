@@ -23,7 +23,10 @@ spec:
         imagePullPolicy: Always
         env:
         - name: BACKEND_API_URL
-          value: "http://backend-api:8080/api"
+          value: "http://backend.admin.unboundfuture.ai:8080/api"
+        resources:
+          requests:
+            memory: "32Gi"
         volumeMounts:
         - name: config-volume
           mountPath: /app/config.yaml
