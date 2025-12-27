@@ -11,6 +11,7 @@ import (
 	"os"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -101,6 +102,8 @@ func main() {
 
 	log.Println("Scanner Worker Started")
 
+	var activeJobs sync.Map
+
 	for {
 		jobs, err := getPendingJobs()
 		if err != nil {
@@ -115,8 +118,17 @@ func main() {
 		}
 
 		for _, job := range jobs {
-			processJob(job)
+			if _, loaded := activeJobs.LoadOrStore(job.JobID, true); loaded {
+				continue
+			}
+
+			go func(j TransferJob) {
+				defer activeJobs.Delete(j.JobID)
+				processJob(j)
+			}(job)
 		}
+
+		time.Sleep(5 * time.Second)
 	}
 }
 

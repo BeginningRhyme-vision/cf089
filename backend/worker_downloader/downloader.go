@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"math"
 	"math/rand"
@@ -55,7 +56,8 @@ var (
 	apiBaseURL string
 	jobCache   sync.Map // map[int64]string (JobID -> R2Prefix)
 	workerID   string
-	downloadClient *http.Client
+	internalClient *http.Client
+	externalClient *http.Client
 	
 	// Metrics
 	TasksProcessed = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -69,18 +71,34 @@ var (
 	})
 )
 
-func initDownloadClient() {
-	transport := &http.Transport{}
+func initClients() {
+	// Internal Client - No Proxy
+	internalTransport := &http.Transport{
+		MaxIdleConns:        1000,
+		MaxIdleConnsPerHost: 1000,
+		IdleConnTimeout:     90 * time.Second,
+	}
+	internalClient = &http.Client{
+		Transport: internalTransport,
+		Timeout:   30 * time.Second,
+	}
+
+	// External Client - With Proxy
+	externalTransport := &http.Transport{
+		MaxIdleConns:        1000,
+		MaxIdleConnsPerHost: 1000,
+		IdleConnTimeout:     90 * time.Second,
+	}
 	if cfg.Worker.ProxyURL != "" {
 		proxyURL, err := url.Parse(cfg.Worker.ProxyURL)
 		if err != nil {
 			log.Printf("Invalid proxy URL: %v", err)
 		} else {
-			transport.Proxy = http.ProxyURL(proxyURL)
+			externalTransport.Proxy = http.ProxyURL(proxyURL)
 		}
 	}
-	downloadClient = &http.Client{
-		Transport: transport,
+	externalClient = &http.Client{
+		Transport: externalTransport,
 		Timeout:   30 * time.Second,
 	}
 }
@@ -121,7 +139,7 @@ type UpdateTaskRequest struct {
 
 func main() {
 	loadConfig()
-	initDownloadClient()
+	initClients()
 	initS3()
 
 	// Start Metrics Server
@@ -296,7 +314,7 @@ func acquireTasks() ([]YoutubeTask, error) {
 		"limit":     TaskBufferSize,
 	})
 
-	resp, err := http.Post(apiBaseURL+"/tasks/acquire", "application/json", bytes.NewBuffer(reqBody))
+	resp, err := internalClient.Post(apiBaseURL+"/tasks/acquire", "application/json", bytes.NewBuffer(reqBody))
 	if err != nil {
 		return nil, err
 	}
@@ -318,7 +336,7 @@ func getJobPrefix(jobID int64) (string, error) {
 		return val.(string), nil
 	}
 
-	resp, err := http.Get(fmt.Sprintf("%s/youtube-jobs/%d", apiBaseURL, jobID))
+	resp, err := internalClient.Get(fmt.Sprintf("%s/youtube-jobs/%d", apiBaseURL, jobID))
 	if err != nil {
 		return "", err
 	}
@@ -536,7 +554,7 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 	// Retry logic
 	var lastErr error
 	for i := 0; i < 12; i++ {
-		resp, err := http.Post(cfg.Storage.DownloadServiceURL, "application/json", bytes.NewBuffer(body))
+		resp, err := externalClient.Post(cfg.Storage.DownloadServiceURL, "application/json", bytes.NewBuffer(body))
 		if err != nil {
 			lastErr = err
 			log.Printf("Chunk %d retry %d error: %v", partNum, i+1, err)
@@ -556,6 +574,7 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 			lastErr = fmt.Errorf("HTTP status %d", resp.StatusCode)
 			log.Printf("Chunk %d retry %d status: %d", partNum, i+1, resp.StatusCode)
 		}
+		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 
 		if etag != "" {
@@ -590,5 +609,9 @@ func updateTask(req UpdateTaskRequest) {
 	// We should probably batch this, but for now single update
 	wrapper := []UpdateTaskRequest{req}
 	body, _ := json.Marshal(wrapper)
-	http.Post(apiBaseURL+"/tasks/update", "application/json", bytes.NewBuffer(body))
+	resp, err := internalClient.Post(apiBaseURL+"/tasks/update", "application/json", bytes.NewBuffer(body))
+	if err == nil {
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
 }
