@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -26,12 +27,13 @@ import (
 )
 
 const (
-	TempDir = "/dev/shm" // Fallback to /tmp if not exists
+	DefaultTempDir = "/dev/shm"
 )
 
 var (
-	apiBaseURL string
-	workerID   string
+	apiBaseURL     string
+	workerID       string
+	CurrentTempDir string
 )
 
 type FfmpegTask struct {
@@ -44,6 +46,8 @@ type FfmpegTask struct {
 	S3AK           string `json:"s3_ak"`
 	S3SK           string `json:"s3_sk"`
 	Status         string `json:"status"`
+	TotalPairs     int    `json:"total_pairs"`
+	ProcessedPairs int    `json:"processed_pairs"`
 }
 
 func main() {
@@ -53,12 +57,20 @@ func main() {
 		apiBaseURL = "http://localhost:8080/api"
 	}
 
-	// Check /dev/shm
-	if _, err := os.Stat(TempDir); os.IsNotExist(err) {
-		log.Println("/dev/shm not found, using /tmp")
+	// Determine TempDir
+	CurrentTempDir = DefaultTempDir
+	if _, err := os.Stat(CurrentTempDir); os.IsNotExist(err) {
+		CurrentTempDir = os.TempDir()
+		log.Printf("%s not found, using %s", DefaultTempDir, CurrentTempDir)
 	}
 
-	log.Printf("FFmpeg Worker %s Started\n", workerID)
+	// Log capacity
+	capacity, err := getFilesystemSpace(CurrentTempDir)
+	if err != nil {
+		log.Printf("Failed to get disk capacity for %s: %v", CurrentTempDir, err)
+	} else {
+		log.Printf("FFmpeg Worker %s Started. TempDir: %s, Capacity: %d bytes\n", workerID, CurrentTempDir, capacity)
+	}
 
 	for {
 		tasks, err := acquireTasks()
@@ -77,6 +89,15 @@ func main() {
 			processTask(task)
 		}
 	}
+}
+
+func getFilesystemSpace(path string) (uint64, error) {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return 0, err
+	}
+	// Force conversion to uint64 to handle potential type differences across platforms
+	return uint64(stat.Blocks) * uint64(stat.Bsize), nil
 }
 
 func acquireTasks() ([]FfmpegTask, error) {
@@ -144,6 +165,15 @@ func processTask(t FfmpegTask) {
 	}
 
 	log.Printf("Found %d pairs to process", len(pairs))
+	t.TotalPairs = len(pairs)
+	// Initial update with total count
+	updateTaskStatus(t, "RUNNING")
+
+	capacity, err := getFilesystemSpace(CurrentTempDir)
+	if err != nil {
+		log.Printf("Warning: Could not determine capacity, ignoring space check: %v", err)
+		capacity = 1024 * 1024 * 1024 * 1024 // 1TB default to avoid block
+	}
 
 	var successCount int32
 	var failCount int32
@@ -151,6 +181,28 @@ func processTask(t FfmpegTask) {
 
 	// Limit concurrency to 4
 	sem := make(chan struct{}, 32)
+	var currentProcessingBytes int64
+
+	// Start periodic status reporter
+	reportCtx, cancelReport := context.WithCancel(context.Background())
+	defer cancelReport()
+
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-reportCtx.Done():
+				return
+			case <-ticker.C:
+				processed := atomic.LoadInt32(&successCount) + atomic.LoadInt32(&failCount)
+				// Create a copy to update stats without race on original struct if it were shared (passed by value here so safe to modify copy)
+				tCopy := t
+				tCopy.ProcessedPairs = int(processed)
+				updateTaskStatus(tCopy, "RUNNING")
+			}
+		}
+	}()
 
 	for id, files := range pairs {
 		if files.Audio == "" || files.Video == "" {
@@ -158,9 +210,28 @@ func processTask(t FfmpegTask) {
 			continue
 		}
 
+		requiredSpace := (files.VideoSize + files.AudioSize) * 2
+
+		// Space check logic
+		for {
+			current := atomic.LoadInt64(&currentProcessingBytes)
+			if float64(current+requiredSpace) > float64(capacity)*0.8 {
+				// Not enough space, wait
+				time.Sleep(2 * time.Second)
+				continue
+			}
+			// Optimistically reserve space (only one main thread loop, so no race on reserve)
+			atomic.AddInt64(&currentProcessingBytes, requiredSpace)
+			break
+		}
+
 		wg.Add(1)
-		go func(id string, files *FilePair) {
+		go func(id string, files *FilePair, reqSpace int64) {
 			defer wg.Done()
+			
+			// Release space when done
+			defer atomic.AddInt64(&currentProcessingBytes, -reqSpace)
+
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
@@ -179,11 +250,13 @@ func processTask(t FfmpegTask) {
 					}
 				}
 			}
-		}(id, files)
+		}(id, files, requiredSpace)
 	}
 
 	wg.Wait()
 
+	// Final status update
+	t.ProcessedPairs = int(successCount + failCount)
 	log.Printf("Task %d completed. Success: %d, Failed: %d", t.ID, successCount, failCount)
 	if failCount > 0 && successCount == 0 {
 		updateTaskStatus(t, "FAILED")
@@ -193,9 +266,11 @@ func processTask(t FfmpegTask) {
 }
 
 type FilePair struct {
-	Video   string
-	Audio   string
-	AllKeys []string
+	Video     string
+	Audio     string
+	VideoSize int64
+	AudioSize int64
+	AllKeys   []string
 }
 
 func listPairs(client *s3.Client, bucket, prefix string) (map[string]*FilePair, error) {
@@ -214,6 +289,10 @@ func listPairs(client *s3.Client, bucket, prefix string) (map[string]*FilePair, 
 		for _, obj := range page.Contents {
 			key := *obj.Key
 			name := filepath.Base(key)
+			var size int64
+			if obj.Size != nil {
+				size = *obj.Size
+			}
 
 			// Expected format: {id}_video.{ext} or {id}_audio.{ext}
 			// Example: dQw4w9WgXcQ_video.mp4, dQw4w9WgXcQ_audio.m4a
@@ -224,6 +303,7 @@ func listPairs(client *s3.Client, bucket, prefix string) (map[string]*FilePair, 
 					pairs[id] = &FilePair{}
 				}
 				pairs[id].Video = key
+				pairs[id].VideoSize = size
 				pairs[id].AllKeys = append(pairs[id].AllKeys, key)
 			} else if strings.Contains(name, "_audio.") {
 				id := strings.Split(name, "_audio.")[0]
@@ -231,6 +311,7 @@ func listPairs(client *s3.Client, bucket, prefix string) (map[string]*FilePair, 
 					pairs[id] = &FilePair{}
 				}
 				pairs[id].Audio = key
+				pairs[id].AudioSize = size
 				pairs[id].AllKeys = append(pairs[id].AllKeys, key)
 			}
 		}
@@ -275,11 +356,8 @@ func processPair(client *s3.Client, bucket, uploadPrefix, id, videoKey, audioKey
 		return nil
 	}
 
-	// Download
-	workDir := TempDir
-	if _, err := os.Stat(workDir); os.IsNotExist(err) {
-		workDir = os.TempDir()
-	}
+	// Use CurrentTempDir
+	workDir := CurrentTempDir
 
 	localVideo := filepath.Join(workDir, filepath.Base(videoKey))
 	localAudio := filepath.Join(workDir, filepath.Base(audioKey))

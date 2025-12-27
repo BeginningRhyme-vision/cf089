@@ -26,7 +26,7 @@ spec:
           value: "http://backend.admin.unboundfuture.ai:8080/api"
         resources:
           requests:
-            memory: "32Gi"
+            memory: "30Gi"
         volumeMounts:
         - name: config-volume
           mountPath: /app/config.yaml
