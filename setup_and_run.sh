@@ -50,7 +50,6 @@ echo ">>> Starting Backend Container..."
 # Run in detached mode first to get ID
 BACKEND_ID=$(docker run -d --rm \
     --network host \
-    --network-alias backend-api \
     -v "$CONFIG_FILE:/app/config.yaml" \
     --name unbound-backend-instance \
     unbound-backend)
@@ -69,7 +68,6 @@ echo "  Frontend started with ID: ${FRONTEND_ID:0:12}"
 # echo ">>> Starting Worker Downloader Container..."
 # WORKER_DOWNLOADER_ID=$(docker run -d --rm \
 #     --network host \
-#     --network-alias worker_downloader \
 #     -e BACKEND_API_URL="http://localhost:8080/api" \
 #     -v "$CONFIG_FILE:/app/config.yaml" \
 #     --name unbound-worker-downloader-instance \
@@ -81,7 +79,6 @@ echo "  Frontend started with ID: ${FRONTEND_ID:0:12}"
 # echo ">>> Starting Worker Metadata Container..."
 # WORKER_METADATA_ID=$(docker run -d --rm \
 #     --network host \
-#     --network-alias worker_metadata \
 #     -e BACKEND_API_URL="http://localhost:8080/api" \
 #     -v "$CONFIG_FILE:/app/config.yaml" \
 #     --name unbound-worker-metadata-instance \
@@ -92,7 +89,6 @@ echo "  Frontend started with ID: ${FRONTEND_ID:0:12}"
 # echo ">>> Starting Worker Transfer Container..."
 # WORKER_TRANSFER_ID=$(docker run -d --rm \
 #     --network host \
-#     --network-alias worker_transfer \
 #     -e BACKEND_API_URL="http://localhost:8080/api" \
 #     -v "$CONFIG_FILE:/app/config.yaml" \
 #     --name unbound-worker-transfer-instance \
@@ -104,7 +100,6 @@ echo "  Frontend started with ID: ${FRONTEND_ID:0:12}"
 # echo ">>> Starting Worker Scanner Container..."
 # WORKER_SCANNER_ID=$(docker run -d --rm \
 #     --network host \
-#     --network-alias worker_scanner \
 #     -e BACKEND_API_URL="http://localhost:8080/api" \
 #     -v "$CONFIG_FILE:/app/config.yaml" \
 #     --name unbound-worker-scanner-instance \
@@ -116,7 +111,6 @@ echo "  Frontend started with ID: ${FRONTEND_ID:0:12}"
 echo ">>> Starting Worker FFmpeg Container..."
 WORKER_FFMPEG_ID=$(docker run -d --rm \
     --network host \
-    --network-alias worker_ffmpeg \
     -e BACKEND_API_URL="http://localhost:8080/api" \
     --name unbound-worker-ffmpeg-instance \
     unbound-worker-ffmpeg)
