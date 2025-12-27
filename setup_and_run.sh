@@ -48,7 +48,7 @@ docker build -t unbound-worker-ffmpeg "$ROOT_DIR/backend/worker_ffmpeg"
 echo ">>> Starting Backend Container..."
 # Mount config.yaml to /app/config.yaml
 # Run in detached mode first to get ID
-BACKEND_ID=$(docker run -d --rm \
+BACKEND_ID=$(docker run -d \
     --network host \
     -v "$CONFIG_FILE:/app/config.yaml" \
     --name unbound-backend-instance \
@@ -58,7 +58,7 @@ echo "  Backend started with ID: ${BACKEND_ID:0:12}"
 
 echo ">>> Starting Frontend Container..."
 # Frontend runs on host network (listens on port 80 inside container, so port 80 on host)
-FRONTEND_ID=$(docker run -d --rm \
+FRONTEND_ID=$(docker run -d \
     --network host \
     --name unbound-frontend-instance \
     unbound-frontend)

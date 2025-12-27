@@ -8,7 +8,7 @@ redis:
   url: "redis://172.19.0.14:6379/0"
 
 database:
-  url: "postgresql://unbound_future:Unbound_future618@172.19.0.12:5432/unbound_future_db_1"
+  url: "postgresql://unbound_future:Unbound_future618@172.19.0.12:5432/unbound_future_db"
 
 feishu:
   app_id: "cli_a9b405c22b389cc5"
