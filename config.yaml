@@ -5,10 +5,10 @@ app:
   port: 8000
 
 redis:
-  url: "redis://10.0.2.5:6379/0"
+  url: "redis://172.19.0.14:6379/0"
 
 database:
-  url: "postgresql://unbound_future:Unbound_future618@10.0.2.3:5432/unbound_future_db"
+  url: "postgresql://unbound_future:Unbound_future618@172.19.0.12:5432/unbound_future_db_1"
 
 feishu:
   app_id: "cli_a9b405c22b389cc5"
