@@ -762,9 +762,14 @@ func CreateFfmpegJob(c *gin.Context) {
 
 	job := req.FfmpegJob
 	job.Status = models.StatusPending
+	
+	if job.IsIncremental && job.PeriodicInterval <= 0 {
+		job.PeriodicInterval = 600
+	}
+
 	// Assuming 1 task per job initially (the job itself is the task context)
-	job.TotalCount = 1
-	job.PendingCount = 1
+	job.TotalCount = 0 // Scanner will find tasks
+	job.PendingCount = 0
 
 	if err := database.DB.Create(&job).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -780,26 +785,8 @@ func CreateFfmpegJob(c *gin.Context) {
 	metrics.JobCreatedTotal.WithLabelValues("ffmpeg").Inc()
 	metrics.ActiveJobsGauge.WithLabelValues("ffmpeg").Inc()
 
-	// Create the single task for this job
-	go func(j models.FfmpegJob) {
-		task := models.FfmpegTask{
-			JobID:      int64(j.ID),
-			S3Endpoint: j.Metadata.Endpoint,
-			S3AK:       j.Metadata.AK,
-			S3SK:       j.Metadata.SKEncrypted, // Pass encrypted, worker decrypts? Or we decrypt here?
-			// worker_transfer passes it to job config. Let's pass it as is.
-			// Ideally worker decrypts.
-			S3Prefix: j.S3Prefix,
-			S3UploadPrefix: j.S3UploadPrefix,
-			Status:   "PENDING",
-		}
-		
-		_, err := AddFfmpegTasksToJob(int64(j.ID), []models.FfmpegTask{task})
-		if err != nil {
-			fmt.Printf("Error adding ffmpeg task for job %d: %v\n", j.ID, err)
-		}
-	}(job)
-
+	// We don't create an initial task here anymore. The scanner will create tasks.
+	
 	c.JSON(http.StatusCreated, job)
 }
 
@@ -814,6 +801,18 @@ func ListFfmpegJobs(c *gin.Context) {
 		return
 	}
 
+	c.JSON(http.StatusOK, jobs)
+}
+
+func ListPendingFfmpegJobs(c *gin.Context) {
+	var jobs []models.FfmpegJob
+	if err := database.DB.Preload("Metadata").
+		Where("status = ?", models.StatusPending).
+		Or("status = ? AND periodic_interval > 0 AND (last_scan_time IS NULL OR last_scan_time < NOW() - make_interval(secs => periodic_interval))", models.StatusRunning).
+		Find(&jobs).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, jobs)
 }
 
@@ -844,6 +843,13 @@ func UpdateFfmpegJobStatus(c *gin.Context) {
 	updates := make(map[string]interface{})
 	if req.Status != "" {
 		updates["status"] = req.Status
+	}
+	if req.LastScanTime != nil {
+		updates["last_scan_time"] = req.LastScanTime
+	}
+	if req.ResultMessage != "" {
+		// Store result message somewhere? FfmpegJob doesn't have ResultMessage.
+		// Ignoring for now or I should add it.
 	}
 	
 	// Atomic counter updates if provided

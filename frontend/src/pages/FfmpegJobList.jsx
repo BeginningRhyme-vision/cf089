@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Table, Button, Modal, Form, Input, Select, Tag, message, Space, Popconfirm, Descriptions } from 'antd';
+import { Table, Button, Modal, Form, Input, Select, Tag, message, Space, Popconfirm, Descriptions, Checkbox } from 'antd';
 import { ReloadOutlined, PlusOutlined, DeleteOutlined, EyeOutlined } from '@ant-design/icons';
 import api from '../api';
 
@@ -81,6 +81,13 @@ const FfmpegJobList = () => {
     { title: 'Metadata ID', dataIndex: 'metadata_id', key: 'metadata_id', width: 100 },
     { title: 'S3 Prefix', dataIndex: 's3_prefix', key: 's3_prefix' },
     { 
+      title: 'Inc', 
+      dataIndex: 'is_incremental', 
+      key: 'is_incremental',
+      width: 60,
+      render: (val) => val ? <Tag color="blue">Yes</Tag> : <Tag>No</Tag>
+    },
+    { 
       title: 'Status', 
       dataIndex: 'status', 
       key: 'status',
@@ -152,6 +159,9 @@ const FfmpegJobList = () => {
           <Form.Item name="s3_upload_prefix" label="S3 Upload Prefix (Optional)" tooltip="Folder to upload output files. Defaults to source folder if empty.">
             <Input placeholder="processed/" />
           </Form.Item>
+          <Form.Item name="is_incremental" valuePropName="checked">
+            <Checkbox>Incremental Mode (Continuously scan for new files)</Checkbox>
+          </Form.Item>
         </Form>
       </Modal>
 
@@ -168,6 +178,7 @@ const FfmpegJobList = () => {
             <Descriptions.Item label="Metadata ID">{selectedJob.metadata_id}</Descriptions.Item>
             <Descriptions.Item label="S3 Prefix">{selectedJob.s3_prefix}</Descriptions.Item>
             <Descriptions.Item label="S3 Upload Prefix">{selectedJob.s3_upload_prefix}</Descriptions.Item>
+            <Descriptions.Item label="Incremental">{selectedJob.is_incremental ? 'Yes' : 'No'}</Descriptions.Item>
             <Descriptions.Item label="Status">
               <Tag color={statusColors[selectedJob.status]}>{selectedJob.status}</Tag>
             </Descriptions.Item>

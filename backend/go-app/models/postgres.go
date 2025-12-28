@@ -92,6 +92,9 @@ type FfmpegJob struct {
 	MetadataID   uint             `gorm:"index" json:"metadata_id"`
 	S3Prefix     string           `gorm:"size:1024;not null" json:"s3_prefix"` // e.g., "s3://bucket/path/"
 	S3UploadPrefix string         `gorm:"size:1024" json:"s3_upload_prefix"`   // e.g., "s3://bucket/upload_path/"
+	IsIncremental bool            `gorm:"default:false" json:"is_incremental"`
+	PeriodicInterval int          `gorm:"default:0" json:"periodic_interval"` // In seconds
+	LastScanTime    *time.Time    `json:"last_scan_time"`
 	Status       JobStatus        `gorm:"type:varchar(50);default:'PENDING'" json:"status"`
 	TotalCount   int              `gorm:"default:0" json:"total_count"`
 	PendingCount int              `gorm:"default:0" json:"pending_count"`

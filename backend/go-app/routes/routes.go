@@ -96,6 +96,7 @@ func SetupRouter() *gin.Engine {
         {
             ffJobs.POST("/", handlers.CreateFfmpegJob)
             ffJobs.GET("/", handlers.ListFfmpegJobs)
+            ffJobs.GET("/pending", handlers.ListPendingFfmpegJobs)
             ffJobs.GET("/:id", handlers.GetFfmpegJob)
             ffJobs.PATCH("/:id/status", handlers.UpdateFfmpegJobStatus)
             ffJobs.DELETE("/:id", handlers.DeleteFfmpegJob)
