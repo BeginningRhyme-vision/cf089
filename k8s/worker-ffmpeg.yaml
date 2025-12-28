@@ -68,7 +68,7 @@ spec:
               name: unbound-backend-config
               key: REDIS_URL
         - name: MAX_THREADS
-          value: "512"
+          value: "32"
         resources:
           requests:
             memory: "40Gi"

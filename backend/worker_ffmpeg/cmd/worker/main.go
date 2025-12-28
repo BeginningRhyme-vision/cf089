@@ -45,6 +45,9 @@ var (
 	jobCache       sync.Map // JobID -> *common.FfmpegJob
 	jobCacheExpiry sync.Map // JobID -> time.Time
 
+	reservedSpace int64
+	reservedMux   sync.Mutex
+
 	TasksProcessed = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "ffmpeg_worker_tasks_processed_total",
 		Help: "Total number of tasks processed",
@@ -86,8 +89,8 @@ func main() {
 		}
 	}
 
-	capacity, _ := getFilesystemSpace(CurrentTempDir)
-	log.Printf("FFmpeg Worker %s Started. TempDir: %s, Capacity: %d bytes, MaxThreads: %d", workerID, CurrentTempDir, capacity, maxThreads)
+	total, free, _ := getDiskStats(CurrentTempDir)
+	log.Printf("FFmpeg Worker %s Started. TempDir: %s, Capacity: %d bytes, Free: %d bytes, MaxThreads: %d", workerID, CurrentTempDir, total, free, maxThreads)
 
 	// Worker Loop with Concurrency
 	sem := make(chan struct{}, maxThreads)
@@ -110,11 +113,46 @@ func main() {
 			continue
 		}
 
+		needed := int64(task.VideoSize+task.AudioSize) * 2
+
+		// Wait for space
+		for {
+			reservedMux.Lock()
+			total, free, err := getDiskStats(CurrentTempDir)
+			if err != nil {
+				log.Printf("Failed to get disk stats: %v", err)
+				reservedMux.Unlock()
+				time.Sleep(5 * time.Second)
+				continue
+			}
+
+			used := total - free
+			// Check if (Used + Reserved + Needed) > 80% of Total
+			if float64(used+uint64(reservedSpace)+uint64(needed)) > float64(total)*0.8 {
+				reservedMux.Unlock()
+				log.Printf("Disk usage high (Used: %d, Reserved: %d, Needed: %d, Total: %d). Waiting...", used, reservedSpace, needed, total)
+				time.Sleep(5 * time.Second)
+				continue
+			}
+
+			reservedSpace += needed
+			reservedMux.Unlock()
+			break
+		}
+
 		sem <- struct{}{}
-		go func(t common.FfmpegTask) {
-			defer func() { <-sem }()
+		go func(t common.FfmpegTask, reservedBytes int64) {
+			defer func() {
+				<-sem
+				reservedMux.Lock()
+				reservedSpace -= reservedBytes
+				if reservedSpace < 0 {
+					reservedSpace = 0
+				}
+				reservedMux.Unlock()
+			}()
 			processTask(t)
-		}(task)
+		}(task, needed)
 	}
 }
 
@@ -188,18 +226,6 @@ func processTask(t common.FfmpegTask) {
 	job, err := getJobInfo(t.JobID)
 	if err != nil {
 		log.Printf("Failed to get job info: %v", err)
-		reportResultPatch(t.JobID, false)
-		TasksProcessed.WithLabelValues("failed").Inc()
-		return
-	}
-
-	// Space Check
-	requiredSpace := (t.VideoSize + t.AudioSize) * 2
-	capacity, _ := getFilesystemSpace(CurrentTempDir)
-	if capacity < uint64(requiredSpace) {
-		log.Printf("Not enough space for task %d", t.ID)
-		// Push back to queue?
-		// For now fail.
 		reportResultPatch(t.JobID, false)
 		TasksProcessed.WithLabelValues("failed").Inc()
 		return
@@ -365,24 +391,49 @@ func createS3Client(endpoint, ak, sk string) (*s3.Client, error) {
 }
 
 func getBucketFromEndpoint(endpoint string) string {
+
 	if strings.HasPrefix(endpoint, "s3://") {
+
 		host := strings.TrimPrefix(endpoint, "s3://")
+
 		parts := strings.Split(host, ".")
+
 		if len(parts) > 0 {
+
 			return parts[0]
+
 		}
+
 	}
+
 	u, err := url.Parse(endpoint)
+
 	if err != nil {
+
 		return ""
+
 	}
+
 	return strings.Trim(u.Path, "/")
+
 }
 
-func getFilesystemSpace(path string) (uint64, error) {
+
+
+func getDiskStats(path string) (uint64, uint64, error) {
+
 	var stat syscall.Statfs_t
+
 	if err := syscall.Statfs(path, &stat); err != nil {
-		return 0, err
+
+		return 0, 0, err
+
 	}
-	return uint64(stat.Blocks) * uint64(stat.Bsize), nil
+
+	total := uint64(stat.Blocks) * uint64(stat.Bsize)
+
+	free := uint64(stat.Bavail) * uint64(stat.Bsize)
+
+	return total, free, nil
+
 }
