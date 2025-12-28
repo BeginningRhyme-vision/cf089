@@ -108,12 +108,12 @@ func main() {
 		jobs, err := getPendingJobs()
 		if err != nil {
 			log.Printf("Error getting pending jobs: %v", err)
-			time.Sleep(5 * time.Second)
+			time.Sleep(10 * time.Second)
 			continue
 		}
 
 		if len(jobs) == 0 {
-			time.Sleep(2 * time.Second)
+			time.Sleep(5 * time.Second)
 			continue
 		}
 
@@ -230,11 +230,36 @@ func processJob(job TransferJob) {
 		Prefix: aws.String(prefix),
 	})
 
-	var batch []TransferTaskInput
 	count := 0
 	skipped := 0
 	pages := 0
 	lastUpdate := time.Now()
+
+	// Channel for async sending
+	taskChan := make(chan TransferTaskInput, 2000)
+	var wg sync.WaitGroup
+	wg.Add(1)
+
+	// Consumer Goroutine
+	go func() {
+		defer wg.Done()
+		var internalBatch []TransferTaskInput
+		for task := range taskChan {
+			internalBatch = append(internalBatch, task)
+			if len(internalBatch) >= 1000 {
+				if err := sendBatch(job.JobID, internalBatch); err != nil {
+					log.Printf("Failed to send batch for job %d: %v", job.JobID, err)
+				}
+				internalBatch = nil // Clear
+			}
+		}
+		// Flush remaining
+		if len(internalBatch) > 0 {
+			if err := sendBatch(job.JobID, internalBatch); err != nil {
+				log.Printf("Failed to send final batch for job %d: %v", job.JobID, err)
+			}
+		}
+	}()
 
 	for paginator.HasMorePages() {
 		pages++
@@ -244,6 +269,7 @@ func processJob(job TransferJob) {
 		if err != nil {
 			log.Printf("ListObjectsV2 failed for job %d on page %d: %v", job.JobID, pages, err)
 			updateJobStatus(job.JobID, "FAILED", nil, fmt.Sprintf("List failed on page %d: %v", pages, err)) // Mark as failed on list error
+			close(taskChan) // Ensure consumer stops
 			return
 		}
 
@@ -281,15 +307,9 @@ func processJob(job TransferJob) {
 				size = *obj.Size
 			}
 
-			batch = append(batch, TransferTaskInput{Src: key, Size: size})
+			taskChan <- TransferTaskInput{Src: key, Size: size}
 			TasksDiscovered.Inc()
-			if len(batch) >= 1000 {
-				if err := sendBatch(job.JobID, batch); err != nil {
-					log.Printf("Failed to send batch for job %d: %v", job.JobID, err)
-				}
-				count += len(batch)
-				batch = nil
-			}
+			count++
 		}
 		
 		// Periodic Job Update (Heartbeat / Metadata Refresh)
@@ -305,6 +325,7 @@ func processJob(job TransferJob) {
 				// Optional: Check status. If Cancelled, abort?
 				if latestJob.Status != "RUNNING" && latestJob.Status != "PENDING" {
 					log.Printf("Job %d status changed to %s. Aborting scan.", job.JobID, latestJob.Status)
+					close(taskChan)
 					return // Stop scanning
 				}
 			} else {
@@ -318,12 +339,8 @@ func processJob(job TransferJob) {
 		}
 	}
 
-	if len(batch) > 0 {
-		if err := sendBatch(job.JobID, batch); err != nil {
-			log.Printf("Failed to send final batch for job %d: %v", job.JobID, err)
-		}
-		count += len(batch)
-	}
+	close(taskChan) // Signal consumer to finish
+	wg.Wait() // Wait for consumer to finish processing
 
 	log.Printf("Job %d scanned. Total pages: %d. New tasks: %d, Skipped (old): %d", job.JobID, pages, count, skipped)
 	resultMsg := fmt.Sprintf("Scanned %d pages. Tasks: %d, Skipped: %d", pages, count, skipped)

@@ -847,6 +847,9 @@ func UpdateFfmpegJobStatus(c *gin.Context) {
 	if req.LastScanTime != nil {
 		updates["last_scan_time"] = req.LastScanTime
 	}
+	if req.TotalCount != nil {
+		updates["total_count"] = *req.TotalCount
+	}
 	if req.ResultMessage != "" {
 		// Store result message somewhere? FfmpegJob doesn't have ResultMessage.
 		// Ignoring for now or I should add it.

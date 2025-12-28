@@ -68,10 +68,10 @@ spec:
               name: unbound-backend-config
               key: REDIS_URL
         - name: MAX_THREADS
-          value: "4"
+          value: "512"
         resources:
           requests:
-            memory: "30Gi"
+            memory: "40Gi"
         volumeMounts:
         - name: dshm
           mountPath: /dev/shm

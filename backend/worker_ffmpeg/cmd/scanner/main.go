@@ -104,6 +104,10 @@ func initRedis() {
 		log.Fatalf("Invalid Redis URL: %v", err)
 	}
 	rdb = redis.NewClient(opt)
+	
+	if err := rdb.Ping(context.Background()).Err(); err != nil {
+		log.Printf("Warning: Failed to ping Redis at startup: %v", err)
+	}
 }
 
 func getPendingJobs() ([]common.FfmpegJob, error) {
@@ -247,7 +251,17 @@ func processJob(job common.FfmpegJob) {
 		}
 
 		if len(batch) > 0 {
-			if err := rdb.RPush(context.Background(), TaskQueue, batch...).Err(); err != nil {
+			var err error
+			// Retry up to 3 times
+			for i := 0; i < 3; i++ {
+				err = rdb.RPush(context.Background(), TaskQueue, batch...).Err()
+				if err == nil {
+					break
+				}
+				time.Sleep(500 * time.Millisecond)
+			}
+			
+			if err != nil {
 				log.Printf("Failed to push batch for job %d: %v", job.ID, err)
 			}
 			count += len(batch)

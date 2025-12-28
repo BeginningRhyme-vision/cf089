@@ -4,7 +4,7 @@ metadata:
   name: unbound-backend-config
   namespace: unbound-future
 data:
-  REDIS_URL: "redis://10.0.2.5:6379/0"
+  REDIS_URL: "redis://10.16.0.125:6379/0"
   config.yaml: |
     app:
       name: "Unbound Future Admin"
