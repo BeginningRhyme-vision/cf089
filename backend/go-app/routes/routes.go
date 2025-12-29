@@ -23,7 +23,8 @@ func PrometheusMiddleware() gin.HandlerFunc {
 }
 
 func SetupRouter() *gin.Engine {
-	r := gin.Default()
+	r := gin.New()
+	r.Use(gin.Recovery())
 	r.Use(PrometheusMiddleware())
 
 	r.GET("/metrics", gin.WrapH(promhttp.Handler()))

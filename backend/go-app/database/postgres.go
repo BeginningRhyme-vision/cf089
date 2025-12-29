@@ -20,7 +20,7 @@ func InitPostgres(cfg *config.Config) error {
 	dsn := cfg.Database.URL
 
 	DB, err = gorm.Open(postgres.Open(dsn), &gorm.Config{
-		Logger: logger.Default.LogMode(logger.Info),
+		Logger: logger.Default.LogMode(logger.Silent),
 	})
 	if err != nil {
 		return fmt.Errorf("failed to connect to postgres: %w", err)
