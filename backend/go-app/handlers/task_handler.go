@@ -46,13 +46,93 @@ const (
 func StartBufferService() {
 	go func() {
 		ticker := time.NewTicker(1 * time.Second)
-		for range ticker.C {
-			checkAndRefillBuffers()
-			checkAndRefillTxBuffers()
-			checkAndRefillFfmpegBuffers()
-			flushStats()
+		monitorTicker := time.NewTicker(10 * time.Minute) // Check for stuck tasks every 10m
+		for {
+			select {
+			case <-ticker.C:
+				checkAndRefillBuffers()
+				checkAndRefillTxBuffers()
+				checkAndRefillFfmpegBuffers()
+				flushStats()
+			case <-monitorTicker.C:
+				scanStuckYoutubeTasks()
+			}
 		}
 	}()
+}
+
+func scanStuckYoutubeTasks() {
+	ctx := context.Background()
+	var jobs []models.YoutubeJob
+	// Only scan running/pending jobs
+	if err := database.DB.Where("status IN ?", []models.JobStatus{models.StatusPending, models.StatusRunning}).Find(&jobs).Error; err != nil {
+		return
+	}
+
+	for _, job := range jobs {
+		jobKey := fmt.Sprintf("job:%d:tasks", job.ID)
+		batchSize := 1000
+		var offset int64 = 0
+
+		for {
+			ids, err := database.RDB.ZRange(ctx, jobKey, offset, offset+int64(batchSize)-1).Result()
+			if err != nil || len(ids) == 0 {
+				break
+			}
+
+			var keys []string
+			for _, id := range ids {
+				keys = append(keys, fmt.Sprintf("task:%s", id))
+			}
+
+			tasksJSON, err := database.RDB.MGet(ctx, keys...).Result()
+			if err != nil {
+				offset += int64(batchSize)
+				continue
+			}
+
+			pipe := database.RDB.Pipeline()
+			hasUpdates := false
+
+			for _, val := range tasksJSON {
+				if val == nil {
+					continue
+				}
+				str, ok := val.(string)
+				if !ok {
+					continue
+				}
+
+				var t models.YoutubeTask
+				if err := json.Unmarshal([]byte(str), &t); err == nil {
+					// Check if Running AND Created > 3 hours
+					if t.Status == "RUNNING" && time.Since(t.CreatedAt) > 3*time.Hour {
+						t.Status = "PENDING"
+						t.WorkerID = ""
+						t.ErrorMessage = "Reset by stuck monitor"
+						t.UpdatedAt = time.Now()
+						t.IsDownloadFail = false
+
+						data, _ := json.Marshal(t)
+						pipe.Set(ctx, fmt.Sprintf("task:%d", t.ID), data, 0)
+						pipe.RPush(ctx, "queue:youtube:metadata_retry", t.ID)
+						
+						trackStatusChange(t.JobID, "RUNNING", "PENDING")
+						hasUpdates = true
+					}
+				}
+			}
+
+			if hasUpdates {
+				pipe.Exec(ctx)
+			}
+
+			if len(ids) < batchSize {
+				break
+			}
+			offset += int64(batchSize)
+		}
+	}
 }
 
 func flushStats() {
@@ -492,7 +572,33 @@ func AcquireTasks(c *gin.Context) {
 			}
 		}
 	} else {
-		// Metadata stage: Round-robin across active job buffers
+		// Metadata stage
+		
+		// 1. Check Retry Queue
+		for len(tasks) < req.Limit {
+			idStr, err := database.RDB.LPop(ctx, "queue:youtube:metadata_retry").Result()
+			if err == redis.Nil {
+				break
+			}
+			if err == nil {
+				taskData, err := database.RDB.Get(ctx, fmt.Sprintf("task:%s", idStr)).Result()
+				if err == nil {
+					var t models.YoutubeTask
+					if err := json.Unmarshal([]byte(taskData), &t); err == nil {
+						if t.Status == "PENDING" {
+							tasks = append(tasks, t)
+						}
+					}
+				}
+			}
+		}
+
+		if len(tasks) >= req.Limit {
+			c.JSON(http.StatusOK, tasks)
+			return
+		}
+
+		// 2. Round-robin across active job buffers
 		// We need to iterate over map.
 		bufferMutex.RLock()
 		// Get keys
@@ -503,7 +609,7 @@ func AcquireTasks(c *gin.Context) {
 		bufferMutex.RUnlock()
 
 		if len(jobIDs) == 0 {
-			c.JSON(http.StatusOK, []models.YoutubeTask{})
+			c.JSON(http.StatusOK, tasks)
 			return
 		}
 
