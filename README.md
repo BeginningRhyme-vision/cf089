@@ -1,12 +1,13 @@
 # Unbound Future Admin
 
-A business management dashboard with Feishu integration, Data Transfer Task management, and Youtube Job processing.
+A business management dashboard with Feishu integration, Data Transfer Task management, Youtube Job processing, and FFmpeg video merging.
 
 ## Project Structure
 
 - `backend/go-app/`: API Server (Go/Gin).
 - `backend/worker_downloader/`: Youtube Job Workers (Python for Metadata, Go for Download).
 - `backend/worker_transfer/`: Transfer Job Workers (Go for Scanner and Transfer).
+- `backend/worker_ffmpeg/`: FFmpeg Job Workers (Go for Scanner and Worker).
 - `frontend/`: React + Vite application (JavaScript/React).
 - `config.yaml`: Centralized configuration for the project.
 
@@ -42,7 +43,7 @@ Youtube 任务处理分为两个阶段，由不同的 Worker 协同完成：
     1.  **发现任务**: 轮询后端 `GET /api/jobs/pending` 获取状态为 `PENDING` 的迁移作业。
     2.  **锁定状态**: 将作业状态更新为 `RUNNING`。
     3.  **扫描源站**: 使用 AWS SDK 遍历源 S3/R2 Bucket 中的对象。
-    4.  **批量入库**: 将扫描到的对象 Key 分批发送给后端 (`POST /api/jobs/:id/tasks`)。后端负责去重并创建 `PENDING` 状态的 Transfer Tasks，这些任务会自动进入队列供传输 Worker 消费。
+    4.  **批量入库**: 将扫描到的对象 Key 分批发送给后端 (`POST /api/jobs/:id/tasks`)。后端负责去重并创建 `PENDING` 状态的 Transfer Tasks，这些任务会自动进入 Redis 队列供传输 Worker 消费。
     5.  **完成**: 扫描结束后，若作业配置了 `periodic_interval` (周期性轮询)，Scanner 会保持作业状态为 `RUNNING` 并更新 `last_scan_time`，等待下一次扫描；若未配置周期性任务且无新任务，则标记作业为 `COMPLETED`。
 
 **阶段二：数据传输 (Go Transfer)**
@@ -54,6 +55,28 @@ Youtube 任务处理分为两个阶段，由不同的 Worker 协同完成：
     4.  **执行传输**: 调用外部传输服务 (`transfer_service_url`)，将源链接和目标链接传递给它，由其执行数据 Copy。支持大文件分片传输。
     5.  **更新状态**: 传输成功或失败后，向后端汇报任务状态 (`POST /api/transfer-tasks/update`)。
 
+### 3. FFmpeg Jobs (Video Merging)
+
+FFmpeg 任务用于将 S3/R2 上分离的视频流 (`*_video.mp4`) 和音频流 (`*_audio.m4a`) 合并为完整视频。
+
+**阶段一：配对扫描 (Go Scanner)**
+*   **代码位置**: `backend/worker_ffmpeg/cmd/scanner/main.go`
+*   **流程**:
+    1.  **发现任务**: 轮询后端 `GET /api/ffmpeg-jobs/pending` 获取待处理作业。
+    2.  **扫描源站**: 遍历作业指定的 S3/R2 前缀。
+    3.  **配对逻辑**: 在内存中匹配同名的 `_video` 和 `_audio` 文件。
+    4.  **去重与分发**: 使用 Redis Set (`queue:ffmpeg:dedup:{JobId}`) 进行任务去重。对于新发现的配对任务，直接推送到 Redis 队列 `queue:ffmpeg:pending`。
+    5.  **状态更新**: 定期调用 `PATCH /api/ffmpeg-jobs/:id/status` 更新作业的扫描进度和状态。
+
+**阶段二：合并处理 (Go Worker)**
+*   **代码位置**: `backend/worker_ffmpeg/cmd/worker/main.go`
+*   **流程**:
+    1.  **获取任务**: 直接从 Redis `queue:ffmpeg:pending` 阻塞弹出任务 (BLPop)。
+    2.  **下载素材**: 将视频流和音频流下载到本地临时目录。
+    3.  **执行合并**: 调用本地 `ffmpeg` 命令执行流复制合并 (`-c copy`)，无需重新编码，速度快。
+    4.  **上传结果**: 将合并后的 MP4 文件上传回 S3/R2 (通常是同一 Bucket 的不同路径)。
+    5.  **清理与汇报**: 删除本地临时文件，并调用后端接口 `PATCH /api/ffmpeg-jobs/:id/status` 更新作业的成功/失败计数。
+
 ---
 
 ## Prerequisites
@@ -62,6 +85,10 @@ Youtube 任务处理分为两个阶段，由不同的 Worker 协同完成：
 - Node.js 18+
 - PostgreSQL 12+
 - Redis 7+
+- Python 3.9+ (for Metadata Worker)
+- **Runtime Dependencies**:
+    - `ffmpeg` (must be installed on the system/container running the FFmpeg Worker)
+    - `yt-dlp` (must be installed on the system/container running the Metadata Worker)
 
 ## Setup & Configuration
 
@@ -82,7 +109,11 @@ Youtube 任务处理分为两个阶段，由不同的 Worker 协同完成：
           url: "redis://localhost:6379/0"
         ```
 
-3.  **Feishu (Lark) Integration**:
+3.  **Environment Variables**:
+    - Workers require `BACKEND_API_URL` to be set (default: `http://localhost:8080/api`).
+    - FFmpeg Worker respects `MAX_THREADS` (concurrency limit).
+
+4.  **Feishu (Lark) Integration**:
     - Update `config.yaml` with your Feishu App ID and Secret.
     - If you don't have one, the system uses a mock login flow if the App ID is left as "YOUR_APP_ID".
 
@@ -112,7 +143,7 @@ Youtube 任务处理分为两个阶段，由不同的 Worker 协同完成：
     ```bash
     cd frontend
     ```
-2.  Install dependencies (already done if you followed the agent's setup):
+2.  Install dependencies:
     ```bash
     npm install
     ```
@@ -122,16 +153,23 @@ Youtube 任务处理分为两个阶段，由不同的 Worker 协同完成：
     ```
     The UI will be available at `http://localhost:5173`.
 
+### Workers
+
+Workers can be run independently or via Docker/Kubernetes.
+
+- **Youtube Metadata (Python)**: `python3 backend/worker_downloader/get_yt_metadata.py`
+- **Youtube Downloader (Go)**: `go run backend/worker_downloader/downloader.go`
+- **Transfer Scanner (Go)**: `go run backend/worker_transfer/scanner.go`
+- **Transfer Agent (Go)**: `go run backend/worker_transfer/transfer.go`
+- **FFmpeg Scanner (Go)**: `go run backend/worker_ffmpeg/cmd/scanner/main.go`
+- **FFmpeg Worker (Go)**: `go run backend/worker_ffmpeg/cmd/worker/main.go`
+
 ## Features
 
 - **Authentication**: Feishu OAuth2 (Mocked if no credentials provided).
 - **Metadata Management**: CRUD for client connection details.
 - **Transfer Jobs**: Manage data transfer tasks with deduplication and status tracking.
 - **Youtube Jobs**: High-throughput video processing job management backed by Redis.
+- **FFmpeg Jobs**: Automated scanning and merging of audio/video streams from S3/R2.
 - **Task Batching**: Efficient batch APIs for inserting, updating, and fetching tasks.
-
-## Development Notes
-
-- The backend reads `config.yaml` from the project root (or parent directories).
-- The backend server runs on port `8080`.
-- Redis is required for job queuing and task buffering.
+- **Metrics**: Prometheus metrics exposed by all components for monitoring.

@@ -155,74 +155,76 @@ func RetryFailedTransferTasks(c *gin.Context) {
 		return
 	}
 
-	ctx := context.Background()
-	jobKey := fmt.Sprintf("tx:job:%d:tasks", jobID)
-	
-	batchSize := 1000
-	var cursor int64 = 0
-	resetCount := 0
+	go func(jobID int, initialStatus models.JobStatus) {
+		ctx := context.Background()
+		jobKey := fmt.Sprintf("tx:job:%d:tasks", jobID)
+		
+		batchSize := 1000
+		var cursor int64 = 0
+		resetCount := 0
 
-	for {
-		ids, err := database.RDB.ZRange(ctx, jobKey, cursor, cursor+int64(batchSize)-1).Result()
-		if err != nil || len(ids) == 0 {
-			break
-		}
+		for {
+			ids, err := database.RDB.ZRange(ctx, jobKey, cursor, cursor+int64(batchSize)-1).Result()
+			if err != nil || len(ids) == 0 {
+				break
+			}
 
-		var keys []string
-		for _, tid := range ids {
-			keys = append(keys, fmt.Sprintf("tx:task:%s", tid))
-		}
+			var keys []string
+			for _, tid := range ids {
+				keys = append(keys, fmt.Sprintf("tx:task:%s", tid))
+			}
 
-		results, err := database.RDB.MGet(ctx, keys...).Result()
-		if err != nil {
-			cursor += int64(batchSize)
-			continue
-		}
+			results, err := database.RDB.MGet(ctx, keys...).Result()
+			if err != nil {
+				cursor += int64(batchSize)
+				continue
+			}
 
-		pipe := database.RDB.Pipeline()
-		hasUpdates := false
+			pipe := database.RDB.Pipeline()
+			hasUpdates := false
 
-		for i, val := range results {
-			if val == nil { continue }
-			str, ok := val.(string)
-			if !ok { continue }
+			for i, val := range results {
+				if val == nil { continue }
+				str, ok := val.(string)
+				if !ok { continue }
 
-			var task models.TransferTask
-			if err := json.Unmarshal([]byte(str), &task); err == nil {
-				if task.Status == "FAILED" {
-					task.Status = "PENDING"
-					task.UpdatedAt = time.Now()
-					task.ErrorMessage = ""
-					
-					data, _ := json.Marshal(task)
-					pipe.Set(ctx, keys[i], data, 0)
-					hasUpdates = true
-					resetCount++
+				var task models.TransferTask
+				if err := json.Unmarshal([]byte(str), &task); err == nil {
+					if task.Status == "FAILED" {
+						task.Status = "PENDING"
+						task.UpdatedAt = time.Now()
+						task.ErrorMessage = ""
+						
+						data, _ := json.Marshal(task)
+						pipe.Set(ctx, keys[i], data, 0)
+						hasUpdates = true
+						resetCount++
+					}
 				}
+			}
+
+			if hasUpdates {
+				pipe.Exec(ctx)
+			}
+
+			cursor += int64(batchSize)
+			if len(ids) < batchSize {
+				break
 			}
 		}
 
-		if hasUpdates {
-			pipe.Exec(ctx)
+		if resetCount > 0 {
+			database.DB.Exec("UPDATE transfer_jobs SET failed_count = failed_count - ?, pending_count = pending_count + ? WHERE job_id = ?", resetCount, resetCount, jobID)
+			
+			database.RDB.Set(ctx, fmt.Sprintf("tx:job:%d:offset", jobID), 0, 0)
+
+			if initialStatus == models.StatusCompleted || initialStatus == models.StatusFailed {
+				database.DB.Model(&models.TransferJob{JobID: uint(jobID)}).Update("status", models.StatusPending)
+			}
 		}
+	}(jobID, job.Status)
 
-		cursor += int64(batchSize)
-		if len(ids) < batchSize {
-			break
-		}
-	}
-
-	if resetCount > 0 {
-		database.DB.Exec("UPDATE transfer_jobs SET failed_count = failed_count - ?, pending_count = pending_count + ? WHERE job_id = ?", resetCount, resetCount, jobID)
-		
-		database.RDB.Set(ctx, fmt.Sprintf("tx:job:%d:offset", jobID), 0, 0)
-
-		if job.Status == models.StatusCompleted || job.Status == models.StatusFailed {
-			database.DB.Model(&job).Update("status", models.StatusPending)
-		}
-	}
-
-	c.JSON(http.StatusOK, gin.H{"reset_count": resetCount})
+	c.JSON(http.StatusOK, gin.H{"message": "Retry initiated in background"})
 }
 
 type UpdateJobStatusRequest struct {
@@ -674,77 +676,79 @@ func RetryFailedYoutubeTasks(c *gin.Context) {
 		return
 	}
 
-	ctx := context.Background()
-	jobKey := fmt.Sprintf("job:%d:tasks", jobID)
-	
-	batchSize := 1000
-	var cursor int64 = 0
-	resetCount := 0
+	go func(jobID int, initialStatus models.JobStatus) {
+		ctx := context.Background()
+		jobKey := fmt.Sprintf("job:%d:tasks", jobID)
+		
+		batchSize := 1000
+		var cursor int64 = 0
+		resetCount := 0
 
-	for {
-		ids, err := database.RDB.ZRange(ctx, jobKey, cursor, cursor+int64(batchSize)-1).Result()
-		if err != nil || len(ids) == 0 {
-			break
-		}
+		for {
+			ids, err := database.RDB.ZRange(ctx, jobKey, cursor, cursor+int64(batchSize)-1).Result()
+			if err != nil || len(ids) == 0 {
+				break
+			}
 
-		var keys []string
-		for _, tid := range ids {
-			keys = append(keys, fmt.Sprintf("task:%s", tid))
-		}
+			var keys []string
+			for _, tid := range ids {
+				keys = append(keys, fmt.Sprintf("task:%s", tid))
+			}
 
-		results, err := database.RDB.MGet(ctx, keys...).Result()
-		if err != nil {
-			cursor += int64(batchSize)
-			continue
-		}
+			results, err := database.RDB.MGet(ctx, keys...).Result()
+			if err != nil {
+				cursor += int64(batchSize)
+				continue
+			}
 
-		pipe := database.RDB.Pipeline()
-		hasUpdates := false
+			pipe := database.RDB.Pipeline()
+			hasUpdates := false
 
-		for i, val := range results {
-			if val == nil { continue }
-			str, ok := val.(string)
-			if !ok { continue }
+			for i, val := range results {
+				if val == nil { continue }
+				str, ok := val.(string)
+				if !ok { continue }
 
-			var task models.YoutubeTask
-			if err := json.Unmarshal([]byte(str), &task); err == nil {
-				// Retry if FAILED and IsDownloadFail is true
-				if task.Status == "FAILED" && task.IsDownloadFail {
-					task.Status = "PENDING"
-					task.IsDownloadFail = false
-					task.ErrorMessage = ""
-					task.UpdatedAt = time.Now()
-					
-					data, _ := json.Marshal(task)
-					pipe.Set(ctx, keys[i], data, 0)
-					// Push back to download queue
-					pipe.RPush(ctx, "queue:youtube:download_ready", task.ID)
-					
-					hasUpdates = true
-					resetCount++
+				var task models.YoutubeTask
+				if err := json.Unmarshal([]byte(str), &task); err == nil {
+					// Retry if FAILED and IsDownloadFail is true
+					if task.Status == "FAILED" && task.IsDownloadFail {
+						task.Status = "PENDING"
+						task.IsDownloadFail = false
+						task.ErrorMessage = ""
+						task.UpdatedAt = time.Now()
+						
+						data, _ := json.Marshal(task)
+						pipe.Set(ctx, keys[i], data, 0)
+						// Push back to download queue
+						pipe.RPush(ctx, "queue:youtube:download_ready", task.ID)
+						
+						hasUpdates = true
+						resetCount++
+					}
 				}
+			}
+
+			if hasUpdates {
+				pipe.Exec(ctx)
+			}
+
+			cursor += int64(batchSize)
+			if len(ids) < batchSize {
+				break
 			}
 		}
 
-		if hasUpdates {
-			pipe.Exec(ctx)
+		if resetCount > 0 {
+			database.DB.Exec("UPDATE youtube_jobs SET failed_count = failed_count - ?, pending_count = pending_count + ? WHERE id = ?", resetCount, resetCount, jobID)
+
+			if initialStatus == models.StatusCompleted || initialStatus == models.StatusFailed {
+				database.DB.Model(&models.YoutubeJob{ID: uint(jobID)}).Update("status", models.StatusPending)
+			}
 		}
+	}(jobID, job.Status)
 
-		cursor += int64(batchSize)
-		if len(ids) < batchSize {
-			break
-		}
-	}
-
-	if resetCount > 0 {
-		database.DB.Exec("UPDATE youtube_jobs SET failed_count = failed_count - ?, pending_count = pending_count + ? WHERE id = ?", resetCount, resetCount, jobID)
-
-		if job.Status == models.StatusCompleted || job.Status == models.StatusFailed {
-			database.DB.Model(&job).Update("status", models.StatusPending)
-		}
-	}
-
-	c.JSON(http.StatusOK, gin.H{"reset_count": resetCount})
+	c.JSON(http.StatusOK, gin.H{"message": "Retry initiated in background"})
 }
 
 // --- Ffmpeg Jobs ---
