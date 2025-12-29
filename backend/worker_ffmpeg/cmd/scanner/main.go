@@ -5,8 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"log"
-	"math/rand"
 	"net/http"
 	"net/url"
 	"os"
@@ -28,7 +28,8 @@ import (
 )
 
 const (
-	TaskQueue = "queue:ffmpeg:pending"
+	TaskQueue   = "queue:ffmpeg:pending"
+	DedupPrefix = "queue:ffmpeg:dedup:"
 )
 
 var (
@@ -167,6 +168,9 @@ func processJob(job common.FfmpegJob) {
 	log.Printf("Processing Job %d: %s (Incremental: %v)", job.ID, job.S3Prefix, job.IsIncremental)
 
 	if err := updateJobStatus(job.ID, "RUNNING", nil, "", nil); err != nil {
+		if strings.Contains(err.Error(), "status 404") {
+			cleanUpDedup(job.ID)
+		}
 		log.Printf("Failed to set RUNNING for job %d: %v", job.ID, err)
 		return
 	}
@@ -226,27 +230,59 @@ func processJob(job common.FfmpegJob) {
 		}
 
 		// Check for complete pairs
-		var batch []interface{}
+		var candidates []struct {
+			id     string
+			pair   *FilePair
+			taskID int64
+		}
+
 		for id, p := range pairs {
 			if p.Video != "" && p.Audio != "" {
-				// Generate a random ID since we aren't using DB for tasks
-				taskID := time.Now().UnixNano() + int64(rand.Intn(1000))
+				candidates = append(candidates, struct {
+					id     string
+					pair   *FilePair
+					taskID int64
+				}{id, p, generateTaskID(id)})
+			}
+		}
 
-				task := common.FfmpegTask{
-					ID:        taskID,
-					JobID:     job.ID,
-					VideoKey:  p.Video,
-					AudioKey:  p.Audio,
-					VideoSize: p.VideoSize,
-					AudioSize: p.AudioSize,
-					Status:    "PENDING",
+		var batch []interface{}
+		if len(candidates) > 0 {
+			pipe := rdb.Pipeline()
+			dedupKey := fmt.Sprintf("%s%d", DedupPrefix, job.ID)
+
+			for _, c := range candidates {
+				pipe.SAdd(context.Background(), dedupKey, c.taskID)
+			}
+
+			cmders, err := pipe.Exec(context.Background())
+			if err != nil {
+				log.Printf("Dedup pipeline failed for job %d: %v", job.ID, err)
+			} else {
+				for i, cmder := range cmders {
+					if cmd, ok := cmder.(*redis.IntCmd); ok {
+						if cmd.Val() > 0 {
+							// New task (SAdd returned 1)
+							c := candidates[i]
+							task := common.FfmpegTask{
+								ID:        c.taskID,
+								JobID:     job.ID,
+								VideoKey:  c.pair.Video,
+								AudioKey:  c.pair.Audio,
+								VideoSize: c.pair.VideoSize,
+								AudioSize: c.pair.AudioSize,
+								Status:    "PENDING",
+							}
+
+							data, _ := json.Marshal(task)
+							batch = append(batch, data)
+
+							TasksDiscovered.Inc()
+						}
+					}
+					// Always cleanup completed pairs
+					delete(pairs, candidates[i].id)
 				}
-
-				data, _ := json.Marshal(task)
-				batch = append(batch, data)
-
-				TasksDiscovered.Inc()
-				delete(pairs, id)
 			}
 		}
 
@@ -266,18 +302,32 @@ func processJob(job common.FfmpegJob) {
 			}
 			count += len(batch)
 			// Update total count
-			updateJobStatus(job.ID, "RUNNING", nil, "", &count)
+			if err := updateJobStatus(job.ID, "RUNNING", nil, "", &count); err != nil {
+				if strings.Contains(err.Error(), "status 404") {
+					cleanUpDedup(job.ID)
+					return
+				}
+				log.Printf("Warning: failed to update status for job %d: %v", job.ID, err)
+			}
 		}
 	}
 
 	resultMsg := fmt.Sprintf("Scanned %d pages. Tasks Discovered: %d", pages, count)
 	log.Printf("Job %d scan completed. %s", job.ID, resultMsg)
 
+	var errFinal error
 	if job.IsIncremental {
 		// Keep running, update scan time
-		updateJobStatus(job.ID, "RUNNING", &startTime, resultMsg, nil)
+		errFinal = updateJobStatus(job.ID, "RUNNING", &startTime, resultMsg, nil)
 	} else {
-		updateJobStatus(job.ID, "COMPLETED", &startTime, resultMsg, nil)
+		errFinal = updateJobStatus(job.ID, "COMPLETED", &startTime, resultMsg, nil)
+	}
+
+	if errFinal != nil {
+		if strings.Contains(errFinal.Error(), "status 404") {
+			cleanUpDedup(job.ID)
+		}
+		log.Printf("Final status update failed for job %d: %v", job.ID, errFinal)
 	}
 }
 
@@ -336,5 +386,22 @@ func getBucketFromEndpoint(endpoint string) string {
 	if err != nil {
 		return ""
 	}
-	return strings.Trim(u.Path, "/")
-}
+		return strings.Trim(u.Path, "/")
+	}
+	
+	func generateTaskID(s string) int64 {
+		h := fnv.New64a()
+		h.Write([]byte(s))
+		// Ensure positive ID
+		return int64(h.Sum64() & 0x7fffffffffffffff)
+	}
+	
+	func cleanUpDedup(jobID int64) {
+		key := fmt.Sprintf("%s%d", DedupPrefix, jobID)
+		if err := rdb.Del(context.Background(), key).Err(); err != nil {
+			log.Printf("Failed to cleanup dedup key %s: %v", key, err)
+		} else {
+			log.Printf("Cleaned up dedup key %s for deleted job %d", key, jobID)
+		}
+	}
+	
