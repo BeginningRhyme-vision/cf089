@@ -10,10 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"unbound-future-backend/database"
 	"unbound-future-backend/metrics"
 	"unbound-future-backend/models"
+
+	"github.com/gin-gonic/gin"
 )
 
 // --- Transfer Jobs ---
@@ -32,12 +33,12 @@ func CreateTransferJob(c *gin.Context) {
 
 	job := req.TransferJob
 	job.Status = models.StatusPending
-	
+
 	// If Incremental is selected but no interval is provided, default to 60s to ensure it acts as a periodic monitor
 	if job.IsIncremental && job.PeriodicInterval <= 0 {
 		job.PeriodicInterval = 600
 	}
-	
+
 	// Initial counts
 	job.TotalCount = len(req.Tasks)
 	job.PendingCount = len(req.Tasks)
@@ -69,10 +70,10 @@ func CreateTransferJob(c *gin.Context) {
 
 func ListTransferJobs(c *gin.Context) {
 	var jobs []models.TransferJob
-    // Pagination params
-    page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
-    limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
-    offset := (page - 1) * limit
+	// Pagination params
+	page, _ := strconv.Atoi(c.DefaultQuery("page", "1"))
+	limit, _ := strconv.Atoi(c.DefaultQuery("limit", "10"))
+	offset := (page - 1) * limit
 
 	if err := database.DB.Preload("Metadata").Order("created_at desc").Offset(offset).Limit(limit).Find(&jobs).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -158,7 +159,7 @@ func RetryFailedTransferTasks(c *gin.Context) {
 	go func(jobID int, initialStatus models.JobStatus) {
 		ctx := context.Background()
 		jobKey := fmt.Sprintf("tx:job:%d:tasks", jobID)
-		
+
 		batchSize := 1000
 		var cursor int64 = 0
 		resetCount := 0
@@ -184,9 +185,13 @@ func RetryFailedTransferTasks(c *gin.Context) {
 			hasUpdates := false
 
 			for i, val := range results {
-				if val == nil { continue }
+				if val == nil {
+					continue
+				}
 				str, ok := val.(string)
-				if !ok { continue }
+				if !ok {
+					continue
+				}
 
 				var task models.TransferTask
 				if err := json.Unmarshal([]byte(str), &task); err == nil {
@@ -194,7 +199,7 @@ func RetryFailedTransferTasks(c *gin.Context) {
 						task.Status = "PENDING"
 						task.UpdatedAt = time.Now()
 						task.ErrorMessage = ""
-						
+
 						data, _ := json.Marshal(task)
 						pipe.Set(ctx, keys[i], data, 0)
 						hasUpdates = true
@@ -215,7 +220,7 @@ func RetryFailedTransferTasks(c *gin.Context) {
 
 		if resetCount > 0 {
 			database.DB.Exec("UPDATE transfer_jobs SET failed_count = failed_count - ?, pending_count = pending_count + ? WHERE job_id = ?", resetCount, resetCount, jobID)
-			
+
 			database.RDB.Set(ctx, fmt.Sprintf("tx:job:%d:offset", jobID), 0, 0)
 
 			if initialStatus == models.StatusCompleted || initialStatus == models.StatusFailed {
@@ -317,7 +322,7 @@ func UpdateTransferJobStatus(c *gin.Context) {
 func cleanupTransferJobRedis(ctx context.Context, jobID uint) {
 	// 1. Get all task IDs
 	jobKey := fmt.Sprintf("tx:job:%d:tasks", jobID)
-	
+
 	taskIDs, err := database.RDB.ZRange(ctx, jobKey, 0, -1).Result()
 	if err == nil && len(taskIDs) > 0 {
 		pipe := database.RDB.Pipeline()
@@ -532,8 +537,8 @@ func GetYoutubeJob(c *gin.Context) {
 func cleanupYoutubeJobRedis(ctx context.Context, jobID uint) {
 	// 1. Get all task IDs
 	jobKey := fmt.Sprintf("job:%d:tasks", jobID)
-	
-	// We might have many tasks, so we should scan or handle in chunks if huge, 
+
+	// We might have many tasks, so we should scan or handle in chunks if huge,
 	// but ZRange is okay for reasonable sizes.
 	taskIDs, err := database.RDB.ZRange(ctx, jobKey, 0, -1).Result()
 	if err == nil && len(taskIDs) > 0 {
@@ -553,7 +558,7 @@ func cleanupYoutubeJobRedis(ctx context.Context, jobID uint) {
 func DeleteYoutubeJob(c *gin.Context) {
 	idStr := c.Param("id")
 	id, _ := strconv.Atoi(idStr)
-	
+
 	// Delete from PG
 	if err := database.DB.Delete(&models.YoutubeJob{}, id).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
@@ -679,7 +684,7 @@ func RetryFailedYoutubeTasks(c *gin.Context) {
 	go func(jobID int, initialStatus models.JobStatus) {
 		ctx := context.Background()
 		jobKey := fmt.Sprintf("job:%d:tasks", jobID)
-		
+
 		batchSize := 1000
 		var cursor int64 = 0
 		resetCount := 0
@@ -705,24 +710,29 @@ func RetryFailedYoutubeTasks(c *gin.Context) {
 			hasUpdates := false
 
 			for i, val := range results {
-				if val == nil { continue }
+				if val == nil {
+					continue
+				}
 				str, ok := val.(string)
-				if !ok { continue }
+				if !ok {
+					continue
+				}
 
 				var task models.YoutubeTask
 				if err := json.Unmarshal([]byte(str), &task); err == nil {
-					// Retry if FAILED and IsDownloadFail is true
-					if task.Status == "FAILED" && task.IsDownloadFail {
+					// Retry if FAILED and (IsDownloadFail is true OR it's a bot detection error)
+					isBotError := strings.Contains(task.ErrorMessage, "Sign in to confirm you’re not a bot")
+					if task.Status == "FAILED" && (task.IsDownloadFail || isBotError) {
 						task.Status = "PENDING"
 						task.IsDownloadFail = false
 						task.ErrorMessage = ""
 						task.UpdatedAt = time.Now()
-						
+
 						data, _ := json.Marshal(task)
 						pipe.Set(ctx, keys[i], data, 0)
 						// Push back to download queue
 						pipe.RPush(ctx, "queue:youtube:download_ready", task.ID)
-						
+
 						hasUpdates = true
 						resetCount++
 					}
@@ -766,7 +776,7 @@ func CreateFfmpegJob(c *gin.Context) {
 
 	job := req.FfmpegJob
 	job.Status = models.StatusPending
-	
+
 	if job.IsIncremental && job.PeriodicInterval <= 0 {
 		job.PeriodicInterval = 600
 	}
@@ -790,7 +800,7 @@ func CreateFfmpegJob(c *gin.Context) {
 	metrics.ActiveJobsGauge.WithLabelValues("ffmpeg").Inc()
 
 	// We don't create an initial task here anymore. The scanner will create tasks.
-	
+
 	c.JSON(http.StatusCreated, job)
 }
 
@@ -858,7 +868,7 @@ func UpdateFfmpegJobStatus(c *gin.Context) {
 		// Store result message somewhere? FfmpegJob doesn't have ResultMessage.
 		// Ignoring for now or I should add it.
 	}
-	
+
 	// Atomic counter updates if provided
 	if req.IncSuccess > 0 || req.IncFailed > 0 {
 		totalDec := req.IncSuccess + req.IncFailed
@@ -889,7 +899,7 @@ func DeleteFfmpegJob(c *gin.Context) {
 	go func(jid uint) {
 		ctx := context.Background()
 		jobKey := fmt.Sprintf("ff:job:%d:tasks", jid)
-		
+
 		taskIDs, err := database.RDB.ZRange(ctx, jobKey, 0, -1).Result()
 		if err == nil && len(taskIDs) > 0 {
 			pipe := database.RDB.Pipeline()
@@ -898,7 +908,7 @@ func DeleteFfmpegJob(c *gin.Context) {
 			}
 			pipe.Exec(ctx)
 		}
-		
+
 		database.RDB.Del(ctx, jobKey)
 		database.RDB.Del(ctx, fmt.Sprintf("ff:job:%d:lock", jid))
 		database.RDB.Del(ctx, fmt.Sprintf("ff:job:%d:offset", jid))
