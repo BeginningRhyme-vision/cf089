@@ -162,8 +162,6 @@ func main() {
 	}
 }
 
-// ... unchanged functions: initRedis, getPendingJobs ...
-
 func reportResultPatch(jobID int64, success bool) {
 	req := common.UpdateJobStatusRequest{}
 	if success {
@@ -183,9 +181,6 @@ func reportResultPatch(jobID int64, success bool) {
 	}
 	defer resp.Body.Close()
 }
-
-func updateJobStatus(jobID int64, status string, lastScanTime *time.Time, msg string, totalCount *int) error {
-// ... same as before
 
 func initRedis() {
 	redisURL := os.Getenv("REDIS_URL")
@@ -323,87 +318,133 @@ func processJob(job common.FfmpegJob) {
 			}
 		}
 
-// Check for permanent failures before deduping
-			var checkPermFailureIDs []interface{}
-			for _, c := range candidates {
-				checkPermFailureIDs = append(checkPermFailureIDs, c.taskID)
-			}
-			permFailed, err := rdb.SIsMember(context.Background(), PermFailureKey, checkPermFailureIDs...).Result()
-			if err != nil {
-				log.Printf("Failed to check for permanent failures: %v", err)
-				permFailed = make([]bool, len(checkPermFailureIDs)) // Assume none have failed
-			}
+		// Identify complete pairs (candidates)
+		var candidates []struct {
+			id     string
+			pair   *FilePair
+			taskID int64
+		}
 
-			// Dedup
-			pipe := rdb.Pipeline()
-			dedupKey := fmt.Sprintf("%s%d", DedupPrefix, job.ID)
-			var dedupCandidates []struct {
-				id     string
-				pair   *FilePair
-				taskID int64
-			}
-
-			for i, c := range candidates {
-				if !permFailed[i] {
-					pipe.SAdd(context.Background(), dedupKey, c.taskID)
-					dedupCandidates = append(dedupCandidates, c)
-				}
-			}
-
-			if len(dedupCandidates) == 0 {
-				// Clear pairs that were filtered out
-				for _, c := range candidates {
-					delete(pairs, c.id)
-				}
-				continue // Skip to next page
-			}
-
-			cmders, err := pipe.Exec(context.Background())
-			if err != nil {
-				log.Printf("Dedup pipeline failed for job %d: %v", job.ID, err)
-			} else {
-				for i, cmder := range cmders {
-					if cmd, ok := cmder.(*redis.IntCmd); ok {
-						if cmd.Val() > 0 {
-							// New task (SAdd returned 1)
-							c := dedupCandidates[i]
-							task := common.FfmpegTask{
-								ID:        c.taskID,
-								JobID:     job.ID,
-								VideoKey:  c.pair.Video,
-								AudioKey:  c.pair.Audio,
-								VideoSize: c.pair.VideoSize,
-								AudioSize: c.pair.AudioSize,
-								Status:    "PENDING",
-							}
-
-							data, _ := json.Marshal(task)
-							batch = append(batch, data)
-
-							TasksDiscovered.Inc()
-						}
-					}
-				}
-			}
-
-			// Always cleanup completed pairs from this page's processing
-			for _, c := range candidates {
-				delete(pairs, c.id)
+		for id, pair := range pairs {
+			if pair.Video != "" && pair.Audio != "" {
+				taskID := generateTaskID(filepath.Base(pair.Video)) // Deterministic Task ID based on Video Name
+				candidates = append(candidates, struct {
+					id     string
+					pair   *FilePair
+					taskID int64
+				}{id, pair, taskID})
 			}
 		}
 
+		if len(candidates) == 0 {
+			continue
+		}
+
+		// Check for permanent failures before deduping
+		var checkPermFailureIDs []interface{}
+		for _, c := range candidates {
+			checkPermFailureIDs = append(checkPermFailureIDs, c.taskID)
+		}
+		
+		// If checkPermFailureIDs is empty, skip (though len check above prevents this)
+		var permFailed []bool
+		if len(checkPermFailureIDs) > 0 {
+			// SIsMember does not support variadic args in older go-redis versions or depending on signature?
+			// Actually SMISMEMBER is what we want if available, or just loop. 
+			// go-redis v9 has SMIsMember.
+			
+			res, err := rdb.SMIsMember(context.Background(), PermFailureKey, checkPermFailureIDs...).Result()
+			if err != nil {
+				log.Printf("Failed to check for permanent failures: %v", err)
+				// Assume none failed on error to be safe, or skip?
+				// Better to assume false and let dedup handle or retry logic catch it later.
+				permFailed = make([]bool, len(checkPermFailureIDs))
+			} else {
+				permFailed = res
+			}
+		}
+
+		// Dedup
+		pipe := rdb.Pipeline()
+		dedupKey := fmt.Sprintf("%s%d", DedupPrefix, job.ID)
+		var dedupCandidates []struct {
+			id     string
+			pair   *FilePair
+			taskID int64
+		}
+
+		for i, c := range candidates {
+			if i < len(permFailed) && permFailed[i] {
+				// Skip permanently failed tasks
+				continue 
+			}
+			pipe.SAdd(context.Background(), dedupKey, c.taskID)
+			dedupCandidates = append(dedupCandidates, c)
+		}
+
+		if len(dedupCandidates) == 0 {
+			// Clear pairs that were filtered out or processed
+			for _, c := range candidates {
+				delete(pairs, c.id)
+			}
+			continue
+		}
+
+		cmders, err := pipe.Exec(context.Background())
+		var batch [][]byte
+
+		if err != nil {
+			log.Printf("Dedup pipeline failed for job %d: %v", job.ID, err)
+		} else {
+			for i, cmder := range cmders {
+				if cmd, ok := cmder.(*redis.IntCmd); ok {
+					if cmd.Val() > 0 {
+						// New task (SAdd returned 1)
+						c := dedupCandidates[i]
+						task := common.FfmpegTask{
+							ID:        c.taskID,
+							JobID:     job.ID,
+							VideoKey:  c.pair.Video,
+							AudioKey:  c.pair.Audio,
+							VideoSize: c.pair.VideoSize,
+							AudioSize: c.pair.AudioSize,
+							Status:    "PENDING",
+						}
+
+						data, _ := json.Marshal(task)
+						batch = append(batch, data)
+
+						TasksDiscovered.Inc()
+					}
+				}
+			}
+		}
+
+		// Always cleanup completed pairs from this page's processing
+		for _, c := range candidates {
+			delete(pairs, c.id)
+		}
+
 		if len(batch) > 0 {
-			var err error
+			// Push batch to Redis
+			// go-redis RPush accepts values...
+			// We need []interface{}
+			var interfaceBatch []interface{}
+			for _, b := range batch {
+				interfaceBatch = append(interfaceBatch, b)
+			}
+			
+			var errPush error
 			for i := 0; i < 3; i++ {
-				err = rdb.RPush(context.Background(), TaskQueue, batch...).Err()
-				if err == nil {
+				errPush = rdb.RPush(context.Background(), TaskQueue, interfaceBatch...).Err()
+				if errPush == nil {
 					break
 				}
 				time.Sleep(500 * time.Millisecond)
 			}
 
-			if err != nil {
-				log.Printf("Failed to push batch for job %d: %v", job.ID, err)
+			if errPush != nil {
+				log.Printf("Failed to push batch for job %d: %v", job.ID, errPush)
 			}
 			count += len(batch)
 			if err := updateJobStatus(job.ID, "RUNNING", nil, "", &count); err != nil {
@@ -490,22 +531,21 @@ func getBucketFromEndpoint(endpoint string) string {
 	if err != nil {
 		return ""
 	}
-		return strings.Trim(u.Path, "/")
+	return strings.Trim(u.Path, "/")
+}
+
+func generateTaskID(s string) int64 {
+	h := fnv.New64a()
+	h.Write([]byte(s))
+	// Ensure positive ID
+	return int64(h.Sum64() & 0x7fffffffffffffff)
+}
+
+func cleanUpDedup(jobID int64) {
+	key := fmt.Sprintf("%s%d", DedupPrefix, jobID)
+	if err := rdb.Del(context.Background(), key).Err(); err != nil {
+		log.Printf("Failed to cleanup dedup key %s: %v", key, err)
+	} else {
+		log.Printf("Cleaned up dedup key %s for deleted job %d", key, jobID)
 	}
-	
-	func generateTaskID(s string) int64 {
-		h := fnv.New64a()
-		h.Write([]byte(s))
-		// Ensure positive ID
-		return int64(h.Sum64() & 0x7fffffffffffffff)
-	}
-	
-	func cleanUpDedup(jobID int64) {
-		key := fmt.Sprintf("%s%d", DedupPrefix, jobID)
-		if err := rdb.Del(context.Background(), key).Err(); err != nil {
-			log.Printf("Failed to cleanup dedup key %s: %v", key, err)
-		} else {
-			log.Printf("Cleaned up dedup key %s for deleted job %d", key, jobID)
-		}
-	}
-	
+}
