@@ -18,6 +18,23 @@ TASK_DURATION = Histogram('worker_meta_task_duration_seconds', 'Duration of meta
 # API Configuration
 API_BASE_URL = os.environ.get("BACKEND_API_URL", "http://localhost:8080/api")
 
+JOB_CACHE = {}
+
+def get_job_info(job_id):
+    if job_id in JOB_CACHE:
+        return JOB_CACHE[job_id]
+    
+    try:
+        resp = requests.get(f"{API_BASE_URL}/youtube-jobs/{job_id}")
+        if resp.status_code == 200:
+            job = resp.json()
+            JOB_CACHE[job_id] = job
+            return job
+    except Exception as e:
+        print(f"Error fetching job info for {job_id}: {e}")
+    
+    return {}
+
 def load_config():
     # Try multiple paths to find config.yaml
     paths = ["../../config.yaml", "../config.yaml", "config.yaml"]
@@ -69,6 +86,9 @@ def process_metadata(task, ydl_opts):
         
     print(f"Processing Task {task['id']}: {url}")
     
+    job_info = get_job_info(task['job_id'])
+    download_mode = job_info.get('download_mode', 'both') # both, audio, video
+
     result = {
         "id": task['id'],
         "job_id": task['job_id'],
@@ -86,17 +106,20 @@ def process_metadata(task, ydl_opts):
             formats = info.get('formats', [])
             
             # Find best audio
-            audio_formats = [f for f in reversed(formats) 
-                             if f.get('vcodec') == 'none' and f.get('acodec') != 'none']
             best_audio = None
-            if audio_formats:
-                best_audio = next((f for f in audio_formats if f.get('language') == 'en'), None)
-                if not best_audio:
-                    best_audio = audio_formats[0]
+            if download_mode in ['both', 'audio']:
+                audio_formats = [f for f in reversed(formats) 
+                                 if f.get('vcodec') == 'none' and f.get('acodec') != 'none']
+                if audio_formats:
+                    best_audio = next((f for f in audio_formats if f.get('language') == 'en'), None)
+                    if not best_audio:
+                        best_audio = audio_formats[0]
             
             # Find best video
-            best_video = next((f for f in reversed(formats) 
-                               if f.get('vcodec') != 'none' and f.get('acodec') == 'none'), None)
+            best_video = None
+            if download_mode in ['both', 'video']:
+                best_video = next((f for f in reversed(formats) 
+                                   if f.get('vcodec') != 'none' and f.get('acodec') == 'none'), None)
             
             if best_audio:
                 result["audio_url"] = best_audio.get('url')

@@ -74,6 +74,7 @@ func (TransferJob) TableName() string {
 type YoutubeJob struct {
 	ID           uint      `gorm:"primaryKey" json:"id"`
 	R2Prefix     string    `gorm:"size:1024;not null" json:"r2_prefix"`
+	DownloadMode string    `gorm:"type:varchar(20);default:'both'" json:"download_mode"` // 'both', 'audio', 'video'
 	Status       JobStatus `gorm:"type:varchar(50);default:'PENDING'" json:"status"`
 	TotalCount   int       `gorm:"default:0" json:"total_count"`
 	PendingCount int       `gorm:"default:0" json:"pending_count"`
