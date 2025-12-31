@@ -245,15 +245,43 @@ func checkAndRefillBuffers() {
 		return
 	}
 
+	ctx := context.Background()
+
 	for _, job := range jobs {
-		ensureBuffer(int64(job.ID))
+		jid := int64(job.ID)
+		ensureBuffer(jid)
 
 		bufferMutex.RLock()
-		ch, exists := jobBuffers[int64(job.ID)]
+		ch, exists := jobBuffers[jid]
 		bufferMutex.RUnlock()
 
-		if exists && len(ch) < BufferLowWater {
-			triggerRefill(int64(job.ID))
+		if !exists {
+			continue
+		}
+
+		// Check for stuck state: Pending > 0, Buffer Empty, Not Filling, Offset >= Total
+		if job.PendingCount > 0 && len(ch) == 0 {
+			if _, filling := fillingMap.Load(jid); !filling {
+				offsetKey := fmt.Sprintf("job:%d:offset", jid)
+				jobKey := fmt.Sprintf("job:%d:tasks", jid)
+
+				total, _ := database.RDB.ZCard(ctx, jobKey).Result()
+				offsetStr, _ := database.RDB.Get(ctx, offsetKey).Result()
+				var offset int64
+				if offsetStr != "" {
+					fmt.Sscanf(offsetStr, "%d", &offset)
+				}
+
+				if total > 0 && offset >= total {
+					// Reset offset
+					fmt.Printf("Resetting offset for stuck job %d (Total: %d, Offset: %d, Pending: %d)\n", jid, total, offset, job.PendingCount)
+					database.RDB.Set(ctx, offsetKey, 0, 0)
+				}
+			}
+		}
+
+		if len(ch) < BufferLowWater {
+			triggerRefill(jid)
 		}
 	}
 }
@@ -327,7 +355,9 @@ func fillJobBuffer(jobID int64) {
 	}
 
 	count := 0
+	processed := 0
 	for _, item := range jsonList {
+		processed++
 		if item == nil {
 			continue
 		}
@@ -338,6 +368,10 @@ func fillJobBuffer(jobID int64) {
 
 		var task models.YoutubeTask
 		if err := json.Unmarshal([]byte(str), &task); err == nil {
+			if task.Status != "PENDING" {
+				continue
+			}
+
 			// Non-blocking send or timeout?
 			// Since we check len < LowWater, there should be space.
 			// But to be safe, use select
@@ -346,6 +380,7 @@ func fillJobBuffer(jobID int64) {
 				count++
 			default:
 				// Buffer full, stop filling
+				processed--
 				goto FINISH
 			}
 		}
@@ -353,8 +388,8 @@ func fillJobBuffer(jobID int64) {
 
 FINISH:
 	// Update offset
-	if count > 0 {
-		newOffset := offset + int64(count)
+	if processed > 0 {
+		newOffset := offset + int64(processed)
 		database.RDB.Set(ctx, offsetKey, newOffset, 0)
 	}
 }
@@ -979,15 +1014,44 @@ func checkAndRefillTxBuffers() {
 		return
 	}
 
+	ctx := context.Background()
+
 	for _, job := range jobs {
-		ensureTxBuffer(int64(job.JobID))
+		jid := int64(job.JobID)
+		ensureTxBuffer(jid)
 
 		bufferMutex.RLock()
-		ch, exists := txJobBuffers[int64(job.JobID)]
+		ch, exists := txJobBuffers[jid]
 		bufferMutex.RUnlock()
 
-		if exists && len(ch) < BufferLowWater {
-			triggerTxRefill(int64(job.JobID))
+		if !exists {
+			continue
+		}
+
+		// Check for stuck state (Pending > 0, Buffer Empty, Not Filling, Offset >= Total)
+		if job.PendingCount > 0 && len(ch) == 0 {
+			key := fmt.Sprintf("tx:%d", jid)
+			if _, filling := fillingMap.Load(key); !filling {
+				offsetKey := fmt.Sprintf("tx:job:%d:offset", jid)
+				jobKey := fmt.Sprintf("tx:job:%d:tasks", jid)
+
+				total, _ := database.RDB.ZCard(ctx, jobKey).Result()
+				offsetStr, _ := database.RDB.Get(ctx, offsetKey).Result()
+				var offset int64
+				if offsetStr != "" {
+					fmt.Sscanf(offsetStr, "%d", &offset)
+				}
+
+				if total > 0 && offset >= total {
+					// Reset offset
+					fmt.Printf("Resetting offset for stuck transfer job %d (Total: %d, Offset: %d, Pending: %d)\n", jid, total, offset, job.PendingCount)
+					database.RDB.Set(ctx, offsetKey, 0, 0)
+				}
+			}
+		}
+
+		if len(ch) < BufferLowWater {
+			triggerTxRefill(jid)
 		}
 	}
 }
@@ -1276,39 +1340,49 @@ func BatchUpdateTransfer(c *gin.Context) {
 	
 
 	func checkAndRefillFfmpegBuffers() {
-
 		var jobs []models.FfmpegJob
-
 		if err := database.DB.Where("status IN ?", []models.JobStatus{models.StatusPending, models.StatusRunning}).Find(&jobs).Error; err != nil {
-
 			return
-
 		}
 
-	
+		ctx := context.Background()
 
 		for _, job := range jobs {
-
-			ensureFfmpegBuffer(int64(job.ID))
-
-	
+			jid := int64(job.ID)
+			ensureFfmpegBuffer(jid)
 
 			bufferMutex.RLock()
-
-			ch, exists := ffmpegJobBuffers[int64(job.ID)]
-
+			ch, exists := ffmpegJobBuffers[jid]
 			bufferMutex.RUnlock()
 
-	
-
-			if exists && len(ch) < BufferLowWater {
-
-				triggerFfmpegRefill(int64(job.ID))
-
+			if !exists {
+				continue
 			}
 
-		}
+			if job.PendingCount > 0 && len(ch) == 0 {
+				key := fmt.Sprintf("ff:%d", jid)
+				if _, filling := fillingMap.Load(key); !filling {
+					offsetKey := fmt.Sprintf("ff:job:%d:offset", jid)
+					jobKey := fmt.Sprintf("ff:job:%d:tasks", jid)
 
+					total, _ := database.RDB.ZCard(ctx, jobKey).Result()
+					offsetStr, _ := database.RDB.Get(ctx, offsetKey).Result()
+					var offset int64
+					if offsetStr != "" {
+						fmt.Sscanf(offsetStr, "%d", &offset)
+					}
+
+					if total > 0 && offset >= total {
+						fmt.Printf("Resetting offset for stuck ffmpeg job %d (Total: %d, Offset: %d, Pending: %d)\n", jid, total, offset, job.PendingCount)
+						database.RDB.Set(ctx, offsetKey, 0, 0)
+					}
+				}
+			}
+
+			if len(ch) < BufferLowWater {
+				triggerFfmpegRefill(jid)
+			}
+		}
 	}
 
 	
@@ -1440,55 +1514,40 @@ func BatchUpdateTransfer(c *gin.Context) {
 	
 
 		count := 0
+		processed := 0
 
 		for _, item := range jsonList {
+			processed++
 
 			if item == nil {
-
 				continue
-
 			}
 
 			str, ok := item.(string)
-
 			if !ok {
-
 				continue
-
 			}
-
-	
 
 			var task models.FfmpegTask
-
 			if err := json.Unmarshal([]byte(str), &task); err == nil {
-
-				select {
-
-				case ch <- task:
-
-					count++
-
-				default:
-
-					goto FINISH
-
+				if task.Status != "PENDING" {
+					continue
 				}
 
+				select {
+				case ch <- task:
+					count++
+				default:
+					processed--
+					goto FINISH
+				}
 			}
-
 		}
 
-	
-
 	FINISH:
-
-		if count > 0 {
-
-			newOffset := offset + int64(count)
-
+		if processed > 0 {
+			newOffset := offset + int64(processed)
 			database.RDB.Set(ctx, offsetKey, newOffset, 0)
-
 		}
 
 	}

@@ -34,6 +34,7 @@ import (
 const (
 	DefaultTempDir = "/dev/shm"
 	TaskQueue      = "queue:ffmpeg:pending"
+	FailedQueue    = "queue:ffmpeg:failed"
 )
 
 var (
@@ -58,6 +59,36 @@ var (
 		Help: "Duration of task processing",
 	})
 )
+
+func handleTaskFailure(t common.FfmpegTask, reason string) {
+	log.Printf("Task %d failed: %s", t.ID, reason)
+
+	t.RetryCount++
+	t.Status = "FAILED"
+	t.ErrorMessage = reason
+	t.UpdatedAt = time.Now()
+
+	// Push to failed queue
+	failedTaskData, err := json.Marshal(t)
+	if err != nil {
+		log.Printf("CRITICAL: Failed to marshal failed task %d for requeue: %v", t.ID, err)
+		// If we can't marshal it, we just drop it but still report failure.
+		reportResultPatch(t.JobID, false)
+		TasksProcessed.WithLabelValues("failed").Inc()
+		return
+	}
+
+	if err := rdb.RPush(context.Background(), FailedQueue, failedTaskData).Err(); err != nil {
+		log.Printf("CRITICAL: Failed to push task %d to failed queue: %v", t.ID, err)
+		// If we can't push to redis, we also have to drop it.
+		reportResultPatch(t.JobID, false)
+		TasksProcessed.WithLabelValues("failed").Inc()
+		return
+	}
+
+	// We don't report the failure to the main API here anymore.
+	// The retry manager in the scanner will decide if it's a permanent failure.
+}
 
 func main() {
 	rand.Seed(time.Now().UnixNano())
@@ -221,21 +252,17 @@ func reportResultPatch(jobID int64, success bool) {
 
 func processTask(t common.FfmpegTask) {
 	start := time.Now()
-	log.Printf("Processing Task %d (Job %d)", t.ID, t.JobID)
+	log.Printf("Processing Task %d (Job %d), Retry: %d", t.ID, t.JobID, t.RetryCount)
 
 	job, err := getJobInfo(t.JobID)
 	if err != nil {
-		log.Printf("Failed to get job info: %v", err)
-		reportResultPatch(t.JobID, false)
-		TasksProcessed.WithLabelValues("failed").Inc()
+		handleTaskFailure(t, fmt.Sprintf("Failed to get job info: %v", err))
 		return
 	}
 
 	s3Client, err := createS3Client(job.Metadata.Endpoint, job.Metadata.AK, job.Metadata.SKEncrypted)
 	if err != nil {
-		log.Printf("S3 Init Failed: %v", err)
-		reportResultPatch(t.JobID, false)
-		TasksProcessed.WithLabelValues("failed").Inc()
+		handleTaskFailure(t, fmt.Sprintf("S3 Init Failed: %v", err))
 		return
 	}
 
@@ -245,9 +272,6 @@ func processTask(t common.FfmpegTask) {
 		uploadPrefix = job.S3Prefix
 	}
 
-	// Output: {uploadPrefix}/{id}.mp4
-	// ID from video key: {id}_video.mp4
-	// task.VideoKey is full key.
 	videoName := filepath.Base(t.VideoKey)
 	id := strings.Split(videoName, "_video.")[0]
 
@@ -256,7 +280,6 @@ func processTask(t common.FfmpegTask) {
 		outputKey = strings.TrimPrefix(outputKey, "/")
 	}
 
-	// Check if exists
 	_, err = s3Client.HeadObject(context.TODO(), &s3.HeadObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(outputKey),
@@ -278,33 +301,23 @@ func processTask(t common.FfmpegTask) {
 	defer os.Remove(localOutput)
 
 	if err := downloadFile(s3Client, bucket, t.VideoKey, localVideo); err != nil {
-		log.Printf("Download Video Failed: %v", err)
-		reportResultPatch(t.JobID, false)
-		TasksProcessed.WithLabelValues("failed").Inc()
+		handleTaskFailure(t, fmt.Sprintf("Download Video Failed: %v", err))
 		return
 	}
 	if err := downloadFile(s3Client, bucket, t.AudioKey, localAudio); err != nil {
-		log.Printf("Download Audio Failed: %v", err)
-		reportResultPatch(t.JobID, false)
-		TasksProcessed.WithLabelValues("failed").Inc()
+		handleTaskFailure(t, fmt.Sprintf("Download Audio Failed: %v", err))
 		return
 	}
 
-	// ffmpeg
 	cmd := exec.Command("ffmpeg", "-y", "-i", localVideo, "-i", localAudio, "-c", "copy", "-map", "0:v:0", "-map", "1:a:0", localOutput)
 	if output, err := cmd.CombinedOutput(); err != nil {
-		log.Printf("FFmpeg failed: %s", string(output))
-		reportResultPatch(t.JobID, false)
-		TasksProcessed.WithLabelValues("failed").Inc()
+		handleTaskFailure(t, fmt.Sprintf("FFmpeg failed: %s", string(output)))
 		return
 	}
 
-	// Upload
 	f, err := os.Open(localOutput)
 	if err != nil {
-		log.Printf("Open Output Failed: %v", err)
-		reportResultPatch(t.JobID, false)
-		TasksProcessed.WithLabelValues("failed").Inc()
+		handleTaskFailure(t, fmt.Sprintf("Open Output Failed: %v", err))
 		return
 	}
 	defer f.Close()
@@ -315,9 +328,7 @@ func processTask(t common.FfmpegTask) {
 		Body:   f,
 	})
 	if err != nil {
-		log.Printf("Upload Failed: %v", err)
-		reportResultPatch(t.JobID, false)
-		TasksProcessed.WithLabelValues("failed").Inc()
+		handleTaskFailure(t, fmt.Sprintf("Upload Failed: %v", err))
 		return
 	}
 

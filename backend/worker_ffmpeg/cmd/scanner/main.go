@@ -28,8 +28,11 @@ import (
 )
 
 const (
-	TaskQueue   = "queue:ffmpeg:pending"
-	DedupPrefix = "queue:ffmpeg:dedup:"
+	TaskQueue      = "queue:ffmpeg:pending"
+	FailedQueue    = "queue:ffmpeg:failed"
+	DedupPrefix    = "queue:ffmpeg:dedup:"
+	MaxRetries     = 3
+	PermFailureKey = "ffmpeg:task:perm_failure" // A Redis set to track permanent failures
 )
 
 var (
@@ -45,7 +48,70 @@ var (
 		Name: "ffmpeg_scanner_tasks_discovered_total",
 		Help: "Total number of tasks discovered",
 	})
+
+	TasksRetried = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ffmpeg_scanner_tasks_retried_total",
+		Help: "Total number of tasks retried",
+	})
+
+	TasksPermanentlyFailed = promauto.NewCounter(prometheus.CounterOpts{
+		Name: "ffmpeg_scanner_tasks_permanently_failed_total",
+		Help: "Total number of tasks that have permanently failed",
+	})
 )
+
+func startRetryManager() {
+	log.Println("Starting FFmpeg Retry Manager")
+	for {
+		// BLPop from the failed queue
+		res, err := rdb.BLPop(context.Background(), 10*time.Second, FailedQueue).Result()
+		if err != nil {
+			if err != redis.Nil {
+				log.Printf("RetryManager: Redis error: %v", err)
+				time.Sleep(2 * time.Second)
+			}
+			continue
+		}
+
+		var task common.FfmpegTask
+		if err := json.Unmarshal([]byte(res[1]), &task); err != nil {
+			log.Printf("RetryManager: Failed to unmarshal failed task: %v. Discarding.", err)
+			continue
+		}
+
+		if task.RetryCount >= MaxRetries {
+			log.Printf("Task %d (Job %d) has reached max retries (%d). Marking as permanent failure.", task.ID, task.JobID, MaxRetries)
+
+			// Report permanent failure to backend
+			reportResultPatch(task.JobID, false) // This increments failed_count on the job
+
+			// Add to a permanent failure set in Redis to prevent re-processing if scanner finds it again (though it shouldn't)
+			rdb.SAdd(context.Background(), PermFailureKey, task.ID)
+			TasksPermanentlyFailed.Inc()
+			continue
+		}
+
+		log.Printf("Retrying task %d (Job %d), attempt %d", task.ID, task.JobID, task.RetryCount+1)
+		task.Status = "PENDING"
+		task.ErrorMessage = "" // Clear previous error
+
+		requeueData, err := json.Marshal(task)
+		if err != nil {
+			log.Printf("RetryManager: Failed to marshal task %d for requeue: %v", task.ID, err)
+			continue
+		}
+
+		// Push back to the main pending queue
+		if err := rdb.RPush(context.Background(), TaskQueue, requeueData).Err(); err != nil {
+			log.Printf("RetryManager: Failed to requeue task %d: %v", task.ID, err)
+			// If requeue fails, push it back to the failed queue to try again later
+			rdb.LPush(context.Background(), FailedQueue, res[1])
+			time.Sleep(1 * time.Second)
+		} else {
+			TasksRetried.Inc()
+		}
+	}
+}
 
 func main() {
 	go func() {
@@ -60,6 +126,9 @@ func main() {
 	}
 
 	initRedis()
+
+	// Start the retry manager in a separate goroutine
+	go startRetryManager()
 
 	log.Println("FFmpeg Scanner Started")
 
@@ -92,6 +161,31 @@ func main() {
 		time.Sleep(5 * time.Second)
 	}
 }
+
+// ... unchanged functions: initRedis, getPendingJobs ...
+
+func reportResultPatch(jobID int64, success bool) {
+	req := common.UpdateJobStatusRequest{}
+	if success {
+		req.IncSuccess = 1
+	} else {
+		req.IncFailed = 1
+	}
+	data, _ := json.Marshal(req)
+
+	reqObj, _ := http.NewRequest("PATCH", fmt.Sprintf("%s/ffmpeg-jobs/%d/status", apiBaseURL, jobID), bytes.NewBuffer(data))
+	reqObj.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(reqObj)
+	if err != nil {
+		log.Printf("Failed to report result for job %d: %v", jobID, err)
+		return
+	}
+	defer resp.Body.Close()
+}
+
+func updateJobStatus(jobID int64, status string, lastScanTime *time.Time, msg string, totalCount *int) error {
+// ... same as before
 
 func initRedis() {
 	redisURL := os.Getenv("REDIS_URL")
@@ -229,30 +323,39 @@ func processJob(job common.FfmpegJob) {
 			}
 		}
 
-		// Check for complete pairs
-		var candidates []struct {
-			id     string
-			pair   *FilePair
-			taskID int64
-		}
-
-		for id, p := range pairs {
-			if p.Video != "" && p.Audio != "" {
-				candidates = append(candidates, struct {
-					id     string
-					pair   *FilePair
-					taskID int64
-				}{id, p, generateTaskID(id)})
+// Check for permanent failures before deduping
+			var checkPermFailureIDs []interface{}
+			for _, c := range candidates {
+				checkPermFailureIDs = append(checkPermFailureIDs, c.taskID)
 			}
-		}
+			permFailed, err := rdb.SIsMember(context.Background(), PermFailureKey, checkPermFailureIDs...).Result()
+			if err != nil {
+				log.Printf("Failed to check for permanent failures: %v", err)
+				permFailed = make([]bool, len(checkPermFailureIDs)) // Assume none have failed
+			}
 
-		var batch []interface{}
-		if len(candidates) > 0 {
+			// Dedup
 			pipe := rdb.Pipeline()
 			dedupKey := fmt.Sprintf("%s%d", DedupPrefix, job.ID)
+			var dedupCandidates []struct {
+				id     string
+				pair   *FilePair
+				taskID int64
+			}
 
-			for _, c := range candidates {
-				pipe.SAdd(context.Background(), dedupKey, c.taskID)
+			for i, c := range candidates {
+				if !permFailed[i] {
+					pipe.SAdd(context.Background(), dedupKey, c.taskID)
+					dedupCandidates = append(dedupCandidates, c)
+				}
+			}
+
+			if len(dedupCandidates) == 0 {
+				// Clear pairs that were filtered out
+				for _, c := range candidates {
+					delete(pairs, c.id)
+				}
+				continue // Skip to next page
 			}
 
 			cmders, err := pipe.Exec(context.Background())
@@ -263,7 +366,7 @@ func processJob(job common.FfmpegJob) {
 					if cmd, ok := cmder.(*redis.IntCmd); ok {
 						if cmd.Val() > 0 {
 							// New task (SAdd returned 1)
-							c := candidates[i]
+							c := dedupCandidates[i]
 							task := common.FfmpegTask{
 								ID:        c.taskID,
 								JobID:     job.ID,
@@ -280,15 +383,17 @@ func processJob(job common.FfmpegJob) {
 							TasksDiscovered.Inc()
 						}
 					}
-					// Always cleanup completed pairs
-					delete(pairs, candidates[i].id)
 				}
+			}
+
+			// Always cleanup completed pairs from this page's processing
+			for _, c := range candidates {
+				delete(pairs, c.id)
 			}
 		}
 
 		if len(batch) > 0 {
 			var err error
-			// Retry up to 3 times
 			for i := 0; i < 3; i++ {
 				err = rdb.RPush(context.Background(), TaskQueue, batch...).Err()
 				if err == nil {
@@ -296,12 +401,11 @@ func processJob(job common.FfmpegJob) {
 				}
 				time.Sleep(500 * time.Millisecond)
 			}
-			
+
 			if err != nil {
 				log.Printf("Failed to push batch for job %d: %v", job.ID, err)
 			}
 			count += len(batch)
-			// Update total count
 			if err := updateJobStatus(job.ID, "RUNNING", nil, "", &count); err != nil {
 				if strings.Contains(err.Error(), "status 404") {
 					cleanUpDedup(job.ID)

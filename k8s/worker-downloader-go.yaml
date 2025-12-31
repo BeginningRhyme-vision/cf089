@@ -6,7 +6,7 @@ metadata:
   labels:
     app: worker-downloader-go
 spec:
-  replicas: 10
+  replicas: 0
   selector:
     matchLabels:
       app: worker-downloader-go

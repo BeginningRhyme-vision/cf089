@@ -25,6 +25,10 @@ Youtube 任务处理分为两个阶段，由不同的 Worker 协同完成：
     3.  **更新**: 将提取到的元数据 (Title, VideoID, AudioURL, VideoURL) 和状态 `METADATA_FETCHED` 回传给后端 (`POST /api/tasks/update`)。
     4.  **状态流转**: 后端收到 `METADATA_FETCHED` 状态更新后，会自动将该任务推送到 Redis 队列 `queue:youtube:download_ready`，供下一阶段消费。
 
+    **异常处理 (Stuck Monitor)**:
+    *   后端运行一个后台进程，每 10 分钟扫描一次状态为 `RUNNING` 且创建超过 3 小时的任务。
+    *   这些"卡死"的任务会被重置为 `PENDING` 状态，并推送到优先队列 `queue:youtube:metadata_retry`，由 Metadata Worker 重新从头处理。
+
 **阶段二：视频下载 (Go)**
 *   **代码位置**: `backend/worker_downloader/downloader.go`
 *   **流程**:
@@ -66,7 +70,8 @@ FFmpeg 任务用于将 S3/R2 上分离的视频流 (`*_video.mp4`) 和音频流 
     2.  **扫描源站**: 遍历作业指定的 S3/R2 前缀。
     3.  **配对逻辑**: 在内存中匹配同名的 `_video` 和 `_audio` 文件。
     4.  **去重与分发**: 使用 Redis Set (`queue:ffmpeg:dedup:{JobId}`) 进行任务去重。对于新发现的配对任务，直接推送到 Redis 队列 `queue:ffmpeg:pending`。
-    5.  **状态更新**: 定期调用 `PATCH /api/ffmpeg-jobs/:id/status` 更新作业的扫描进度和状态。
+    5.  **重试管理**: Scanner 内部运行重试管理器，监听 `queue:ffmpeg:failed` 队列。失败任务会进行重试 (Max 3次)，超过限制则标记为永久失败 (记录到 `ffmpeg:task:perm_failure`)，防止被再次扫描发现。
+    6.  **状态更新**: 定期调用 `PATCH /api/ffmpeg-jobs/:id/status` 更新作业的扫描进度和状态。
 
 **阶段二：合并处理 (Go Worker)**
 *   **代码位置**: `backend/worker_ffmpeg/cmd/worker/main.go`

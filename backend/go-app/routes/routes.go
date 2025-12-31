@@ -109,6 +109,15 @@ func SetupRouter() *gin.Engine {
             ffTasks.POST("/acquire", handlers.AcquireFfmpegTasks)
             ffTasks.POST("/update", handlers.BatchUpdateFfmpeg)
         }
+
+        // Pipeline Jobs
+        pipelines := api.Group("/pipelines")
+        {
+            pipelines.POST("/", handlers.CreatePipelineJob)
+            pipelines.GET("/", handlers.ListPipelineJobs)
+            pipelines.GET("/:id", handlers.GetPipelineJob)
+            pipelines.POST("/:id/retry", handlers.RetryPipelineJob)
+        }
 	}
 
 	return r

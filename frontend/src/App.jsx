@@ -8,6 +8,7 @@ import JobList from './pages/JobList';
 import YoutubeJobList from './pages/YoutubeJobList';
 import YoutubeJobDetail from './pages/YoutubeJobDetail';
 import FfmpegJobList from './pages/FfmpegJobList';
+import PipelineList from './pages/PipelineList';
 import { useAuthStore } from './store';
 
 const PrivateRoute = ({ children }) => {
@@ -25,6 +26,7 @@ function App() {
       <Route path="/" element={<PrivateRoute><Dashboard /></PrivateRoute>}>
         <Route index element={<Navigate to="/jobs" replace />} />
         <Route path="metadata" element={<MetadataList />} />
+        <Route path="pipelines" element={<PipelineList />} />
         <Route path="jobs" element={<JobList />} />
         <Route path="ffmpeg-jobs" element={<FfmpegJobList />} />
         <Route path="youtube-jobs" element={<YoutubeJobList />} />

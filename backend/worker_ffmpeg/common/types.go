@@ -33,6 +33,9 @@ type FfmpegTask struct {
 	CompletedAt  time.Time `json:"completed_at"`
 	CreatedAt    time.Time `json:"created_at"`
 	UpdatedAt    time.Time `json:"updated_at"`
+
+	// For retry logic
+	RetryCount int `json:"retry_count"`
 }
 
 type UpdateJobStatusRequest struct {

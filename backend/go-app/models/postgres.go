@@ -110,3 +110,19 @@ type FfmpegJob struct {
 func (FfmpegJob) TableName() string {
 	return "ffmpeg_jobs"
 }
+
+type PipelineJob struct {
+	ID            uint      `gorm:"primaryKey" json:"id"`
+	Name          string    `gorm:"size:255" json:"name"`
+	Status        JobStatus `gorm:"default:'RUNNING'" json:"status"`
+	YoutubeJobID  uint      `json:"youtube_job_id"`
+	TransferJobID uint      `json:"transfer_job_id"`
+	FfmpegJobID   uint      `json:"ffmpeg_job_id"`
+	YoutubeURLs   string    `gorm:"type:text" json:"youtube_urls"`
+	CreatedAt     time.Time `gorm:"autoCreateTime" json:"created_at"`
+	UpdatedAt     time.Time `gorm:"autoUpdateTime" json:"updated_at"`
+}
+
+func (PipelineJob) TableName() string {
+	return "pipeline_jobs"
+}
