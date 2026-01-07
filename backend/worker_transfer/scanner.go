@@ -74,12 +74,12 @@ type UpdateStatusRequest struct {
 var (
 	cfg        *Config
 	apiBaseURL string
-	
+
 	PagesScanned = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "scanner_pages_scanned_total",
 		Help: "Total number of S3 pages scanned",
 	})
-	
+
 	TasksDiscovered = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "scanner_tasks_discovered_total",
 		Help: "Total number of tasks discovered",
@@ -88,13 +88,13 @@ var (
 
 func main() {
 	loadConfig()
-	
+	log.Print("Test cannary transfer-scanner update")
 	go func() {
 		http.Handle("/metrics", promhttp.Handler())
 		log.Println("Metrics server listening on :9093")
 		http.ListenAndServe(":9093", nil)
 	}()
-	
+
 	apiBaseURL = os.Getenv("BACKEND_API_URL")
 	if apiBaseURL == "" {
 		apiBaseURL = "http://localhost:8080/api"
@@ -145,7 +145,7 @@ func loadConfig() {
 	if data == nil {
 		// Fallback or just empty if we rely on DB for source creds?
 		// Note: The previous r2s3 implementation read Source creds from CLI or Env, OR DB?
-		// The Scanner needs Source Creds. 
+		// The Scanner needs Source Creds.
 		// The Job has Metadata which is for DESTINATION.
 		// Source is usually global in config.yaml?
 		// Checking `config.yaml` content from memory: `storage.src` has endpoint, access_key, secret_key.
@@ -183,13 +183,13 @@ func updateJobStatus(jobID uint, status string, lastScanTime *time.Time, msg str
 
 	reqObj, _ := http.NewRequest("PATCH", fmt.Sprintf("%s/jobs/%d/status", apiBaseURL, jobID), bytes.NewBuffer(data))
 	reqObj.Header.Set("Content-Type", "application/json")
-	
+
 	resp, err := http.DefaultClient.Do(reqObj)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("failed to update status: %d", resp.StatusCode)
 	}
@@ -269,7 +269,7 @@ func processJob(job TransferJob) {
 		if err != nil {
 			log.Printf("ListObjectsV2 failed for job %d on page %d: %v", job.JobID, pages, err)
 			updateJobStatus(job.JobID, "FAILED", nil, fmt.Sprintf("List failed on page %d: %v", pages, err)) // Mark as failed on list error
-			close(taskChan) // Ensure consumer stops
+			close(taskChan)                                                                                  // Ensure consumer stops
 			return
 		}
 
@@ -301,7 +301,6 @@ func processJob(job TransferJob) {
 				}
 			}
 
-
 			var size int64
 			if obj.Size != nil {
 				size = *obj.Size
@@ -311,7 +310,7 @@ func processJob(job TransferJob) {
 			TasksDiscovered.Inc()
 			count++
 		}
-		
+
 		// Periodic Job Update (Heartbeat / Metadata Refresh)
 		if time.Since(lastUpdate) > 10*time.Second { // Check every 10s roughly (per page)
 			// Refresh Job Config
@@ -321,7 +320,7 @@ func processJob(job TransferJob) {
 				job.Include = latestJob.Include
 				job.Exclude = latestJob.Exclude
 				job.IsIncremental = latestJob.IsIncremental
-				
+
 				// Optional: Check status. If Cancelled, abort?
 				if latestJob.Status != "RUNNING" && latestJob.Status != "PENDING" {
 					log.Printf("Job %d status changed to %s. Aborting scan.", job.JobID, latestJob.Status)
@@ -331,7 +330,7 @@ func processJob(job TransferJob) {
 			} else {
 				log.Printf("Failed to refresh job %d: %v", job.JobID, err)
 			}
-			
+
 			// Update Status / Heartbeat
 			msg := fmt.Sprintf("Scanning... Pages: %d, Tasks: %d, Skipped: %d", pages, count, skipped)
 			updateJobStatus(job.JobID, "RUNNING", nil, msg)
@@ -340,7 +339,7 @@ func processJob(job TransferJob) {
 	}
 
 	close(taskChan) // Signal consumer to finish
-	wg.Wait() // Wait for consumer to finish processing
+	wg.Wait()       // Wait for consumer to finish processing
 
 	log.Printf("Job %d scanned. Total pages: %d. New tasks: %d, Skipped (old): %d", job.JobID, pages, count, skipped)
 	resultMsg := fmt.Sprintf("Scanned %d pages. Tasks: %d, Skipped: %d", pages, count, skipped)
@@ -359,7 +358,7 @@ func getJob(jobID uint) (*TransferJob, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("status %d", resp.StatusCode)
 	}
@@ -445,6 +444,6 @@ func getBucketFromEndpoint(endpoint string) string {
 	if err != nil {
 		return ""
 	}
-	
+
 	return strings.Trim(u.Path, "/")
 }
