@@ -100,9 +100,6 @@ jobs:
               TARGET_FILES="${{ matrix.canary_files }}"
               DOCKER_TAG="sha-${{ github.sha }}"
             fi
-          else
-            echo "⚠️ Unknown trigger, skipping"
-            exit 0
           fi
           
           echo "TARGET_FILES<<EOF" >> $GITHUB_ENV
