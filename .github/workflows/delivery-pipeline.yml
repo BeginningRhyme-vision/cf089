@@ -2,8 +2,6 @@ name: Delivery Pipeline
 
 on:
   push:
-    branches: 
-      - "dev"
     tags: 
       - "v*"
     paths:
@@ -90,7 +88,7 @@ jobs:
             TARGET_FILES="${{ matrix.stable_files }}"
             DOCKER_TAG="${{ github.ref_name }}"
 
-          elif [[ "${{ github.ref_name }}" == "dev" ]]; then
+          else
             if [[ "$COMMIT_MSG" == *"${{ env.MAGIC_STRING }}"* ]]; then
               echo "🔥 Trigger: Dev Force Stable Update (Magic String detected)"
               MODE="STABLE_FROM_DEV"
