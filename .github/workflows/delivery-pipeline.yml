@@ -65,11 +65,14 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
+        with:
+          fetch-depth: 2
+          
       - name: Check for changes
         uses: dorny/paths-filter@v3
         id: filter
         with:
+          base: ${{ github.event.before }}
           filters: |
             changed:
               - '${{ matrix.context }}/**'
