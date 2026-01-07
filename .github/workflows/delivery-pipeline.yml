@@ -76,6 +76,7 @@ jobs:
 
       - name: Determine Target Environment
         id: target
+        if: steps.filter.outputs.changed == 'true' || github.ref_type == 'tag'
         env:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
         run: |
@@ -111,6 +112,7 @@ jobs:
           echo "DEPLOY_MODE=$MODE" >> $GITHUB_ENV
 
       - name: Set up Docker Buildx
+        if: steps.filter.outputs.changed == 'true' || github.ref_type == 'tag'
         uses: docker/setup-buildx-action@v3
 
       - name: Log in to the Container registry
