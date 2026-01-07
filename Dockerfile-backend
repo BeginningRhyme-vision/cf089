@@ -1,5 +1,0 @@
-FROM python:3.11.14
-COPY backend /app/backend/
-WORKDIR /app/backend/
-RUN  pip install -r requirements.txt
-ENTRYPOINT ["uvicorn", "app.main:app", "--reload", "--port", "8000"]

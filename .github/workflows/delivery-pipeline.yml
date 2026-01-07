@@ -1,0 +1,186 @@
+name: Delivery Pipeline
+
+on:
+  push:
+    branches: 
+      - "dev"
+    tags: 
+      - "v*"
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - '.github/workflows/delivery-pipeline.yml'
+  workflow_dispatch:
+
+env:
+  REGISTRY: image.unboundfuture.ai
+  ARGOCD_BRANCH: main
+  MAGIC_STRING: "[deploy-stable]"
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: Frontend
+            context: frontend
+            image: unbound-frontend
+            canary_files: |
+              silicon-tke/applications/unbound-future-admin-cannary/frontend.yaml
+            stable_files: |
+              silicon-tke/applications/unbound-future-admin/frontend.yaml
+
+          - component: Backend API
+            context: backend/go-app
+            image: unbound-backend
+            canary_files: |
+              silicon-tke/applications/unbound-future-admin-cannary/backend-api.yaml
+            stable_files: |
+              silicon-tke/applications/unbound-future-admin/backend-api.yaml
+
+          - component: Worker Downloader
+            context: backend/worker_downloader
+            image: unbound-worker-downloader
+            canary_files: |
+              k3s-edge/applications/unbound-future-admin-cannary/worker-downloader-go.yaml
+              k3s-edge/applications/unbound-future-admin-cannary/worker-downloader-py.yaml
+            stable_files: |
+              k3s-edge/applications/unbound-future-admin/worker-downloader-go.yaml
+              k3s-edge/applications/unbound-future-admin/worker-downloader-py.yaml
+
+          - component: Worker Transfer
+            context: backend/worker_transfer
+            image: unbound-worker-transfer 
+            canary_files: |
+              silicon-tke/applications/unbound-future-admin-cannary/worker-transfer-scanner.yaml
+            stable_files: |
+              silicon-tke/applications/unbound-future-admin/worker-transfer-scanner.yaml
+
+          - component: Worker FFmpeg
+            context: backend/worker_ffmpeg
+            image: unbound-worker-ffmpeg
+
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check for changes
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            changed:
+              - '${{ matrix.context }}/**'
+
+      - name: Determine Target Environment
+        id: target
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          TARGET_FILES=""
+          DOCKER_TAG=""
+          MODE=""
+
+          if [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "🚀 Trigger: Tag Release"
+            MODE="STABLE"
+            TARGET_FILES="${{ matrix.stable_files }}"
+            DOCKER_TAG="${{ github.ref_name }}"
+
+          elif [[ "${{ github.ref_name }}" == "dev" ]]; then
+            if [[ "$COMMIT_MSG" == *"${{ env.MAGIC_STRING }}"* ]]; then
+              echo "🔥 Trigger: Dev Force Stable Update (Magic String detected)"
+              MODE="STABLE_FROM_DEV"
+              TARGET_FILES="${{ matrix.stable_files }}"
+              DOCKER_TAG="sha-${{ github.sha }}"
+            else
+              echo "🐤 Trigger: Dev Default Canary Update"
+              MODE="CANARY"
+              TARGET_FILES="${{ matrix.canary_files }}"
+              DOCKER_TAG="sha-${{ github.sha }}"
+            fi
+          else
+            echo "⚠️ Unknown trigger, skipping"
+            exit 0
+          fi
+          
+          echo "TARGET_FILES<<EOF" >> $GITHUB_ENV
+          echo "$TARGET_FILES" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          
+          echo "DOCKER_TAG=$DOCKER_TAG" >> $GITHUB_ENV
+          echo "DEPLOY_MODE=$MODE" >> $GITHUB_ENV
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to the Container registry
+        if: steps.filter.outputs.changed == 'true' || github.ref_type == 'tag'
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build and push ${{ matrix.component }}
+        if: steps.filter.outputs.changed == 'true' || github.ref_type == 'tag'
+        uses: docker/build-push-action@v5
+        with:
+          context: ${{ matrix.context }}
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ matrix.image }}:latest
+            ${{ env.REGISTRY }}/${{ matrix.image }}:${{ env.DOCKER_TAG }}
+          cache-from: type=gha,scope=${{ matrix.image }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image }}
+
+      - name: Get GitHub App Token
+        if: steps.filter.outputs.changed == 'true' || github.ref_type == 'tag'
+        uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ secrets.GITHUBAPP_ID }}
+          private-key: ${{ secrets.GITHUBAPP_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }} 
+
+      - name: CheckOunt ArgoCD 
+        if: steps.filter.outputs.changed == 'true' || github.ref_type == 'tag'
+        uses: actions/checkout@v4
+        with:
+          repository: unbound-future/argocd
+          token: ${{ steps.app-token.outputs.token }}
+          ref: ${{ env.ARGOCD_BRANCH }}
+          path: argocd-repo
+
+      - name: Update ArgoCD Manifests
+        if: steps.filter.outputs.changed == 'true' || github.ref_type == 'tag'
+        env:
+          NEW_IMAGE: ${{ env.REGISTRY }}/${{ matrix.image }}:${{ env.DOCKER_TAG }}
+        run: |
+          cd argocd-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          echo "${{ env.TARGET_FILES }}" | while IFS= read -r FILE_PATH; do
+            if [ -z "$FILE_PATH" ]; then continue; fi
+            
+            if [ -f "$FILE_PATH" ]; then
+              echo "📝 Updating $FILE_PATH with image $NEW_IMAGE"            
+              sed -i "s|image: ${{ env.REGISTRY }}/${{ matrix.image }}:.*|image: $NEW_IMAGE|g" "$FILE_PATH"
+              git add "$FILE_PATH"
+            else
+              echo "❌ Error: Manifest file not found: $FILE_PATH"
+              exit 1 
+            fi
+          done
+
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "[${{ env.DEPLOY_MODE }}] Update ${{ matrix.component }} to ${{ env.DOCKER_TAG }}"
+            
+            git pull --rebase origin ${{ env.ARGOCD_BRANCH }}
+            git push origin ${{ env.ARGOCD_BRANCH }}
+          fi
