@@ -88,6 +88,7 @@ var (
 
 func main() {
 	loadConfig()
+	log.Print("Test cannary transfer-scanner update")
 	go func() {
 		http.Handle("/metrics", promhttp.Handler())
 		log.Println("Metrics server listening on :9093")
