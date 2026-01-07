@@ -1,5 +1,7 @@
 .vscode/
 frontend/node_modules/
+#config
+*config.yaml
 
 # Python
 __pycache__/
