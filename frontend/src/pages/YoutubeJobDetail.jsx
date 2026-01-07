@@ -24,16 +24,23 @@ const YoutubeJobDetail = () => {
   const fetchRecords = useCallback(async (page = 1, pageSize = 50) => {
     setLoading(true);
     try {
-      const res = await api.get(`/youtube-jobs/${jobId}/records`, {
-        params: { page, size: pageSize }
+              // Use new Batch Fetch endpoint
+      
+      const res = await api.post('/tasks/fetch', {
+        job_id: parseInt(jobId),
+        limit: pageSize,
+        offset: (page - 1) * pageSize
       });
-      setRecords(res.data.items);
+      
+      // Backend returns { tasks: [...], total: ... }
+      setRecords(res.data.tasks || []);
       setPagination({
-        current: res.data.page,
-        pageSize: res.data.size,
-        total: res.data.total
+        current: page,
+        pageSize: pageSize,
+        total: res.data.total || 0
       });
     } catch (error) {
+      console.error(error);
       message.error('Failed to load records');
     } finally {
       setLoading(false);
@@ -49,21 +56,17 @@ const YoutubeJobDetail = () => {
   useEffect(() => {
     const interval = setInterval(() => {
         fetchJob();
-        // Poll current page without setting loading state to avoid flicker?
-        // But fetchRecords sets loading. 
-        // Let's create a silent fetch or just accept the flicker for now or modify fetchRecords.
-        // For simplicity, let's just re-fetch. Ideally we separate 'loading' state for initial load vs updates.
-        // But since we are reusing fetchRecords, it will trigger loading.
-        // Let's modify fetchRecords to accept a 'silent' param?
-        // Or just define a separate poll function.
         
-        api.get(`/youtube-jobs/${jobId}/records`, {
-            params: { page: pagination.current, size: pagination.pageSize }
+        // Silent poll for tasks
+        api.post('/tasks/fetch', {
+            job_id: parseInt(jobId),
+            limit: pagination.pageSize,
+            offset: (pagination.current - 1) * pagination.pageSize
         }).then(res => {
-             setRecords(res.data.items);
+             setRecords(res.data.tasks || []);
              setPagination(prev => ({
                 ...prev,
-                total: res.data.total
+                total: res.data.total || 0
              }));
         }).catch(e => console.error(e));
 
@@ -75,11 +78,24 @@ const YoutubeJobDetail = () => {
     fetchRecords(newPagination.current, newPagination.pageSize);
   };
 
+  const handleRetry = async () => {
+    try {
+      const res = await api.post(`/youtube-jobs/${jobId}/retry`);
+      message.success(`Retried ${res.data.reset_count} tasks`);
+      fetchJob();
+      fetchRecords(pagination.current, pagination.pageSize);
+    } catch (error) {
+      message.error('Failed to retry tasks');
+    }
+  };
+
   const statusColors = {
     PENDING: 'default',
     RUNNING: 'processing',
     COMPLETED: 'success',
-    FAILED: 'error'
+    FAILED: 'error',
+    PAUSED: 'warning',
+    STOPPED: 'warning'
   };
 
   const columns = [
@@ -92,7 +108,7 @@ const YoutubeJobDetail = () => {
       dataIndex: 'status', 
       key: 'status',
       width: 100,
-      render: (status) => <Tag color={statusColors[status]}>{status}</Tag>
+      render: (status) => <Tag color={statusColors[status] || 'default'}>{status}</Tag>
     },
     { 
       title: 'Error Message', 
@@ -114,30 +130,53 @@ const YoutubeJobDetail = () => {
       </Breadcrumb>
 
       <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h2>Job Details: {job?.r2_prefix}</h2>
-        <Button icon={<ReloadOutlined />} onClick={() => { fetchJob(); fetchRecords(pagination.current, pagination.pageSize); }}>Refresh</Button>
+        <h2>
+          Job Details: {job?.r2_prefix}
+          {job && <Tag color={statusColors[job.status] || 'default'} style={{ marginLeft: 12 }}>{job.status}</Tag>}
+        </h2>
+        <div>
+          {job && <span style={{ marginRight: 16, color: '#888' }}>Created: {new Date(job.created_at).toLocaleString()}</span>}
+          {job && job.failed_count > 0 && (
+            <Button onClick={handleRetry} style={{ marginRight: 8 }} danger>Retry Failed</Button>
+          )}
+          <Button icon={<ReloadOutlined />} onClick={() => { fetchJob(); fetchRecords(pagination.current, pagination.pageSize); }}>Refresh</Button>
+        </div>
       </div>
 
       {job && (
         <Row gutter={16} style={{ marginBottom: 24 }}>
-          <Col span={6}>
-            <Card>
+          <Col span={4}>
+            <Card size="small">
               <Statistic title="Total" value={job.total_count} />
             </Card>
           </Col>
-          <Col span={6}>
-            <Card>
+          <Col span={4}>
+            <Card size="small">
               <Statistic title="Success" value={job.success_count} valueStyle={{ color: '#3f8600' }} />
             </Card>
           </Col>
-          <Col span={6}>
-            <Card>
+          <Col span={4}>
+            <Card size="small">
               <Statistic title="Failed" value={job.failed_count} valueStyle={{ color: '#cf1322' }} />
             </Card>
           </Col>
-          <Col span={6}>
-            <Card>
+          <Col span={4}>
+            <Card size="small">
+              <Statistic title="Running" value={job.running_count} valueStyle={{ color: '#faad14' }} />
+            </Card>
+          </Col>
+          <Col span={4}>
+            <Card size="small">
               <Statistic title="Pending" value={job.pending_count} valueStyle={{ color: '#1890ff' }} />
+            </Card>
+          </Col>
+          <Col span={4}>
+            <Card size="small">
+              <Statistic 
+                title="Job Status" 
+                value={job.status} 
+                formatter={(val) => <Tag color={statusColors[val] || 'default'}>{val}</Tag>} 
+              />
             </Card>
           </Col>
         </Row>

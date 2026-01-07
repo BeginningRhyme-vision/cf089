@@ -7,7 +7,9 @@ import {
   LogoutOutlined,
   MenuUnfoldOutlined,
   MenuFoldOutlined,
-  VideoCameraOutlined
+  VideoCameraOutlined,
+  PlaySquareOutlined,
+  ApartmentOutlined
 } from '@ant-design/icons';
 import { Outlet, useNavigate, useLocation } from 'react-router-dom';
 import { useAuthStore } from '../store';
@@ -35,6 +37,11 @@ const Dashboard = () => {
 
   const menuItems = [
     {
+      key: '/pipelines',
+      icon: <ApartmentOutlined />,
+      label: 'Pipeline Jobs',
+    },
+    {
       key: '/metadata',
       icon: <DatabaseOutlined />,
       label: 'Metadata Management',
@@ -48,6 +55,11 @@ const Dashboard = () => {
       key: '/youtube-jobs',
       icon: <VideoCameraOutlined />,
       label: 'Youtube Jobs',
+    },
+    {
+      key: '/ffmpeg-jobs',
+      icon: <PlaySquareOutlined />,
+      label: 'FFmpeg Jobs',
     },
   ];
 

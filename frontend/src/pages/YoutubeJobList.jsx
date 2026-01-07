@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Table, Button, Modal, Form, Input, Tag, message, Space, Upload, Popconfirm } from 'antd';
+import { Table, Button, Modal, Form, Input, Select, Tag, message, Space, Upload, Popconfirm } from 'antd';
 import { ReloadOutlined, PlusOutlined, EyeOutlined, UploadOutlined, DeleteOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import api from '../api';
@@ -34,23 +34,45 @@ const YoutubeJobList = () => {
     try {
       const values = await form.validateFields();
       
-      const formData = new FormData();
-      formData.append('r2_prefix', values.r2_prefix);
-      
-      if (values.urls) {
-        formData.append('urls', values.urls);
-      }
-      
+      // If file is present, use Multipart/Form-Data
       if (fileList.length > 0) {
+        const formData = new FormData();
+        formData.append('r2_prefix', values.r2_prefix);
+        formData.append('download_mode', values.download_mode || 'both');
         formData.append('file', fileList[0]);
-      }
-      
-      if (!values.urls && fileList.length === 0) {
-         message.error('Please enter URLs or upload a file');
-         return;
+        if (values.file_url) {
+            formData.append('file_url', values.file_url);
+        }
+        if (values.urls) {
+            formData.append('tasks', values.urls);
+        }
+
+        await api.post('/youtube-jobs/', formData);
+      } else {
+        // Use JSON
+        let tasks = [];
+        
+        // Parse URLs from text area
+        if (values.urls) {
+            const textUrls = values.urls.split('\n').map(u => u.trim()).filter(u => u.length > 0);
+            tasks = [...tasks, ...textUrls];
+        }
+
+        if (tasks.length === 0 && !values.file_url) {
+            message.error('Please enter URLs, provide a File URL, or upload a file');
+            return;
+        }
+
+        const payload = {
+            r2_prefix: values.r2_prefix,
+            download_mode: values.download_mode || 'both',
+            tasks: tasks,
+            file_url: values.file_url
+        };
+
+        await api.post('/youtube-jobs/', payload);
       }
 
-      await api.post('/youtube-jobs/', formData);
       message.success('Job(s) created');
       setIsModalOpen(false);
       form.resetFields();
@@ -58,7 +80,7 @@ const YoutubeJobList = () => {
       fetchJobs();
     } catch (error) {
       console.error(error);
-      message.error('Failed to create job');
+      message.error('Failed to create job: ' + (error.response?.data?.error || error.message));
     }
   };
 
@@ -191,6 +213,24 @@ const YoutubeJobList = () => {
             help="e.g. 'my-channel-uploads/'"
           >
             <Input placeholder="my-folder/" />
+          </Form.Item>
+          <Form.Item
+            name="download_mode"
+            label="Download Mode"
+            initialValue="both"
+          >
+            <Select>
+                <Select.Option value="both">Video + Audio</Select.Option>
+                <Select.Option value="audio">Audio Only</Select.Option>
+                <Select.Option value="video">Video Only</Select.Option>
+            </Select>
+          </Form.Item>
+          <Form.Item 
+            name="file_url" 
+            label="File URL (Optional)" 
+            help="URL to a text file containing Youtube URLs (one per line)"
+          >
+            <Input placeholder="https://example.com/my-urls.txt" />
           </Form.Item>
           <Form.Item 
             name="urls" 

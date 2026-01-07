@@ -1,7 +1,4 @@
 yt-dlp
-boto3
-pyyaml==6.0.1
-sqlalchemy
-pydantic-settings
-psycopg2-binary
 requests
+PyYAML
+prometheus-client

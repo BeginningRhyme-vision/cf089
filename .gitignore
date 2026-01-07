@@ -1,5 +1,7 @@
 .vscode/
 frontend/node_modules/
+#config
+*config.yaml
 
 # Python
 __pycache__/
@@ -29,6 +31,7 @@ wheels/
 .installed.cfg
 *.egg
 backend/worker_transfer/r2s3
+backend/go-app/vendor
 
 backend.pid
 frontend.pid

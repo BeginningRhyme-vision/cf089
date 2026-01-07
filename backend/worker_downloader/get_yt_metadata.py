@@ -1,88 +1,65 @@
 import sys
 import json
 import yt_dlp
-import urllib.request
-import urllib.error
-import urllib.parse
 import time
-import ssl
 import concurrent.futures
-import threading
-import os
 import requests
 import uuid
-from datetime import datetime
+import os
+import yaml
+from prometheus_client import start_http_server, Counter, Histogram
 
-try:
-    import yaml
-except ImportError:
-    print("Error: PyYAML is required. Please install it with `pip install PyYAML`.")
-    sys.exit(1)
+WORKER_ID = f"worker-meta-{uuid.uuid4()}"
 
-try:
-    import boto3
-    from botocore.config import Config
-except ImportError:
-    print("Error: boto3 is required. Please install it with `pip install boto3`.")
-    sys.exit(1)
-
-CHUNK_SIZE = 6 * 1024 * 1024  # 6MB
-WORKER_ID = f"worker-{uuid.uuid4()}"
-
-# Bypass SSL verification
-ssl_context = ssl._create_unverified_context()
-
-# R2 Configuration
-CONFIG_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), 'config.yaml')
-
-if not os.path.exists(CONFIG_PATH):
-    print(f"Error: Config file not found at {CONFIG_PATH}")
-    sys.exit(1)
-
-with open(CONFIG_PATH, 'r') as f:
-    config_data = yaml.safe_load(f)
-
-storage_root = config_data.get('storage', {})
-storage_conf = storage_root.get('src', {})
-
-full_endpoint = storage_conf.get('endpoint')
-R2_ACCESS_KEY_ID = storage_conf.get('access_key')
-R2_SECRET_ACCESS_KEY = storage_conf.get('secret_key')
-WORKER_UPLOAD_URL = storage_root.get('download_service_url')
-
-if not all([full_endpoint, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, WORKER_UPLOAD_URL]):
-    print("Error: Missing R2 configuration in config.yaml (storage.src or storage.download_service_url).")
-    sys.exit(1)
-
-# Parse endpoint and bucket
-parsed_url = urllib.parse.urlparse(full_endpoint)
-R2_ENDPOINT_URL = f"{parsed_url.scheme}://{parsed_url.netloc}"
-R2_BUCKET_NAME = parsed_url.path.strip('/')
-
-if not R2_BUCKET_NAME:
-    print("Error: Could not derive bucket name from storage.src.endpoint in config.yaml")
-    sys.exit(1)
-
-s3_client = boto3.client(
-    's3',
-    endpoint_url=R2_ENDPOINT_URL,
-    aws_access_key_id=R2_ACCESS_KEY_ID,
-    aws_secret_access_key=R2_SECRET_ACCESS_KEY,
-    config=Config(signature_version='s3v4', s3={'addressing_style': 'virtual'}),
-    region_name='auto'
-)
+# Metrics
+TASKS_PROCESSED = Counter('worker_meta_tasks_processed_total', 'Total metadata tasks processed', ['status'])
+TASK_DURATION = Histogram('worker_meta_task_duration_seconds', 'Duration of metadata extraction')
 
 # API Configuration
-API_BASE_URL = os.environ.get("BACKEND_API_URL", "http://localhost:8000")
+API_BASE_URL = os.environ.get("BACKEND_API_URL", "http://localhost:8080/api")
+
+JOB_CACHE = {}
+
+def get_job_info(job_id):
+    if job_id in JOB_CACHE:
+        return JOB_CACHE[job_id]
+    
+    try:
+        resp = requests.get(f"{API_BASE_URL}/youtube-jobs/{job_id}")
+        if resp.status_code == 200:
+            job = resp.json()
+            JOB_CACHE[job_id] = job
+            return job
+    except Exception as e:
+        print(f"Error fetching job info for {job_id}: {e}")
+    
+    return {}
+
+def load_config():
+    # Try multiple paths to find config.yaml
+    paths = ["../../config.yaml", "../config.yaml", "config.yaml"]
+    for p in paths:
+        if os.path.exists(p):
+            try:
+                with open(p, 'r') as f:
+                    return yaml.safe_load(f)
+            except Exception as e:
+                print(f"Error loading config from {p}: {e}")
+    print("Warning: config.yaml not found")
+    return {}
 
 def api_acquire_tasks(limit=10):
     try:
         resp = requests.post(
-            f"{API_BASE_URL}/youtube-jobs/tasks/acquire", 
-            json={"worker_id": WORKER_ID, "limit": limit}
+            f"{API_BASE_URL}/tasks/acquire", 
+            json={"worker_id": WORKER_ID, "limit": limit, "stage": "metadata"}
         )
         if resp.status_code == 200:
-            return resp.json()
+            data = resp.json()
+            if isinstance(data, list):
+                return data
+            print(f"Unexpected API response format: {type(data)}")
+            return []
         elif resp.status_code == 404:
             return []
         else:
@@ -92,274 +69,99 @@ def api_acquire_tasks(limit=10):
         print(f"Connection Error: {e}")
         return []
 
-def api_get_job(job_id):
-    resp = requests.get(f"{API_BASE_URL}/youtube-jobs/{job_id}")
-    resp.raise_for_status()
-    return resp.json()
-
-def api_update_task(task_id, data):
+def api_update_task_batch(updates):
     try:
-        resp = requests.patch(f"{API_BASE_URL}/youtube-jobs/tasks/{task_id}", json=data)
+        resp = requests.post(f"{API_BASE_URL}/tasks/update", json=updates)
         if resp.status_code != 200:
-            print(f"Failed to update task {task_id}: {resp.text}")
+            print(f"Failed to update tasks: {resp.text}")
     except Exception as e:
-        print(f"Failed to update task {task_id} due to connection error: {e}")
+        print(f"Failed to update tasks due to connection error: {e}")
 
-def get_content_length(url):
-    try:
-        req = urllib.request.Request(url, method='HEAD')
-        req.add_header('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36')
-        with urllib.request.urlopen(req, context=ssl_context) as response:
-            return int(response.headers.get('Content-Length', 0))
-    except Exception as e:
-        return 0
-
-def send_json_request(url, data):
-    req = urllib.request.Request(url, method='POST')
-    req.add_header('Content-Type', 'application/json')
-    req.add_header('User-Agent', 'yt-dlp-upload-client')
-    json_data = json.dumps(data).encode('utf-8')
+@TASK_DURATION.time()
+def process_metadata(task, ydl_opts):
+    url = task.get('url')
+    if not url:
+        TASKS_PROCESSED.labels(status="failed").inc()
+        return None
+        
+    print(f"Processing Task {task['id']}: {url}")
     
-    try:
-        with urllib.request.urlopen(req, data=json_data, context=ssl_context) as response:
-            if 200 <= response.status < 300:
-                return json.loads(response.read().decode('utf-8'))
-            else:
-                raise Exception(f"HTTP {response.status}: {response.read().decode('utf-8')}")
-    except urllib.error.HTTPError as e:
-        raise Exception(f"HTTP {e.code}: {e.read().decode('utf-8')}")
+    job_info = get_job_info(task['job_id'])
+    download_mode = job_info.get('download_mode', 'both') # both, audio, video
 
-def upload_chunk(task_data):
-    part_number = task_data['partNumber']
-    destination_url = task_data['destinationUrl']
-    
-    payload = {
-        "fileUrl": task_data['url'],
-        "offset": task_data['start'],
-        "size": task_data['end'] - task_data['start'] + 1,
-        "r2Key": destination_url,
-        "partNumber": part_number,
-        "uploadId": task_data['uploadId']
+    result = {
+        "id": task['id'],
+        "job_id": task['job_id'],
+        "status": "METADATA_FETCHED", # Success state for this worker
+        "worker_id": WORKER_ID
     }
-
-    for attempt in range(3):
-        try:
-            res = send_json_request(WORKER_UPLOAD_URL, payload)
-            return {"PartNumber": part_number, "ETag": res['etag']}
-        except Exception as e:
-            time.sleep(1)
     
-    raise Exception(f"Part {part_number} failed after 3 attempts")
-
-def abort_upload(key, upload_id):
-    print(f"Aborting upload for {key}...")
     try:
-        s3_client.abort_multipart_upload(Bucket=R2_BUCKET_NAME, Key=key, UploadId=upload_id)
-        print("Upload aborted successfully.")
-    except Exception as e:
-        print(f"Failed to abort upload: {e}")
-
-def process_upload(source_url, filename, filesize, r2_prefix):
-    # print(f"\n--- Starting upload for {filename} ---")
-    
-    if not filesize:
-        filesize = get_content_length(source_url)
-        if not filesize:
-            raise Exception(f"Could not determine filesize for {filename}. Skipping upload.")
-
-    # Construct Key with R2 Prefix
-    prefix = r2_prefix.strip()
-    if prefix and not prefix.endswith('/'):
-        prefix += '/'
-    
-    key = prefix + filename
-
-    # 1. Initiate (Local S3)
-    try:
-        mpu = s3_client.create_multipart_upload(Bucket=R2_BUCKET_NAME, Key=key)
-        upload_id = mpu['UploadId']
-    except Exception as e:
-        raise Exception(f"Failed to initiate upload: {e}")
-
-    # 2. Upload Parts Concurrently
-    parts = []
-    tasks = []
-    start = 0
-    part_number = 1
-    
-    while start < filesize:
-        end = min(start + CHUNK_SIZE - 1, filesize - 1)
-        
-        presigned_url = f"{parsed_url.scheme}://{R2_BUCKET_NAME}.{parsed_url.netloc}/{key}"
-
-        tasks.append({
-            "url": source_url,
-            "start": start,
-            "end": end,
-            "destinationUrl": presigned_url,
-            "partNumber": part_number,
-            "uploadId": upload_id
-        })
-        start += CHUNK_SIZE
-        part_number += 1
-
-    max_workers = min(len(tasks), 10) 
-    
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
-    try:
-        future_to_part = {executor.submit(upload_chunk, task): task for task in tasks}
-        
-        for future in concurrent.futures.as_completed(future_to_part):
-            try:
-                result = future.result()
-                parts.append(result)
-            except Exception as e:
-                raise e
-
-        # 3. Complete (Local S3)
-        parts.sort(key=lambda x: x['PartNumber'])
-        
-        res = s3_client.complete_multipart_upload(
-            Bucket=R2_BUCKET_NAME,
-            Key=key,
-            UploadId=upload_id,
-            MultipartUpload={'Parts': parts}
-        )
-        print(f"Upload completed: {res['Key']}")
-
-    except Exception as e:
-        executor.shutdown(wait=False, cancel_futures=True)
-        abort_upload(key, upload_id)
-        raise Exception(f"Upload failed: {e}")
-    finally:
-        executor.shutdown(wait=True)
-
-class HostLockManager:
-    def __init__(self):
-        self._locks = {}
-        self._global_lock = threading.Lock()
-
-    def get_lock(self, url):
-        try:
-            hostname = urllib.parse.urlparse(url).hostname
-        except:
-            hostname = "unknown"
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            info = ydl.extract_info(url, download=False)
             
-        if not hostname:
-             hostname = "unknown"
+            result["title"] = info.get('title', '')
+            result["video_id"] = info.get('id', '')
+            
+            formats = info.get('formats', [])
+            
+            # Find best audio
+            best_audio = None
+            if download_mode in ['both', 'audio']:
+                audio_formats = [f for f in reversed(formats) 
+                                 if f.get('vcodec') == 'none' and f.get('acodec') != 'none']
+                if audio_formats:
+                    best_audio = next((f for f in audio_formats if f.get('language') == 'en'), None)
+                    if not best_audio:
+                        best_audio = audio_formats[0]
+            
+            # Find best video
+            best_video = None
+            if download_mode in ['both', 'video']:
+                best_video = next((f for f in reversed(formats) 
+                                   if f.get('vcodec') != 'none' and f.get('acodec') == 'none'), None)
+            
+            if best_audio:
+                result["audio_url"] = best_audio.get('url')
+                result["audio_size"] = best_audio.get('filesize') or best_audio.get('filesize_approx')
+            if best_video:
+                result["video_url"] = best_video.get('url')
+                result["video_size"] = best_video.get('filesize') or best_video.get('filesize_approx')
 
-        with self._global_lock:
-            if hostname not in self._locks:
-                self._locks[hostname] = threading.Lock()
-            return self._locks[hostname]
-
-host_lock_manager = HostLockManager()
-
-def check_file_exists(key):
-    try:
-        s3_client.head_object(Bucket=R2_BUCKET_NAME, Key=key)
-        return True
-    except Exception:
-        return False
-
-def update_task_metadata(task_id, title, video_id):
-    api_update_task(task_id, {"title": title, "video_id": video_id})
-
-def update_task_status(task_id, status, error_message=None):
-    data = {"status": status}
-    if error_message is not None:
-        data["error_message"] = error_message
-    api_update_task(task_id, data)
-
-def process_video_task(task_id, url, r2_prefix, ydl_opts):
-    print(f"Processing Task ID {task_id} - URL: {url}")
-    
-    try:
-        max_retries = 3
-        success = False
-        last_error = None
+            if not best_audio and not best_video:
+                # Fallback to mixed if separate not found (rare for yt-dlp)
+                pass
         
-        prefix = r2_prefix.strip()
-        if prefix and not prefix.endswith('/'):
-            prefix += '/'
-
-        for attempt in range(max_retries):
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=False)
-                    
-                    update_task_metadata(task_id, info.get('title'), info.get('id'))
-
-                    formats = info.get('formats', [])
-                    video_id = info.get('id', 'video')
-                    
-                    audio_formats = [f for f in reversed(formats) 
-                                     if f.get('vcodec') == 'none' and f.get('acodec') != 'none']
-                    
-                    best_audio = None
-                    if audio_formats:
-                        best_audio = next((f for f in audio_formats if f.get('language') == 'en'), None)
-                        if not best_audio:
-                            best_audio = audio_formats[0]
-
-                    best_video = next((f for f in reversed(formats) 
-                                       if f.get('vcodec') != 'none' and f.get('acodec') == 'none'), None)
-
-                    if best_audio:
-                        audio_filename = f"{video_id}_audio.{best_audio.get('ext')}"
-                        audio_url = best_audio.get('url')
-                        audio_key = prefix + audio_filename
-                        
-                        if not check_file_exists(audio_key):
-                            lock = host_lock_manager.get_lock(audio_url)
-                            with lock:
-                                process_upload(
-                                    audio_url, 
-                                    audio_filename, 
-                                    best_audio.get('filesize'),
-                                    r2_prefix
-                                )
-                    
-                    if best_video:
-                        video_filename = f"{video_id}_video.{best_video.get('ext')}"
-                        video_url = best_video.get('url')
-                        video_key = prefix + video_filename
-                        
-                        if not check_file_exists(video_key):
-                            lock = host_lock_manager.get_lock(video_url)
-                            with lock:
-                                process_upload(
-                                    video_url, 
-                                    video_filename, 
-                                    best_video.get('filesize'),
-                                    r2_prefix
-                                )
-                
-                success = True
-                break
-
-            except Exception as e:
-                last_error = e
-                print(f"Error processing {url}: {e}")
-                
-                if "Video unavailable" in str(e) or "This video is private" in str(e):
-                    break
-                
-                time.sleep(5)
-
-        if success:
-            update_task_status(task_id, "COMPLETED")
+        if not result.get("audio_url") and not result.get("video_url"):
+            result["status"] = "FAILED"
+            result["error_message"] = "No video or audio URL found"
+            result["is_download_fail"] = True
+            TASKS_PROCESSED.labels(status="failed").inc()
         else:
-            update_task_status(task_id, "FAILED", str(last_error))
+            TASKS_PROCESSED.labels(status="success").inc()
 
     except Exception as e:
-        print(f"Critical error for task {task_id}: {e}")
-        update_task_status(task_id, "FAILED", f"Critical: {str(e)}")
+        print(f"Error processing {url}: {e}")
+        result["status"] = "FAILED"
+        result["error_message"] = str(e)
+        if "Sign in to confirm you’re not a bot" in str(e):
+            result["is_download_fail"] = True
+        TASKS_PROCESSED.labels(status="failed").inc()
+        
+    return result
 
 def main():
-    proxy_address = None
-    if len(sys.argv) > 1:
-        proxy_address = sys.argv[1]
+    # Start metrics server
+    start_http_server(9092)
+    print("Metrics server listening on :9092")
+
+    config = load_config()
+    proxy_address = config.get('worker', {}).get('proxy_url')
+    
+    if proxy_address:
+        print(f"Using proxy: {proxy_address}")
+    else:
+        print("No proxy configured.")
 
     # yt-dlp options
     ydl_opts = {
@@ -372,69 +174,85 @@ def main():
     if proxy_address:
         ydl_opts['proxy'] = proxy_address
 
-    max_parallel_videos = 1024
-    job_cache = {}
+    max_workers = 512
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+
+    print(f"Metadata Worker {WORKER_ID} started with {max_workers} workers.")
     
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=max_parallel_videos)
     futures = set()
+    pending_updates = []
+    last_flush_time = time.time()
+    
+    # Threshold to fetch new tasks (avoid spamming acquire for 1 task)
+    FETCH_THRESHOLD = 50 
 
-    print(f"Worker {WORKER_ID} started. Polling for tasks (Concurrency: {max_parallel_videos})...")
-
-    try:
-        while True:
-            # 1. Clean up completed futures
-            done_futures = {f for f in futures if f.done()}
-            for f in done_futures:
+    while True:
+        try:
+            # 1. Process completed tasks
+            wait_timeout = 0.1 
+            if len(futures) >= max_workers:
+                wait_timeout = None # Block if full
+            
+            if futures:
+                done, _ = concurrent.futures.wait(futures, timeout=wait_timeout, return_when=concurrent.futures.FIRST_COMPLETED)
+            else:
+                done = []
+            
+            for f in done:
                 futures.remove(f)
                 try:
-                    f.result()
+                    res = f.result()
+                    if res:
+                        pending_updates.append(res)
                 except Exception as e:
-                    print(f"Thread error: {e}")
+                    print(f"Task execution error: {e}")
 
-            # 2. Refill if below limit
-            active_count = len(futures)
-            if active_count < max_parallel_videos:
-                needed = max_parallel_videos
+            # 2. Flush updates
+            now = time.time()
+            if (len(pending_updates) >= 20 or 
+                (pending_updates and (now - last_flush_time > 2)) or 
+                (pending_updates and not futures)):
                 
-                tasks = []
-                try:
-                    tasks = api_acquire_tasks(limit=needed)
-                except Exception as e:
-                    print(f"Error acquiring tasks: {e}")
-                    time.sleep(2)
-
+                api_update_task_batch(pending_updates)
+                print(f"Updated {len(pending_updates)} tasks.")
+                pending_updates = []
+                last_flush_time = now
+                
+            # 3. Refill tasks
+            slots = max_workers - len(futures)
+            should_fetch = slots >= FETCH_THRESHOLD or (slots > 0 and len(futures) == 0)
+            
+            if should_fetch:
+                tasks = api_acquire_tasks(limit=slots)
                 if tasks:
-                    print(f"Acquired {len(tasks)} tasks (Active: {active_count}).")
-                    for task in tasks:
-                        jid = task['job_id']
-                        if jid not in job_cache:
-                            try:
-                                job_info = api_get_job(jid)
-                                job_cache[jid] = job_info['r2_prefix']
-                            except Exception as e:
-                                print(f"Failed to get job info for {jid}: {e}")
-                                update_task_status(task['id'], "FAILED", f"Job info error: {str(e)}")
-                                continue
-                        
-                        r2_prefix = job_cache.get(jid)
-                        if r2_prefix:
-                            f = executor.submit(process_video_task, task['id'], task['url'], r2_prefix, ydl_opts)
-                            futures.add(f)
+                    print(f"Acquired {len(tasks)} tasks. (Running: {len(futures)})")
+                    
+                    # Mark RUNNING
+                    running_updates = [{
+                        "id": t['id'],
+                        "job_id": t['job_id'],
+                        "status": "RUNNING",
+                        "worker_id": WORKER_ID
+                    } for t in tasks]
+                    api_update_task_batch(running_updates)
+                    
+                    # Submit
+                    for t in tasks:
+                        f = executor.submit(process_metadata, t, ydl_opts)
+                        futures.add(f)
                 else:
                     # No tasks available
-                    if active_count == 0:
-                        time.sleep(5)
-                    else:
-                        # Queue empty, wait a bit before retrying to avoid spamming
+                    if not futures:
                         time.sleep(2)
-            else:
-                # 3. Wait if full (wait for at least one to finish)
-                concurrent.futures.wait(futures, return_when=concurrent.futures.FIRST_COMPLETED)
+                    else:
+                        time.sleep(1)
 
-    except KeyboardInterrupt:
-        print("\nStopping worker...")
-        executor.shutdown(wait=False)
-        sys.exit(0)
+        except KeyboardInterrupt:
+            print("Stopping...")
+            break
+        except Exception as e:
+            print(f"Main loop error: {e}")
+            time.sleep(5)
 
 if __name__ == "__main__":
     main()
