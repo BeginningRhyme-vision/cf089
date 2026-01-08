@@ -194,7 +194,7 @@ func initRedis() {
 		log.Fatalf("Invalid Redis URL: %v", err)
 	}
 	rdb = redis.NewClient(opt)
-	
+
 	if err := rdb.Ping(context.Background()).Err(); err != nil {
 		log.Printf("Warning: Failed to ping Redis at startup: %v", err)
 	}
@@ -215,7 +215,17 @@ func getPendingJobs() ([]common.FfmpegJob, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&jobs); err != nil {
 		return nil, err
 	}
-	return jobs, nil
+	var filteredJobs []common.FfmpegJob
+	log.Println("Start filter jobs")
+	for _, job := range jobs {
+		log.Println("Job's endpoint is", job.Metadata.Endpoint)
+		if strings.Contains(job.Metadata.Endpoint, os.Getenv("ZONE")) {
+			if strings.Contains(job.Metadata.Endpoint, os.Getenv("PROVIDER")) {
+				filteredJobs = append(filteredJobs, job)
+			}
+		}
+	}
+	return filteredJobs, nil
 }
 
 func updateJobStatus(jobID int64, status string, lastScanTime *time.Time, msg string, totalCount *int) error {
@@ -345,14 +355,14 @@ func processJob(job common.FfmpegJob) {
 		for _, c := range candidates {
 			checkPermFailureIDs = append(checkPermFailureIDs, c.taskID)
 		}
-		
+
 		// If checkPermFailureIDs is empty, skip (though len check above prevents this)
 		var permFailed []bool
 		if len(checkPermFailureIDs) > 0 {
 			// SIsMember does not support variadic args in older go-redis versions or depending on signature?
-			// Actually SMISMEMBER is what we want if available, or just loop. 
+			// Actually SMISMEMBER is what we want if available, or just loop.
 			// go-redis v9 has SMIsMember.
-			
+
 			res, err := rdb.SMIsMember(context.Background(), PermFailureKey, checkPermFailureIDs...).Result()
 			if err != nil {
 				log.Printf("Failed to check for permanent failures: %v", err)
@@ -376,7 +386,7 @@ func processJob(job common.FfmpegJob) {
 		for i, c := range candidates {
 			if i < len(permFailed) && permFailed[i] {
 				// Skip permanently failed tasks
-				continue 
+				continue
 			}
 			pipe.SAdd(context.Background(), dedupKey, c.taskID)
 			dedupCandidates = append(dedupCandidates, c)
@@ -433,7 +443,7 @@ func processJob(job common.FfmpegJob) {
 			for _, b := range batch {
 				interfaceBatch = append(interfaceBatch, b)
 			}
-			
+
 			var errPush error
 			for i := 0; i < 3; i++ {
 				errPush = rdb.RPush(context.Background(), TaskQueue, interfaceBatch...).Err()
