@@ -222,8 +222,13 @@ func getPendingJobs() ([]common.FfmpegJob, error) {
 		if strings.Contains(job.Metadata.Endpoint, os.Getenv("ZONE")) {
 			if strings.Contains(job.Metadata.Endpoint, os.Getenv("PROVIDER")) {
 				filteredJobs = append(filteredJobs, job)
+			} else {
+				log.Println("Job's endpoint is not in the provider, skip")
 			}
+		} else {
+			log.Println("Job's endpoint is not in the zone, skip")
 		}
+
 	}
 	return filteredJobs, nil
 }
