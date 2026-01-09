@@ -433,6 +433,7 @@ func sendBatch(jobID uint, tasks []TransferTaskInput) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
+		log.Println("backend address: ", apiBaseURL)
 		return fmt.Errorf("status %d", resp.StatusCode)
 	}
 	return nil
