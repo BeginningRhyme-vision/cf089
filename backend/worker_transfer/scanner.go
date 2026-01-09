@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -433,7 +434,8 @@ func sendBatch(jobID uint, tasks []TransferTaskInput) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		log.Println("backend address: ", apiBaseURL)
+		body, _ := io.ReadAll(resp.Body)
+		log.Println(string(body))
 		return fmt.Errorf("status %d", resp.StatusCode)
 	}
 	return nil
