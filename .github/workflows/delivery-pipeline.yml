@@ -27,40 +27,59 @@ jobs:
             context: frontend
             image: unbound-frontend
             canary_files: |
-              silicon-tke/applications/unbound-future-admin-cannary/frontend.yaml
+              silicon-tke/applications/unbound-future-admin-backend_frontend-cannary/frontend.yaml
             stable_files: |
-              silicon-tke/applications/unbound-future-admin/frontend.yaml
+              silicon-tke/applications/unbound-future-admin-backend_frontend/frontend.yaml
 
           - component: Backend API
             context: backend/go-app
             image: unbound-backend
             canary_files: |
-              silicon-tke/applications/unbound-future-admin-cannary/backend-api.yaml
+              silicon-tke/applications/unbound-future-admin-backend_frontend-cannary/backend-api.yaml
             stable_files: |
-              silicon-tke/applications/unbound-future-admin/backend-api.yaml
+              silicon-tke/applications/unbound-future-admin-backend_frontend/backend-api.yaml
 
           - component: Worker Downloader
             context: backend/worker_downloader
             image: unbound-worker-downloader
             canary_files: |
-              k3s-edge/applications/unbound-future-admin-cannary/worker-downloader-go.yaml
-              k3s-edge/applications/unbound-future-admin-cannary/worker-downloader-py.yaml
+              k3s-edge/applications/unbound-future-admin-downloader-cannary/worker-downloader-go.yaml
+              k3s-edge/applications/unbound-future-admin-downloader-cannary/worker-downloader-py.yaml
             stable_files: |
-              k3s-edge/applications/unbound-future-admin/worker-downloader-go.yaml
-              k3s-edge/applications/unbound-future-admin/worker-downloader-py.yaml
+              k3s-edge/applications/unbound-future-admin-downloader/worker-downloader-go.yaml
+              k3s-edge/applications/unbound-future-admin-downloader/worker-downloader-py.yaml
 
-          - component: Worker Transfer
+          - component: Transfer Scanner
             context: backend/worker_transfer
             image: unbound-worker-transfer 
             canary_files: |
-              silicon-tke/applications/unbound-future-admin-cannary/worker-transfer-scanner.yaml
+              silicon-tke/applications/unbound-future-admin-backend_frontend-cannary/worker-transfer-scanner.yaml
             stable_files: |
-              silicon-tke/applications/unbound-future-admin/worker-transfer-scanner.yaml
+              silicon-tke/applications/unbound-future-admin-backend_frontend/worker-transfer-scanner.yaml
 
-          - component: Worker FFmpeg
+          - component: Transfer Agent
+            context: backend/worker_transfer
+            image: unbound-worker-transfer 
+            canary_files: |
+              shanghai-tke/applications/unbound-future-admin-transfer-agent/transfer-agent.yaml
+            stable_files: |
+              shanghai-tke/applications/unbound-future-admin-transfer-agent-cannary/transfer-agent.yaml
+
+          - component: FFmpeg Worker Ack
             context: backend/worker_ffmpeg
             image: unbound-worker-ffmpeg
+            cannary_files: |
+              shanghai-ack/applications/unbound-future-admin-ffmpeg-cannary/Deployment-ffmpeg-worker.yaml
+            stable_files: |
+              shanghai-ack/applications/unbound-future-admin-ffmpeg-cannary/Deployment-ffmpeg-worker.yaml
 
+          - component: FFmpeg Scanner Ack
+            context: backend/worker_ffmpeg
+            image: unbound-worker-ffmpeg
+            cannary_files: |
+              shanghai-ack/applications/unbound-future-admin-ffmpeg-cannary/Deployment-ffmpeg-scanner.yaml
+            stable_files: |
+              shanghai-ack/applications/unbound-future-admin-ffmpeg-cannary/Deployment-ffmpeg-scanner.yaml
     
     steps:
       - name: Checkout repository
