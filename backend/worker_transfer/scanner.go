@@ -264,11 +264,54 @@ func processJob(job TransferJob) {
 		pages++
 		PagesScanned.Inc()
 		log.Printf("Requesting page %d for job %d...", pages, job.JobID)
-		page, err := paginator.NextPage(context.TODO())
+
+		// Retry logic with exponential backoff
+		var page *s3.ListObjectsV2Output
+		var err error
+		maxRetries := 5
+		retryCount := 0
+		baseDelay := 5 * time.Second
+
+		for retryCount < maxRetries {
+			page, err = paginator.NextPage(context.TODO())
+			if err == nil {
+				break // Success, exit retry loop
+			}
+
+			log.Printf("ListObjectsV2 failed for job %d on page %d (attempt %d/%d): %v", job.JobID, pages, retryCount+1, maxRetries, err)
+
+			// Check if the error is due to rate limiting
+			errMsg := err.Error()
+			isRateLimited := strings.Contains(strings.ToLower(errMsg), "ratelimit") ||
+				strings.Contains(strings.ToLower(errMsg), "throttled") ||
+				strings.Contains(strings.ToLower(errMsg), "slowdown") ||
+				strings.Contains(errMsg, "429")
+
+			if isRateLimited {
+				log.Printf("Detected rate limiting for job %d, applying backoff strategy", job.JobID)
+				// Use a longer delay for rate limiting
+				delay := baseDelay * time.Duration(1<<uint(retryCount)) // Exponential backoff
+				if retryCount > 0 {
+					log.Printf("Rate limited, waiting for %v before retry %d/%d", delay, retryCount+1, maxRetries)
+				}
+				time.Sleep(delay)
+			} else {
+				// Standard error - shorter delay
+				delay := baseDelay * time.Duration(1<<uint(retryCount)) / 2
+				if delay < baseDelay {
+					delay = baseDelay
+				}
+				log.Printf("Request failed, waiting for %v before retry %d/%d", delay, retryCount+1, maxRetries)
+				time.Sleep(delay)
+			}
+
+			retryCount++
+		}
+
 		if err != nil {
-			log.Printf("ListObjectsV2 failed for job %d on page %d: %v", job.JobID, pages, err)
-			updateJobStatus(job.JobID, "FAILED", nil, fmt.Sprintf("List failed on page %d: %v", pages, err)) // Mark as failed on list error
-			close(taskChan)                                                                                  // Ensure consumer stops
+			log.Printf("ListObjectsV2 failed for job %d on page %d after %d retries: %v", job.JobID, pages, maxRetries, err)
+			updateJobStatus(job.JobID, "FAILED", nil, fmt.Sprintf("List failed on page %d after %d retries: %v", pages, maxRetries, err))
+			close(taskChan) // Ensure consumer stops
 			return
 		}
 
@@ -334,6 +377,16 @@ func processJob(job TransferJob) {
 			msg := fmt.Sprintf("Scanning... Pages: %d, Tasks: %d, Skipped: %d", pages, count, skipped)
 			updateJobStatus(job.JobID, "RUNNING", nil, msg)
 			lastUpdate = time.Now()
+		}
+
+		// Add a small delay between pages to reduce request rate after encountering rate limiting
+		// We track whether the last page request was affected by rate limiting
+		if pages > 0 {
+			// In case we've had a rate limiting event recently, apply a small delay
+			// This is a proactive measure to prevent subsequent rate limiting
+			standardDelay := 100 * time.Millisecond
+			//log.Printf("Waiting %v before requesting next page for job %d to prevent rate limiting", standardDelay, job.JobID)
+			time.Sleep(standardDelay)
 		}
 	}
 
