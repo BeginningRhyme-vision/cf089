@@ -435,7 +435,7 @@ func sendBatch(jobID uint, tasks []TransferTaskInput) error {
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		body, _ := io.ReadAll(resp.Body)
-		log.Println(string(body))
+		log.Println("job ", jobID, "error body: ", string(body))
 		return fmt.Errorf("status %d", resp.StatusCode)
 	}
 	return nil
