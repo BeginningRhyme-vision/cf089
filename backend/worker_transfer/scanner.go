@@ -236,7 +236,7 @@ func processJob(job TransferJob) {
 	lastUpdate := time.Now()
 
 	// Channel for async sending
-	taskChan := make(chan TransferTaskInput, 2000)
+	taskChan := make(chan TransferTaskInput, 1500)
 	var wg sync.WaitGroup
 	wg.Add(1)
 
@@ -246,7 +246,7 @@ func processJob(job TransferJob) {
 		var internalBatch []TransferTaskInput
 		for task := range taskChan {
 			internalBatch = append(internalBatch, task)
-			if len(internalBatch) >= 1000 {
+			if len(internalBatch) >= 700 {
 				if err := sendBatch(job.JobID, internalBatch); err != nil {
 					log.Printf("Failed to send batch for job %d: %v", job.JobID, err)
 				}
