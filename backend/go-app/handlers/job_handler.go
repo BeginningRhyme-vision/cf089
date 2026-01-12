@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -523,11 +524,13 @@ func runCleanup() {
 	ctx := context.Background()
 
 	// Find jobs that are completed but redis not cleaned
+	// Only clean redis for non-incremental jobs that have successfully completed with all tasks successful
 	var jobs []models.TransferJob
-	err := database.DB.Where("status IN ? AND redis_cleaned = ?", []models.JobStatus{models.StatusCompleted, models.StatusFailed, models.StatusStopped}, false).Find(&jobs).Error
+	err := database.DB.Where("status = ? AND is_incremental = ? AND success_count = total_count AND redis_cleaned = ?",
+		models.StatusCompleted, false, false).Find(&jobs).Error
 	if err != nil {
 		// Log error if needed
-		return
+		log.Println(err)
 	}
 
 	for _, job := range jobs {
