@@ -362,7 +362,7 @@ func RetryFfmpegTasksLogic(jobID int, initialStatus models.JobStatus) {
 
 	if resetCount > 0 {
 		database.DB.Exec("UPDATE ffmpeg_jobs SET failed_count = failed_count - ?, pending_count = pending_count + ? WHERE id = ?", resetCount, resetCount, jobID)
-		
+
 		// Reset offset to rescan if needed? Usually for incremental we want to re-check.
 		// For Ffmpeg, the scanner finds tasks. If we reset tasks to PENDING, they are in Redis but not in any queue unless we put them there?
 		// Ffmpeg architecture: Scanner -> Redis (PENDING) -> Worker acquires.
@@ -371,7 +371,7 @@ func RetryFfmpegTasksLogic(jobID int, initialStatus models.JobStatus) {
 		// In Transfer logic, we didn't push anywhere. Wait, Transfer worker calls `AcquireTransferTasks` which likely does ZRANGE or similar on `tx:job:...`.
 		// Let's check `AcquireTransferTasks` implementation later. Assuming standard pattern.
 		// For Ffmpeg, we probably need to ensure they are pickable.
-		
+
 		if initialStatus == models.StatusCompleted || initialStatus == models.StatusFailed {
 			database.DB.Model(&models.FfmpegJob{ID: uint(jobID)}).Update("status", models.StatusPending)
 		}
@@ -455,6 +455,15 @@ func UpdateTransferJobStatus(c *gin.Context) {
 		if err := database.DB.Model(&job).Updates(updates).Error; err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
+		}
+
+		// Check if status is completed and trigger cleanup
+		if val, ok := updates["status"]; ok {
+			if statusStr, ok := val.(string); ok {
+				if statusStr == "COMPLETED" || statusStr == "COMPLETE" {
+					go cleanupTransferJobRedis(context.Background(), job.JobID)
+				}
+			}
 		}
 	}
 
