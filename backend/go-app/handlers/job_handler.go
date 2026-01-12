@@ -534,6 +534,7 @@ func runCleanup() {
 	}
 
 	for _, job := range jobs {
+		log.Println("Cleaning up Redis for job", job)
 		cleanupTransferJobRedis(ctx, job.JobID)
 	}
 }
