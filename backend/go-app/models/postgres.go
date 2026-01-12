@@ -61,6 +61,7 @@ type TransferJob struct {
 	SuccessCount    int        `gorm:"default:0" json:"success_count"`
 	FailedCount     int        `gorm:"default:0" json:"failed_count"`
 	ResultMessage   string     `gorm:"type:text" json:"result_message"`
+	RedisCleaned    bool       `gorm:"default:false" json:"redis_cleaned"`
 	CreatedAt       time.Time  `gorm:"autoCreateTime" json:"created_at"`
 	UpdatedAt       time.Time  `gorm:"autoUpdateTime" json:"updated_at"`
     

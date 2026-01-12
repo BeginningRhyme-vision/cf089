@@ -457,14 +457,6 @@ func UpdateTransferJobStatus(c *gin.Context) {
 			return
 		}
 
-		// Check if status is completed and trigger cleanup
-		if val, ok := updates["status"]; ok {
-			if statusStr, ok := val.(string); ok {
-				if statusStr == "COMPLETED" || statusStr == "COMPLETE" {
-					go cleanupTransferJobRedis(context.Background(), job.JobID)
-				}
-			}
-		}
 	}
 
 	// Atomic counter updates
@@ -507,6 +499,40 @@ func cleanupTransferJobRedis(ctx context.Context, jobID uint) {
 	database.RDB.Del(ctx, fmt.Sprintf("tx:job:%d:dedup", jobID))
 	database.RDB.Del(ctx, fmt.Sprintf("tx:job:%d:lock", jobID))
 	database.RDB.Del(ctx, fmt.Sprintf("tx:job:%d:offset", jobID))
+
+	// 3. Mark as cleaned in DB
+	database.DB.Model(&models.TransferJob{}).Where("job_id = ?", jobID).Update("redis_cleaned", true)
+}
+
+// StartPeriodicCleanup starts a background goroutine to clean up Redis keys for completed jobs
+func StartPeriodicCleanup() {
+	go func() {
+		ticker := time.NewTicker(30 * time.Minute) // Run every 30 minutes
+		defer ticker.Stop()
+
+		// Run immediately on startup
+		runCleanup()
+
+		for range ticker.C {
+			runCleanup()
+		}
+	}()
+}
+
+func runCleanup() {
+	ctx := context.Background()
+
+	// Find jobs that are completed but redis not cleaned
+	var jobs []models.TransferJob
+	err := database.DB.Where("status IN ? AND redis_cleaned = ?", []models.JobStatus{models.StatusCompleted, models.StatusFailed, models.StatusStopped}, false).Find(&jobs).Error
+	if err != nil {
+		// Log error if needed
+		return
+	}
+
+	for _, job := range jobs {
+		cleanupTransferJobRedis(ctx, job.JobID)
+	}
 }
 
 func DeleteTransferJob(c *gin.Context) {
