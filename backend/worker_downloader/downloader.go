@@ -589,7 +589,7 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 	if lastErr != nil {
 		return "", fmt.Errorf("failed to upload chunk %d: %v", partNum, lastErr)
 	}
-	return "", fmt.Errorf("failed to upload chunk %d: %v", partNum, lastErr)
+	return "", nil
 }
 
 func reportError(id int64, msg string) {
