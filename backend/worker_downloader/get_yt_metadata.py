@@ -116,42 +116,42 @@ def process_metadata(task, ydl_opts):
                         best_audio = audio_formats[0]
             
             # Find best video
-            # best_video = None
-            # if download_mode in ['both', 'video']:
-            #     best_video = next((f for f in reversed(formats) 
-            #                        if f.get('vcodec') != 'none' and f.get('acodec') == 'none'), None)
             best_video = None
             if download_mode in ['both', 'video']:
-                # 1. 筛选出所有纯视频流（video-only），并按质量从低到高排序（yt-dlp 默认通常已排序，但我们确保过滤正确）
-                video_candidates = [f for f in reversed(formats) 
-                                    if f.get('vcodec') != 'none' and f.get('acodec') == 'none']
+                best_video = next((f for f in reversed(formats) 
+                                   if f.get('vcodec') != 'none' and f.get('acodec') == 'none'), None)
+            # best_video = None
+            # if download_mode in ['both', 'video']:
+            #     # 1. 筛选出所有纯视频流（video-only），并按质量从低到高排序（yt-dlp 默认通常已排序，但我们确保过滤正确）
+            #     video_candidates = [f for f in reversed(formats) 
+            #                         if f.get('vcodec') != 'none' and f.get('acodec') == 'none']
                 
-                # 2. 检查最高画质是否满足 720P
-                # 如果所有流的高度都小于 720，则视为画质过低
-                if not any(f.get('height', 0) >= 720 for f in video_candidates):
-                    raise Exception("Video quality too low (max height < 720P). Skipping download.")
+            #     # 2. 检查最高画质是否满足 720P
+            #     # 如果所有流的高度都小于 720，则视为画质过低
+            #     if not any(f.get('height', 0) >= 720 for f in video_candidates):
+            #         raise Exception("Video quality too low (max height < 720P). Skipping download.")
 
-                # 3. 优先级策略：1080P -> 720P -> >1080P
-                # 我们从后往前找（reversed），因为 yt-dlp formats 通常按质量升序，这样能拿到同分辨率下码率最高的
+            #     # 3. 优先级策略：1080P -> 720P -> >1080P
+            #     # 我们从后往前找（reversed），因为 yt-dlp formats 通常按质量升序，这样能拿到同分辨率下码率最高的
                 
-                # 策略 A: 找 1080P
-                best_video = next((f for f in reversed(video_candidates) if f.get('height') == 1080), None)
+            #     # 策略 A: 找 1080P
+            #     best_video = next((f for f in reversed(video_candidates) if f.get('height') == 1080), None)
                 
-                # 策略 B: 如果没有 1080P，找 720P
-                if not best_video:
-                    best_video = next((f for f in reversed(video_candidates) if f.get('height') == 720), None)
+            #     # 策略 B: 如果没有 1080P，找 720P
+            #     if not best_video:
+            #         best_video = next((f for f in reversed(video_candidates) if f.get('height') == 720), None)
                 
-                # 策略 C: 如果 1080P 和 720P 都没有，找 > 1080P 的 (例如 2K, 4K)
-                if not best_video:
-                    best_video = next((f for f in reversed(video_candidates) if f.get('height', 0) > 1080), None)
+            #     # 策略 C: 如果 1080P 和 720P 都没有，找 > 1080P 的 (例如 2K, 4K)
+            #     if not best_video:
+            #         best_video = next((f for f in reversed(video_candidates) if f.get('height', 0) > 1080), None)
 
-                # 策略 D (保底): 如果以上都没有（比如只有 960P 等怪异分辨率），但它通过了 >= 720 的检查，
-                # 我们可以选择剩下的画质最高的，或者严格遵循你的描述“不下载”。
-                # 根据“如果1080P和720P都不存在则下载一个比1080P画质高的”，这里严格执行：
-                # 如果此时 best_video 还是 None，说明只有 720 < height < 1080 的视频（很少见），或者逻辑漏网。
-                # 既然前面 check 了 >= 720，这里为了稳健，如果还没选到，选现存最高的 >= 720
-                if not best_video:
-                     best_video = next((f for f in reversed(video_candidates) if f.get('height', 0) >= 720), None)            
+            #     # 策略 D (保底): 如果以上都没有（比如只有 960P 等怪异分辨率），但它通过了 >= 720 的检查，
+            #     # 我们可以选择剩下的画质最高的，或者严格遵循你的描述“不下载”。
+            #     # 根据“如果1080P和720P都不存在则下载一个比1080P画质高的”，这里严格执行：
+            #     # 如果此时 best_video 还是 None，说明只有 720 < height < 1080 的视频（很少见），或者逻辑漏网。
+            #     # 既然前面 check 了 >= 720，这里为了稳健，如果还没选到，选现存最高的 >= 720
+            #     if not best_video:
+            #          best_video = next((f for f in reversed(video_candidates) if f.get('height', 0) >= 720), None)            
             if best_audio:
                 result["audio_url"] = best_audio.get('url')
                 result["audio_size"] = best_audio.get('filesize') or best_audio.get('filesize_approx')
