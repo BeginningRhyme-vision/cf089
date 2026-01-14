@@ -89,12 +89,15 @@ func initClients() {
 		MaxIdleConnsPerHost: 1000,
 		IdleConnTimeout:     90 * time.Second,
 	}
-	if cfg.Worker.ProxyURL != "" {
-		proxyURL, err := url.Parse(cfg.Worker.ProxyURL)
-		if err != nil {
-			log.Printf("Invalid proxy URL: %v", err)
-		} else {
-			externalTransport.Proxy = http.ProxyURL(proxyURL)
+
+	if os.Getenv("USE_PROXY") == "true" {
+		if cfg.Worker.ProxyURL != "" {
+			proxyURL, err := url.Parse(cfg.Worker.ProxyURL)
+			if err != nil {
+				log.Printf("Invalid proxy URL: %v", err)
+			} else {
+				externalTransport.Proxy = http.ProxyURL(proxyURL)
+			}
 		}
 	}
 	externalClient = &http.Client{
