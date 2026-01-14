@@ -50,21 +50,21 @@ type SrcConfig struct {
 }
 
 var (
-	cfg        *Config
-	s3Client   *s3.Client
-	bucketName string
-	apiBaseURL string
-	jobCache   sync.Map // map[int64]string (JobID -> R2Prefix)
-	workerID   string
+	cfg            *Config
+	s3Client       *s3.Client
+	bucketName     string
+	apiBaseURL     string
+	jobCache       sync.Map // map[int64]string (JobID -> R2Prefix)
+	workerID       string
 	internalClient *http.Client
 	externalClient *http.Client
-	
+
 	// Metrics
 	TasksProcessed = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "worker_downloader_tasks_processed_total",
 		Help: "The total number of processed tasks",
 	}, []string{"status"})
-	
+
 	DownloadDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name: "worker_downloader_duration_seconds",
 		Help: "Duration of downloads",
@@ -104,7 +104,7 @@ func initClients() {
 }
 
 const (
-	ChunkSize            = 6 * 1024 * 1024 // 6MB
+	ChunkSize            = 32 * 1024 * 1024 // 32MB
 	MaxConcurrentWorkers = 200
 	TaskBufferSize       = 200
 )
@@ -130,9 +130,9 @@ type JobInfo struct {
 }
 
 type UpdateTaskRequest struct {
-	ID           int64  `json:"id"`
-	Status       string `json:"status"`
-	ErrorMessage string `json:"error_message,omitempty"`
+	ID             int64  `json:"id"`
+	Status         string `json:"status"`
+	ErrorMessage   string `json:"error_message,omitempty"`
 	IsDownloadFail bool   `json:"is_download_fail,omitempty"`
 }
 
@@ -236,7 +236,7 @@ func initS3() {
 	// Parse Endpoint to get bucket?
 	// The python code did: parsed_url.path.strip('/') -> bucket
 	// endpoint -> https://...
-	
+
 	// We need a custom resolver for R2/S3
 	r2Resolver := aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
 		return aws.Endpoint{
@@ -263,13 +263,13 @@ func initS3() {
 
 	// Extract bucket from endpoint URL logic as per Python script
 	// Python: parsed_url.path.strip('/')
-	// E.g. https://<account>.r2.cloudflarestorage.com/<bucket> ?? 
+	// E.g. https://<account>.r2.cloudflarestorage.com/<bucket> ??
 	// Or https://s3.us-east-1.amazonaws.com/bucket
 	// If endpoint is https://<account>.r2.cloudflarestorage.com, where is the bucket?
 	// Python script: R2_BUCKET_NAME = parsed_url.path.strip('/')
 	// This implies the endpoint URL in config includes the bucket name in the path?
 	// Let's assume so.
-	
+
 	// Simple parsing
 	u, _ := http.NewRequest("GET", cfg.Storage.Src.Endpoint, nil)
 	path := u.URL.Path
@@ -278,16 +278,16 @@ func initS3() {
 		// Fallback or error? Python script exited.
 		log.Fatal("Bucket name could not be derived from endpoint path")
 	}
-	
-	// Adjust endpoint for SDK? 
+
+	// Adjust endpoint for SDK?
 	// If endpoint has bucket path, SDK might append it again if we use path style.
-	// Usually endpoint should be the domain. 
-	// But let's respect the python logic: 
+	// Usually endpoint should be the domain.
+	// But let's respect the python logic:
 	// R2_ENDPOINT_URL = scheme://netloc
 	// So we should strip path from endpoint used in SDK.
-	
+
 	sdkEndpoint := fmt.Sprintf("%s://%s", u.URL.Scheme, u.URL.Host)
-	
+
 	// Re-init with correct base endpoint
 	r2Resolver2 := aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
 		return aws.Endpoint{
@@ -304,7 +304,7 @@ func initS3() {
 		awsconfig.WithRegion("auto"),
 	)
 	s3Client = s3.NewFromConfig(c2, func(o *s3.Options) {
-		o.UsePathStyle = true 
+		o.UsePathStyle = true
 	})
 }
 
@@ -425,7 +425,7 @@ func processTask(t YoutubeTask) {
 		log.Printf("Task %d (%s) COMPLETED", t.ID, t.VideoID)
 	}
 }
-			
+
 func transferFile(sourceURL, key string, providedSize int64) error {
 	size := providedSize
 
@@ -472,7 +472,7 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 				return
 			default:
 			}
-
+			time.Sleep(100 * time.Millisecond)
 			etag, err := uploadChunkExternal(sourceURL, key, uploadID, pNum, s, e)
 			if err != nil {
 				select {
@@ -529,29 +529,29 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 }
 
 func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end int64) (string, error) {
-	// Construct Presigned URL for the destination? 
+	// Construct Presigned URL for the destination?
 	// The Python script: presigned_url = f"{parsed_url.scheme}://{R2_BUCKET_NAME}.{parsed_url.netloc}/{key}"
 	// This format implies R2 virtual host style.
 	// We need to match what the External Service expects.
 	// Let's replicate the python logic exactly.
-	
+
 	u, _ := http.NewRequest("GET", cfg.Storage.Src.Endpoint, nil)
 	// host: <account>.r2.cloudflarestorage.com
 	// scheme: https
-	
+
 	destURL := fmt.Sprintf("%s://%s.%s/%s", u.URL.Scheme, bucketName, u.URL.Host, key)
 
 	payload := map[string]interface{}{
-		"fileUrl":        srcURL,
-		"offset":         start,
-		"size":           end - start + 1,
-		"r2Key":          destURL, // Python sent destinationUrl here
-		"partNumber":     partNum,
-		"uploadId":       uploadID,
+		"fileUrl":    srcURL,
+		"offset":     start,
+		"size":       end - start + 1,
+		"r2Key":      destURL, // Python sent destinationUrl here
+		"partNumber": partNum,
+		"uploadId":   uploadID,
 	}
 
 	body, _ := json.Marshal(payload)
-	
+
 	// Retry logic
 	var lastErr error
 	for i := 0; i < 12; i++ {
@@ -562,7 +562,7 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 			time.Sleep(1 * time.Second)
 			continue
 		}
-		
+
 		etag := ""
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			var resMap map[string]interface{}
@@ -593,9 +593,9 @@ func reportError(id int64, msg string) {
 	log.Printf("Task %d FAILED: %s", id, msg)
 	TasksProcessed.WithLabelValues("failed").Inc()
 	updateTask(UpdateTaskRequest{
-		ID:           id,
-		Status:       "FAILED",
-		ErrorMessage: msg,
+		ID:             id,
+		Status:         "FAILED",
+		ErrorMessage:   msg,
 		IsDownloadFail: true,
 	})
 }
