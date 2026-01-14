@@ -107,7 +107,7 @@ func initClients() {
 }
 
 const (
-	ChunkSize            = 32 * 1024 * 1024 // 32MB
+	ChunkSize            = 16 * 1024 * 1024 // 32MB
 	MaxConcurrentWorkers = 200
 	TaskBufferSize       = 200
 )
@@ -589,7 +589,7 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 	if lastErr != nil {
 		return "", fmt.Errorf("failed to upload chunk %d: %v", partNum, lastErr)
 	}
-	return "", nil
+	return "", fmt.Errorf("failed to upload chunk %d,Can't get Etag", partNum)
 }
 
 func reportError(id int64, msg string) {
