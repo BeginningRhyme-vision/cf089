@@ -959,6 +959,19 @@ func ListPendingFfmpegJobs(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+
+	// 更新这些任务的状态为 SCANNING,防止 scanner 再次获取到
+	jobIds := make([]uint, len(jobs))
+	for i, job := range jobs {
+		jobIds[i] = job.ID
+	}
+
+	if len(jobIds) > 0 {
+		database.DB.Model(&models.FfmpegJob{}).
+			Where("id IN ?", jobIds).
+			Update("status", models.StatusScanning)
+	}
+
 	c.JSON(http.StatusOK, jobs)
 }
 
