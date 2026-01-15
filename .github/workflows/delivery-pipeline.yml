@@ -49,37 +49,27 @@ jobs:
               k3s-edge/applications/unbound-future-admin-downloader/worker-downloader-go.yaml
               k3s-edge/applications/unbound-future-admin-downloader/worker-downloader-py.yaml
 
-          - component: Transfer Scanner
+          - component: Transfer Scanner & Agent
             context: backend/worker_transfer
             image: unbound-worker-transfer 
             canary_files: |
               silicon-tke/applications/unbound-future-admin-backend_frontend-cannary/worker-transfer-scanner.yaml
+              shanghai-tke/applications/unbound-future-admin-transfer-agent-cannary/transfer-agent.yaml
             stable_files: |
               silicon-tke/applications/unbound-future-admin-backend_frontend/worker-transfer-scanner.yaml
+              shanghai-tke/applications/unbound-future-admin-transfer-agent/transfer-agent.yaml       
 
-          - component: Transfer Agent
-            context: backend/worker_transfer
-            image: unbound-worker-transfer 
-            canary_files: |
-              shanghai-tke/applications/unbound-future-admin-transfer-agent/transfer-agent.yaml
-            stable_files: |
-              shanghai-tke/applications/unbound-future-admin-transfer-agent-cannary/transfer-agent.yaml
-
-          - component: FFmpeg Worker Ack
+          - component: FFmpeg Worker & Scanner
             context: backend/worker_ffmpeg
             image: unbound-worker-ffmpeg
             cannary_files: |
               shanghai-ack/applications/unbound-future-admin-ffmpeg-cannary/Deployment-ffmpeg-worker.yaml
-            stable_files: |
-              shanghai-ack/applications/unbound-future-admin-ffmpeg-cannary/Deployment-ffmpeg-worker.yaml
-
-          - component: FFmpeg Scanner Ack
-            context: backend/worker_ffmpeg
-            image: unbound-worker-ffmpeg
-            cannary_files: |
               shanghai-ack/applications/unbound-future-admin-ffmpeg-cannary/Deployment-ffmpeg-scanner.yaml
             stable_files: |
-              shanghai-ack/applications/unbound-future-admin-ffmpeg-cannary/Deployment-ffmpeg-scanner.yaml
+              shanghai-ack/applications/unbound-future-admin-ffmpeg/Deployment-ffmpeg-worker.yaml
+              shanghai-ack/applications/unbound-future-admin-ffmpeg/Deployment-ffmpeg-scanner.yaml
+              beijing-vke/applications/unbound-future-admin-ffmpeg/Deployment-ffmpeg-scanner.yaml
+              beijing-vke/applications/unbound-future-admin-ffmpeg/Deployment-ffmpeg-worker.yaml
     
     steps:
       - name: Checkout repository
