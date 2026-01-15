@@ -216,11 +216,11 @@ func getPendingJobs() ([]common.FfmpegJob, error) {
 		return nil, err
 	}
 	var filteredJobs []common.FfmpegJob
-	log.Println("Start filter jobs")
-	for _, job := range jobs {
-		log.Println("Job's endpoint is", job.Metadata.Endpoint)
-		if strings.Contains(job.Metadata.Endpoint, os.Getenv("ZONE")) {
-			if strings.Contains(job.Metadata.Endpoint, os.Getenv("PROVIDER")) {
+	if len(jobs) > 0 {
+		log.Println("Start filter jobs")
+		for _, job := range jobs {
+			log.Println("Job's endpoint is", job.Metadata.Endpoint)
+			if strings.Contains(job.Metadata.Endpoint, os.Getenv("ZONE")) && strings.Contains(job.Metadata.Endpoint, os.Getenv("PROVIDER")) {
 				filteredJobs = append(filteredJobs, job)
 			} else {
 				totalCount := 0
@@ -228,11 +228,10 @@ func getPendingJobs() ([]common.FfmpegJob, error) {
 				updateJobStatus(job.ID, "PENDING", &time, "Zone And Provider does not match", &totalCount)
 				log.Println("Job's endpoint is not in the provider, skip")
 			}
-		} else {
-			log.Println("Job's endpoint is not in the zone, skip")
 		}
-
+		return filteredJobs, nil
 	}
+	log.Println("No jobs found,Waiting......")
 	return filteredJobs, nil
 }
 
