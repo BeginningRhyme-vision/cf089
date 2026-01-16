@@ -81,6 +81,14 @@ func ListTransferJobs(c *gin.Context) {
 		return
 	}
 
+	// Count total records for pagination
+	var total int64
+	if err := database.DB.Model(&models.TransferJob{}).Count(&total).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.Header("X-Total-Count", strconv.FormatInt(total, 10))
 	c.JSON(http.StatusOK, jobs)
 }
 
