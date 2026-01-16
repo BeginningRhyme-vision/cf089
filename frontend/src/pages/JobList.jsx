@@ -12,17 +12,39 @@ const JobList = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [detailVisible, setDetailVisible] = useState(false);
   const [selectedJob, setSelectedJob] = useState(null);
+  const [pagination, setPagination] = useState({
+    current: 1,
+    pageSize: 10,
+    total: 0
+  });
   const [form] = Form.useForm();
 
-  const fetchJobs = async (background = false) => {
-    if (!background) setLoading(true);
+  const fetchJobs = async (page = 1, pageSize = 10) => {
+    setLoading(true);
     try {
-      const res = await api.get('/jobs/');
+      const res = await api.get(`/jobs/?page=${page}&limit=${pageSize}`);
       setJobs(res.data);
+      
+      // 假设后端在响应头中返回总数
+      if (res.headers && res.headers['x-total-count']) {
+        setPagination(prev => ({
+          ...prev,
+          current: page,
+          pageSize: pageSize,
+          total: parseInt(res.headers['x-total-count'])
+        }));
+      } else {
+        // 如果没有获取到总数，则基于当前数据长度进行更新
+        setPagination(prev => ({
+          ...prev,
+          current: page,
+          pageSize: pageSize
+        }));
+      }
     } catch (error) {
-      if (!background) message.error('Failed to load jobs');
+      message.error('Failed to load jobs');
     } finally {
-      if (!background) setLoading(false);
+      setLoading(false);
     }
   };
 
@@ -36,15 +58,9 @@ const JobList = () => {
   };
 
   useEffect(() => {
-    fetchJobs();
+    fetchJobs(pagination.current, pagination.pageSize);
     fetchMetadata();
-    
-    const interval = setInterval(() => {
-      fetchJobs(true);
-    }, 5000);
-
-    return () => clearInterval(interval);
-  }, []);
+  }, [pagination.current, pagination.pageSize]);
 
   const handleCreate = async () => {
     try {
@@ -57,7 +73,7 @@ const JobList = () => {
       await api.post('/jobs/', payload);
       message.success('Job created');
       setIsModalOpen(false);
-      fetchJobs();
+      fetchJobs(pagination.current, pagination.pageSize);
     } catch (error) {
       console.error(error);
     }
@@ -67,7 +83,7 @@ const JobList = () => {
     try {
       await api.post(`/jobs/${jobId}/${action}`);
       message.success(`Job ${action}ed`);
-      fetchJobs();
+      fetchJobs(pagination.current, pagination.pageSize);
     } catch (error) {
       message.error(`Failed to ${action} job`);
     }
@@ -77,7 +93,7 @@ const JobList = () => {
     try {
       await api.delete(`/jobs/${jobId}`);
       message.success('Job deleted');
-      fetchJobs();
+      fetchJobs(pagination.current, pagination.pageSize);
     } catch (error) {
       message.error('Failed to delete job');
     }
@@ -143,10 +159,24 @@ const JobList = () => {
         <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); setIsModalOpen(true); }}>
           New Transfer Job
         </Button>
-        <Button icon={<ReloadOutlined />} onClick={() => fetchJobs(false)}>Refresh</Button>
+        <Button icon={<ReloadOutlined />} onClick={() => fetchJobs(pagination.current, pagination.pageSize)}>Refresh</Button>
       </div>
       
-      <Table columns={columns} dataSource={jobs} rowKey="job_id" loading={loading} />
+      <Table 
+        columns={columns} 
+        dataSource={jobs} 
+        rowKey="job_id" 
+        loading={loading} 
+        pagination={{
+          current: pagination.current,
+          pageSize: pagination.pageSize,
+          total: pagination.total,
+          onChange: (page, pageSize) => setPagination(prev => ({ ...prev, current: page, pageSize })),
+          showSizeChanger: true,
+          showQuickJumper: true,
+          showTotal: (total) => `Total ${total} jobs`
+        }}
+      />
 
       <Modal 
         title="Create Transfer Job" 
@@ -213,7 +243,7 @@ const JobList = () => {
         width={700}
       >
         {selectedJob && (
-          <Descriptions column={1} bordered>
+          <Descriptions column={2} bordered>
             <Descriptions.Item label="Job ID">{selectedJob.job_id}</Descriptions.Item>
             <Descriptions.Item label="Client/Metadata ID">{selectedJob.metadata_id}</Descriptions.Item>
             <Descriptions.Item label="Source">{selectedJob.src_dir}</Descriptions.Item>
@@ -237,8 +267,9 @@ const JobList = () => {
             <Descriptions.Item label="End Time">{selectedJob.end_time || '-'}</Descriptions.Item>
             <Descriptions.Item label="Duration">{selectedJob.duration_seconds} seconds</Descriptions.Item>
             <Descriptions.Item label="Execution Count">{selectedJob.execution_count}</Descriptions.Item>
-            <Descriptions.Item label="Result Message">{selectedJob.result_message || '-'}</Descriptions.Item>
+            <Descriptions.Item label="Result Message">{selectedJob.result_message || 'N/A'}</Descriptions.Item>
             <Descriptions.Item label="Created At">{selectedJob.created_at}</Descriptions.Item>
+            <Descriptions.Item label="Updated At">{selectedJob.updated_at}</Descriptions.Item>
           </Descriptions>
         )}
       </Modal>

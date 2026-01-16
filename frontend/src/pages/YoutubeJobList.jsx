@@ -11,14 +11,36 @@ const YoutubeJobList = () => {
   const [loading, setLoading] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [fileList, setFileList] = useState([]);
+  const [pagination, setPagination] = useState({
+    current: 1,
+    pageSize: 10,
+    total: 0
+  });
   const [form] = Form.useForm();
   const navigate = useNavigate();
 
-  const fetchJobs = async () => {
+  const fetchJobs = async (page = 1, pageSize = 10) => {
     setLoading(true);
     try {
-      const res = await api.get('/youtube-jobs/');
+      const res = await api.get(`/youtube-jobs/?page=${page}&limit=${pageSize}`);
       setJobs(res.data);
+      
+      // 检查是否有 X-Total-Count 响应头
+      if (res.headers && res.headers['x-total-count']) {
+        setPagination(prev => ({
+          ...prev,
+          current: page,
+          pageSize: pageSize,
+          total: parseInt(res.headers['x-total-count'])
+        }));
+      } else {
+        // 如果没有获取到总数，则基于当前数据长度进行更新
+        setPagination(prev => ({
+          ...prev,
+          current: page,
+          pageSize: pageSize
+        }));
+      }
     } catch (error) {
       message.error('Failed to load jobs');
     } finally {
@@ -27,8 +49,8 @@ const YoutubeJobList = () => {
   };
 
   useEffect(() => {
-    fetchJobs();
-  }, []);
+    fetchJobs(pagination.current, pagination.pageSize);
+  }, [pagination.current, pagination.pageSize]);
 
   const handleCreate = async () => {
     try {
@@ -77,7 +99,7 @@ const YoutubeJobList = () => {
       setIsModalOpen(false);
       form.resetFields();
       setFileList([]);
-      fetchJobs();
+      fetchJobs(pagination.current, pagination.pageSize);
     } catch (error) {
       console.error(error);
       message.error('Failed to create job: ' + (error.response?.data?.error || error.message));
@@ -88,7 +110,7 @@ const YoutubeJobList = () => {
     try {
       const res = await api.delete('/youtube-jobs/pending');
       message.success(res.data.message || 'Pending jobs deleted');
-      fetchJobs();
+      fetchJobs(pagination.current, pagination.pageSize);
     } catch (error) {
       console.error(error);
       message.error('Failed to delete pending jobs');
@@ -99,23 +121,19 @@ const YoutubeJobList = () => {
     try {
       await api.delete(`/youtube-jobs/${jobId}`);
       message.success('Job deleted');
-      fetchJobs();
+      fetchJobs(pagination.current, pagination.pageSize);
     } catch (error) {
-      console.error(error);
       message.error('Failed to delete job');
     }
   };
 
   const uploadProps = {
-    onRemove: (file) => {
-      const index = fileList.indexOf(file);
-      const newFileList = fileList.slice();
-      newFileList.splice(index, 1);
-      setFileList(newFileList);
-    },
     beforeUpload: (file) => {
-      setFileList([...fileList, file]);
+      setFileList([file]);
       return false;
+    },
+    onRemove: (file) => {
+      setFileList([]);
     },
     fileList,
   };
@@ -132,44 +150,76 @@ const YoutubeJobList = () => {
   const columns = [
     { title: 'ID', dataIndex: 'id', key: 'id', width: 60 },
     { title: 'R2 Prefix', dataIndex: 'r2_prefix', key: 'r2_prefix' },
-    {
-      title: 'Status',
-      dataIndex: 'status',
+    { 
+      title: 'Download Mode', 
+      dataIndex: 'download_mode', 
+      key: 'download_mode',
+      width: 100,
+      render: (mode) => <Tag color="blue">{mode.toUpperCase()}</Tag>
+    },
+    { 
+      title: 'Status', 
+      dataIndex: 'status', 
       key: 'status',
+      width: 100,
       render: (status) => <Tag color={statusColors[status]}>{status}</Tag>
     },
-    {
-      title: 'Progress',
-      key: 'progress',
-      render: (_, record) => (
-        <Space size="middle">
-            <span style={{color: 'green'}}>Success: {record.success_count}</span>
-            <span style={{color: 'red'}}>Failed: {record.failed_count}</span>
-            <span style={{color: 'blue'}}>Pending: {record.pending_count}</span>
-            <span>Total: {record.total_count}</span>
-        </Space>
-      )
+    { 
+      title: 'Total', 
+      dataIndex: 'total_count', 
+      key: 'total_count',
+      width: 70
     },
-    { title: 'Created At', dataIndex: 'created_at', key: 'created_at' },
-    {
+    { 
+      title: 'Pending', 
+      dataIndex: 'pending_count', 
+      key: 'pending_count',
+      width: 80
+    },
+    { 
+      title: 'Running', 
+      dataIndex: 'running_count', 
+      key: 'running_count',
+      width: 80
+    },
+    { 
+      title: 'Success', 
+      dataIndex: 'success_count', 
+      key: 'success_count',
+      width: 80
+    },
+    { 
+      title: 'Failed', 
+      dataIndex: 'failed_count', 
+      key: 'failed_count',
+      width: 80
+    },
+    { 
+      title: 'Created At',
+      dataIndex: 'created_at',
+      key: 'created_at',
+      width: 180
+    },
+    { 
       title: 'Action',
       key: 'action',
+      width: 200,
       render: (_, record) => (
         <Space>
-          <Button
-            icon={<EyeOutlined />}
-            size="small"
+          <Button 
+            icon={<EyeOutlined />} 
+            size="small" 
             onClick={() => navigate(`/youtube-jobs/${record.id}`)}
           >
             Details
           </Button>
-          <Popconfirm
-            title="Are you sure delete this job?"
-            onConfirm={() => handleDeleteJob(record.id)}
-            okText="Yes"
+          <Popconfirm 
+            title="Are you sure delete this job?"  
+            onConfirm={() => handleDeleteJob(record.id)} 
+            okText="Yes" 
             cancelText="No"
           >
-             <Button icon={<DeleteOutlined />} size="small" danger>Delete</Button>
+            <Button icon={<DeleteOutlined />} size="small" danger>Delete</Button>
           </Popconfirm>
         </Space>
       ),
@@ -179,31 +229,43 @@ const YoutubeJobList = () => {
   return (
     <div>
       <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between' }}>
-        <Button type="primary" icon={<PlusOutlined />} onClick={() => setIsModalOpen(true)}>
-          New Youtube Job
-        </Button>
         <Space>
-          <Popconfirm
-            title="Delete all pending jobs?"
-            description="This action cannot be undone."
-            onConfirm={handleDeletePending}
-            okText="Yes"
+          <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); setIsModalOpen(true); setFileList([]); }}>
+            New YouTube Job
+          </Button>
+          <Popconfirm 
+            title="Are you sure delete ALL pending jobs?"  
+            onConfirm={handleDeletePending} 
+            okText="Yes" 
             cancelText="No"
           >
-            <Button danger icon={<DeleteOutlined />}>Delete Pending</Button>
+            <Button danger>Delete Pending</Button>
           </Popconfirm>
-          <Button icon={<ReloadOutlined />} onClick={fetchJobs}>Refresh</Button>
         </Space>
+        <Button icon={<ReloadOutlined />} onClick={() => fetchJobs(pagination.current, pagination.pageSize)}>Refresh</Button>
       </div>
       
-      <Table columns={columns} dataSource={jobs} rowKey="id" loading={loading} />
+      <Table 
+        columns={columns} 
+        dataSource={jobs} 
+        rowKey="id" 
+        loading={loading} 
+        pagination={{
+          current: pagination.current,
+          pageSize: pagination.pageSize,
+          total: pagination.total,
+          onChange: (page, pageSize) => handleTableChange(page, pageSize),
+          showSizeChanger: true,
+          showQuickJumper: true,
+          showTotal: (total) => `Total ${total} jobs`
+        }}
+      />
 
       <Modal 
-        title="Create Youtube Job" 
+        title="Create YouTube Job" 
         open={isModalOpen} 
         onOk={handleCreate} 
-        onCancel={() => setIsModalOpen(false)}
-        width={800}
+        onCancel={() => { setIsModalOpen(false); form.resetFields(); setFileList([]); }}
       >
         <Form form={form} layout="vertical">
           <Form.Item 

@@ -16,6 +16,26 @@ const PrivateRoute = ({ children }) => {
   return token ? children : <Navigate to="/login" />;
 };
 
+// 检查是否为开发环境，如果是则自动登录模拟用户
+if (process.env.NODE_ENV === 'development') {
+  const token = useAuthStore.getState().token;
+  const user = useAuthStore.getState().user;
+  
+  // 如果没有token且在开发环境中，自动设置模拟用户
+  if (!token && typeof window !== 'undefined') {
+    // 模拟用户数据
+    const mockUser = {
+      id: 1,
+      name: 'Development User',
+      email: 'dev@example.com',
+      avatar_url: 'https://via.placeholder.com/150'
+    };
+    
+    // 设置模拟token和用户信息
+    useAuthStore.getState().setAuth('mock-token-dev', mockUser);
+  }
+}
+
 function App() {
   return (
     <Routes>

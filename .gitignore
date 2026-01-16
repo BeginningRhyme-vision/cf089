@@ -39,3 +39,8 @@ frontend.pid
 # Logs
 *.log
 nohup.out
+
+
+# frontend 
+frontend/vite.config.js
+frontend/package-lock.json
