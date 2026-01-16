@@ -15,6 +15,7 @@ env:
   REGISTRY: image.unboundfuture.ai
   ARGOCD_BRANCH: main
   MAGIC_STRING: "[deploy-stable]"
+  MAGIC_STRING_ALL: "[deploy-all]" # 1. 新增：全量部署的触发词
 
 jobs:
   build-and-push:
@@ -62,14 +63,20 @@ jobs:
           - component: FFmpeg Worker & Scanner
             context: backend/worker_ffmpeg
             image: unbound-worker-ffmpeg
-            cannary_files: |
+            canary_files: |
               shanghai-ack/applications/unbound-future-admin-ffmpeg-cannary/Deployment-ffmpeg-worker.yaml
               shanghai-ack/applications/unbound-future-admin-ffmpeg-cannary/Deployment-ffmpeg-scanner.yaml
+              beijing-vke/applications/unbound-future-admin-ffmpeg-cannary/Deployment-ffmpeg-scanner.yaml
+              beijing-vke/applications/unbound-future-admin-ffmpeg-cannary/Deployment-ffmpeg-worker.yaml
+              shanghai-vke/applications/unbound-future-admin-ffmpeg-cannary/deployment-ffmpeg-scanner.yaml
+              shanghai-vke/applications/unbound-future-admin-ffmpeg-cannary/deployment-ffmpeg-worker.yaml             
             stable_files: |
               shanghai-ack/applications/unbound-future-admin-ffmpeg/Deployment-ffmpeg-worker.yaml
               shanghai-ack/applications/unbound-future-admin-ffmpeg/Deployment-ffmpeg-scanner.yaml
               beijing-vke/applications/unbound-future-admin-ffmpeg/Deployment-ffmpeg-scanner.yaml
               beijing-vke/applications/unbound-future-admin-ffmpeg/Deployment-ffmpeg-worker.yaml
+              shanghai-vke/applications/unbound-future-admin-ffmpeg/deployment-ffmpeg-scanner.yaml
+              shanghai-vke/applications/unbound-future-admin-ffmpeg/deployment-ffmpeg-worker.yaml
     
     steps:
       - name: Checkout repository
@@ -99,11 +106,21 @@ jobs:
           if [[ "${{ github.ref_type }}" == "tag" ]]; then
             echo "🚀 Trigger: Tag Release"
             MODE="STABLE"
-            TARGET_FILES="${{ matrix.stable_files }}"
+            TARGET_FILES="${{ matrix.stable_files }}
+            ${{ matrix.canary_files }}"
             DOCKER_TAG="${{ github.ref_name }}"
 
           else
-            if [[ "$COMMIT_MSG" == *"${{ env.MAGIC_STRING }}"* ]]; then
+            # 3. 逻辑修改：优先判断 [deploy-all]，然后判断 [deploy-stable]，最后默认 Canary
+            if [[ "$COMMIT_MSG" == *"${{ env.MAGIC_STRING_ALL }}"* ]]; then
+              echo "🌍 Trigger: Deploy ALL Environments (Magic String detected)"
+              MODE="ALL_ENVS"
+              # 将 stable 和 canary 的文件列表拼接
+              TARGET_FILES="${{ matrix.stable_files }}
+              ${{ matrix.canary_files }}"
+              DOCKER_TAG="sha-${{ github.sha }}"
+            
+            elif [[ "$COMMIT_MSG" == *"${{ env.MAGIC_STRING }}"* ]]; then
               echo "🔥 Trigger: Dev Force Stable Update (Magic String detected)"
               MODE="STABLE_FROM_DEV"
               TARGET_FILES="${{ matrix.stable_files }}"
@@ -116,6 +133,7 @@ jobs:
             fi
           fi
           
+          # 将多行内容写入 GITHUB_ENV
           echo "TARGET_FILES<<EOF" >> $GITHUB_ENV
           echo "$TARGET_FILES" >> $GITHUB_ENV
           echo "EOF" >> $GITHUB_ENV
