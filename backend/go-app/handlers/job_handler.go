@@ -491,25 +491,48 @@ func UpdateTransferJobStatus(c *gin.Context) {
 }
 
 func cleanupTransferJobRedis(ctx context.Context, jobID uint) {
-	// 1. Get all task IDs
-	jobKey := fmt.Sprintf("tx:job:%d:tasks", jobID)
+	pipe := database.RDB.Pipeline()
 
-	taskIDs, err := database.RDB.ZRange(ctx, jobKey, 0, -1).Result()
-	if err == nil && len(taskIDs) > 0 {
-		pipe := database.RDB.Pipeline()
-		for _, tid := range taskIDs {
-			pipe.Del(ctx, fmt.Sprintf("tx:task:%s", tid))
-		}
-		pipe.Exec(ctx)
+	// 1. 清理旧格式 (Legacy)
+	legacyJobKey := fmt.Sprintf("tx:job:%d:tasks", jobID)
+	legacyDedupKey := fmt.Sprintf("tx:job:%d:dedup", jobID)
+	legacyOffset := fmt.Sprintf("tx:job:%d:offset", jobID)
+	legacyLock := fmt.Sprintf("tx:job:%d:lock", jobID)
+
+	// 使用 Unlink 异步删除，避免阻塞
+	pipe.Unlink(ctx, legacyJobKey, legacyDedupKey, legacyOffset, legacyLock)
+
+	// 尝试清理旧的 Task 详情
+	taskIDs, _ := database.RDB.ZRange(ctx, legacyJobKey, 0, -1).Result()
+	for _, tid := range taskIDs {
+		pipe.Unlink(ctx, fmt.Sprintf("tx:task:{%d}:%s", jobID, tid))
 	}
 
-	// 2. Delete Job Key, metadata and dedup
-	database.RDB.Del(ctx, jobKey)
-	database.RDB.Del(ctx, fmt.Sprintf("tx:job:%d:dedup", jobID))
-	database.RDB.Del(ctx, fmt.Sprintf("tx:job:%d:lock", jobID))
-	database.RDB.Del(ctx, fmt.Sprintf("tx:job:%d:offset", jobID))
+	// 2. 清理新格式 (Sharded)
+	// 2.1 清理 Dedup 分片
+	for i := 0; i < 256; i++ { // DedupShards = 256
+		key := fmt.Sprintf("tx:job:%d:dedup:%d", jobID, i)
+		pipe.Unlink(ctx, key)
+	}
 
-	// 3. Mark as cleaned in DB
+	// 2.2 清理 Offset 和 MaxID
+	pipe.Unlink(ctx, fmt.Sprintf("tx:job:%d:offset", jobID))
+	pipe.Unlink(ctx, fmt.Sprintf("tx:job:%d:max_id", jobID))
+
+	// 2.3 清理 Task 分片 (Bucket)
+	for i := 0; i < 200; i++ {
+		bucketKey := fmt.Sprintf("tx:job:%d:tasks:%d", jobID, i)
+		pipe.Unlink(ctx, bucketKey)
+	}
+
+	// 2.4 清理新格式的 Task 详情 Key
+
+	_, err := pipe.Exec(ctx)
+	if err != nil {
+		fmt.Printf("Error cleaning up redis for job %d: %v\n", jobID, err)
+	}
+
+	// 3. 标记数据库
 	database.DB.Model(&models.TransferJob{}).Where("job_id = ?", jobID).Update("redis_cleaned", true)
 }
 

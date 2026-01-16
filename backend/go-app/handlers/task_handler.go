@@ -4,28 +4,31 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"sync"
 	"time"
 
-	"github.com/gin-gonic/gin"
-	"github.com/redis/go-redis/v9"
 	"unbound-future-backend/database"
 	"unbound-future-backend/metrics"
 	"unbound-future-backend/models"
+
+	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 )
 
 // Global Buffer Manager
 var (
-	jobBuffers   = make(map[int64]chan models.YoutubeTask)
-	txJobBuffers = make(map[int64]chan models.TransferTask)
+	jobBuffers       = make(map[int64]chan models.YoutubeTask)
+	txJobBuffers     = make(map[int64]chan models.TransferTask)
 	ffmpegJobBuffers = make(map[int64]chan models.FfmpegTask)
-	bufferMutex  sync.RWMutex
-	fillingMap   sync.Map // prevent concurrent fills for same job
+	bufferMutex      sync.RWMutex
+	fillingMap       sync.Map // prevent concurrent fills for same job
 
 	// Stats Buffer for Postgres Sync
-	statsBuffer = make(map[int64]*JobDelta)
-	statsMutex  sync.Mutex
+	statsBuffer     = make(map[int64]*JobDelta)
+	statsMutex      sync.Mutex
+	jobShardingMode sync.Map
 )
 
 type JobDelta struct {
@@ -40,7 +43,47 @@ const (
 	FetchBatchSize = 100
 	BufferLowWater = 500 // Refill when below this
 	LockExpiration = 30 * time.Second
+	DedupShards    = 256   // 去重 Hash 分成 256 片
+	TaskBucketSize = 50000 // 任务 ZSet 每 5 万个 ID 分一个桶
 )
+
+// 获取 job 模式
+func isJobSharded(ctx context.Context, jobID int64) bool {
+	// 1. 先查内存缓存
+	if val, ok := jobShardingMode.Load(jobID); ok {
+		return val.(bool)
+	}
+
+	// 2. 内存没有，去 Redis 探测旧 Key 是否存在
+	oldKey := fmt.Sprintf("tx:job:%d:tasks", jobID)
+	exists, _ := database.RDB.Exists(ctx, oldKey).Result()
+
+	// 如果旧 Key 存在，说明是旧任务 (isSharded = false)
+	// 如果旧 Key 不存在，默认为新任务 (isSharded = true)
+	isSharded := (exists == 0)
+
+	// 写入缓存
+	jobShardingMode.Store(jobID, isSharded)
+	return isSharded
+}
+
+// 计算去重 Key 的分片
+func getDedupShardKey(jobID int64, src string) string {
+	h := fnv32(src)
+	shard := h % DedupShards
+	return fmt.Sprintf("tx:job:%d:dedup:%d", jobID, shard)
+}
+
+// 计算任务 Bucket Key
+func getTaskBucketKey(jobID int64, taskID int64) string {
+	bucket := taskID / TaskBucketSize
+	return fmt.Sprintf("tx:job:%d:tasks:%d", jobID, bucket)
+}
+func fnv32(key string) uint32 {
+	h := fnv.New32a()
+	h.Write([]byte(key))
+	return h.Sum32()
+}
 
 // StartBufferService initializes the background pre-fetching service
 func StartBufferService() {
@@ -116,7 +159,7 @@ func scanStuckYoutubeTasks() {
 						data, _ := json.Marshal(t)
 						pipe.Set(ctx, fmt.Sprintf("task:%d", t.ID), data, 0)
 						pipe.RPush(ctx, "queue:youtube:metadata_retry", t.ID)
-						
+
 						trackStatusChange(t.JobID, "RUNNING", "PENDING")
 						hasUpdates = true
 					}
@@ -168,9 +211,9 @@ func flushStats() {
 				END
 			WHERE id = ?
 		`
-		database.DB.Exec(query, 
+		database.DB.Exec(query,
 			delta.Pending, delta.Running, delta.Success, delta.Failed, // For count updates
-			delta.Running, // For PENDING->RUNNING check
+			delta.Running,                // For PENDING->RUNNING check
 			delta.Pending, delta.Running, // For RUNNING->COMPLETED check
 			jobID,
 		)
@@ -414,10 +457,10 @@ func BatchInsert(c *gin.Context) {
 		if err != nil {
 			continue
 		}
-		
+
 		taskKey := fmt.Sprintf("task:%d", task.ID)
 		jobKey := fmt.Sprintf("job:%d:tasks", task.JobID)
-		
+
 		pipe.Set(ctx, taskKey, data, 0)
 		pipe.ZAdd(ctx, jobKey, redis.Z{
 			Score:  float64(task.ID),
@@ -467,7 +510,7 @@ func BatchUpdate(c *gin.Context) {
 		if val == nil {
 			continue // Task not found
 		}
-		
+
 		var existing models.YoutubeTask
 		if err := json.Unmarshal([]byte(val.(string)), &existing); err != nil {
 			continue
@@ -531,18 +574,18 @@ func BatchUpdate(c *gin.Context) {
 		if err != nil {
 			continue
 		}
-		
+
 		taskKey := fmt.Sprintf("task:%d", existing.ID)
 		pipe.Set(ctx, taskKey, data, 0)
-        
-        // Ensure in Job ZSet (idempotent)
-        if existing.JobID != 0 {
-             jobKey := fmt.Sprintf("job:%d:tasks", existing.JobID)
-             pipe.ZAdd(ctx, jobKey, redis.Z{
-                Score:  float64(existing.ID),
-                Member: existing.ID,
-             })
-        }
+
+		// Ensure in Job ZSet (idempotent)
+		if existing.JobID != 0 {
+			jobKey := fmt.Sprintf("job:%d:tasks", existing.JobID)
+			pipe.ZAdd(ctx, jobKey, redis.Z{
+				Score:  float64(existing.ID),
+				Member: existing.ID,
+			})
+		}
 
 		// Status Machine Transition: METADATA_FETCHED -> Ready for Download
 		if u.Status == "METADATA_FETCHED" {
@@ -594,13 +637,13 @@ func AcquireTasks(c *gin.Context) {
 			if err != nil {
 				continue
 			}
-			
+
 			// Fetch task details
 			taskData, err := database.RDB.Get(ctx, fmt.Sprintf("task:%s", idStr)).Result()
 			if err == nil {
 				var t models.YoutubeTask
 				if err := json.Unmarshal([]byte(taskData), &t); err == nil {
-					// Optimization: Check if actually METADATA_FETCHED? 
+					// Optimization: Check if actually METADATA_FETCHED?
 					// Ideally yes, but queue implies readiness.
 					tasks = append(tasks, t)
 				}
@@ -608,7 +651,7 @@ func AcquireTasks(c *gin.Context) {
 		}
 	} else {
 		// Metadata stage
-		
+
 		// 1. Check Retry Queue
 		for len(tasks) < req.Limit {
 			idStr, err := database.RDB.LPop(ctx, "queue:youtube:metadata_retry").Result()
@@ -653,11 +696,11 @@ func AcquireTasks(c *gin.Context) {
 			if len(tasks) >= req.Limit {
 				break
 			}
-			
+
 			bufferMutex.RLock()
 			ch, ok := jobBuffers[jid]
 			bufferMutex.RUnlock()
-			
+
 			if !ok {
 				continue
 			}
@@ -666,15 +709,15 @@ func AcquireTasks(c *gin.Context) {
 			if len(ch) < BufferLowWater {
 				triggerRefill(jid)
 			}
-			
+
 			// Drain what we can
-			loop:
+		loop:
 			for len(tasks) < req.Limit {
 				select {
 				case t := <-ch:
 					// Check if status is PENDING?
 					// The buffer *should* ideally only contain pending, but if we have restarts...
-					// For now assume buffer is raw tasks from ZRange. 
+					// For now assume buffer is raw tasks from ZRange.
 					// We might want to check status if we want strict PENDING.
 					// But let's assume Python worker handles idempotency.
 					tasks = append(tasks, t)
@@ -779,48 +822,48 @@ func BatchDelete(c *gin.Context) {
 	}
 
 	ctx := context.Background()
-	
+
 	// First, we need to know which job these tasks belong to, to remove from ZSet.
 	// We can MGet them.
 	var keys []string
 	for _, id := range req.IDs {
 		keys = append(keys, fmt.Sprintf("task:%d", id))
 	}
-    
-    // We handle this in chunks or just MGet all. Assuming reasonable batch size.
+
+	// We handle this in chunks or just MGet all. Assuming reasonable batch size.
 	jsonList, err := database.RDB.MGet(ctx, keys...).Result()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch tasks for deletion: " + err.Error()})
 		return
 	}
 
-    pipe := database.RDB.Pipeline()
-    
-    for i, item := range jsonList {
-        if item == nil {
-            continue
-        }
-        str, ok := item.(string)
-        if !ok {
-            continue
-        }
-        
-        var task models.YoutubeTask
-        if err := json.Unmarshal([]byte(str), &task); err == nil {
-             // Remove from Job ZSet
-             jobKey := fmt.Sprintf("job:%d:tasks", task.JobID)
-             pipe.ZRem(ctx, jobKey, task.ID)
-        }
-        
-        // Remove Task Key
-        pipe.Del(ctx, keys[i])
-    }
-    
-    _, err = pipe.Exec(ctx)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete tasks: " + err.Error()})
-        return
-    }
+	pipe := database.RDB.Pipeline()
+
+	for i, item := range jsonList {
+		if item == nil {
+			continue
+		}
+		str, ok := item.(string)
+		if !ok {
+			continue
+		}
+
+		var task models.YoutubeTask
+		if err := json.Unmarshal([]byte(str), &task); err == nil {
+			// Remove from Job ZSet
+			jobKey := fmt.Sprintf("job:%d:tasks", task.JobID)
+			pipe.ZRem(ctx, jobKey, task.ID)
+		}
+
+		// Remove Task Key
+		pipe.Del(ctx, keys[i])
+	}
+
+	_, err = pipe.Exec(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete tasks: " + err.Error()})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
 }
@@ -908,8 +951,112 @@ type TransferTaskInput struct {
 	Size int64  `json:"size"`
 }
 
-// AddTransferTasksToJob adds new transfer tasks to an existing job in Redis with deduplication
 func AddTransferTasksToJob(jobID int64, inputs []TransferTaskInput) (int, error) {
+	if len(inputs) == 0 {
+		return 0, nil
+	}
+
+	// 内存去重 (无论新旧都需要)
+	uniqueInputs := make([]TransferTaskInput, 0, len(inputs))
+	seen := make(map[string]bool)
+	for _, input := range inputs {
+		if !seen[input.Src] {
+			seen[input.Src] = true
+			uniqueInputs = append(uniqueInputs, input)
+		}
+	}
+	inputs = uniqueInputs
+
+	if isJobSharded(context.Background(), jobID) {
+		return addShardedTransferTasks(jobID, inputs) // 【新】分片逻辑
+	} else {
+		return addLegacyTransferTasks(jobID, inputs) // 【旧】保持原有逻辑
+	}
+}
+
+// 【新逻辑】分片写入
+func addShardedTransferTasks(jobID int64, inputs []TransferTaskInput) (int, error) {
+	ctx := context.Background()
+	pipe := database.RDB.Pipeline()
+
+	// 1. Redis 去重 (分片检查)
+	// 使用 Pipeline 批量检查不同分片的 HExists
+	dedupCmds := make([]*redis.BoolCmd, len(inputs))
+	for i, input := range inputs {
+		key := getDedupShardKey(jobID, input.Src)
+		dedupCmds[i] = pipe.HExists(ctx, key, input.Src)
+	}
+
+	if _, err := pipe.Exec(ctx); err != nil {
+		return 0, err
+	}
+
+	var newInputs []TransferTaskInput
+	for i, cmd := range dedupCmds {
+		if !cmd.Val() {
+			newInputs = append(newInputs, inputs[i])
+		}
+	}
+
+	if len(newInputs) == 0 {
+		return 0, nil
+	}
+
+	// 2. 生成 ID (使用独立的计数器 Key)
+	// tx:job:11:max_id
+	idCounterKey := fmt.Sprintf("tx:job:%d:max_id", jobID)
+	endID, err := database.RDB.IncrBy(ctx, idCounterKey, int64(len(newInputs))).Result()
+	if err != nil {
+		return 0, err
+	}
+	startID := endID - int64(len(newInputs)) + 1
+
+	// 3. 批量写入 (分片 ZSet + 分片 Dedup)
+	pipe = database.RDB.Pipeline()
+	now := time.Now()
+	var tasks []models.TransferTask
+
+	for i, input := range newInputs {
+		taskID := startID + int64(i)
+
+		task := models.TransferTask{
+			ID:        taskID,
+			JobID:     jobID,
+			Src:       input.Src,
+			Size:      input.Size,
+			Status:    "PENDING",
+			CreatedAt: now,
+			UpdatedAt: now,
+		}
+		tasks = append(tasks, task)
+
+		data, _ := json.Marshal(task)
+
+		// 3.1 任务详情 (String) - 可以保持原样，或也分片，这里沿用原命名习惯
+		taskKey := fmt.Sprintf("tx:task:%d:%d", jobID, task.ID)
+		pipe.Set(ctx, taskKey, data, 0)
+
+		// 3.2 任务队列 (分桶 ZSet)
+		bucketKey := getTaskBucketKey(jobID, task.ID)
+		pipe.ZAdd(ctx, bucketKey, redis.Z{
+			Score:  float64(task.ID),
+			Member: task.ID,
+		})
+
+		// 3.3 去重记录 (分片 Hash)
+		dedupShard := getDedupShardKey(jobID, input.Src)
+		pipe.HSet(ctx, dedupShard, input.Src, task.ID)
+	}
+
+	if _, err := pipe.Exec(ctx); err != nil {
+		return 0, err
+	}
+
+	return len(tasks), nil
+}
+
+// AddTransferTasksToJob adds new transfer tasks to an existing job in Redis with deduplication
+func addLegacyTransferTasks(jobID int64, inputs []TransferTaskInput) (int, error) {
 	if len(inputs) == 0 {
 		return 0, nil
 	}
@@ -970,7 +1117,7 @@ func AddTransferTasksToJob(jobID int64, inputs []TransferTaskInput) (int, error)
 
 	// 3. Prepare tasks and Pipeline Insert
 	pipe := database.RDB.Pipeline()
-	
+
 	for i, input := range newInputs {
 		task := models.TransferTask{
 			ID:        startID + int64(i),
@@ -1074,8 +1221,143 @@ func triggerTxRefill(jobID int64) {
 		}(jobID)
 	}
 }
-
 func fillTxJobBuffer(jobID int64) {
+	ctx := context.Background()
+	// 统一使用旧 Key 格式做锁（兼容性好）
+	lockKey := fmt.Sprintf("tx:job:%d:lock", jobID)
+
+	ok, err := database.RDB.SetNX(ctx, lockKey, 1, LockExpiration).Result()
+	if err != nil || !ok {
+		return
+	}
+	defer database.RDB.Del(ctx, lockKey)
+
+	// 路由
+	if isJobSharded(ctx, jobID) {
+		fillShardedTxBuffer(ctx, jobID) // 【新】
+	} else {
+		fillLeagcyTxJobBuffer(jobID) // 【旧】
+	}
+}
+
+// 【新逻辑】分片读取
+func fillShardedTxBuffer(ctx context.Context, jobID int64) {
+	// 新 Offset Key (无 {})
+	offsetKey := fmt.Sprintf("tx:job:%d:offset", jobID)
+	offsetStr, _ := database.RDB.Get(ctx, offsetKey).Result()
+	var lastTaskID int64
+	if offsetStr != "" {
+		fmt.Sscanf(offsetStr, "%d", &lastTaskID)
+	}
+
+	// 下一个要读的 ID
+	startID := lastTaskID + 1
+
+	// 计算 Bucket
+	bucketKey := getTaskBucketKey(jobID, startID)
+
+	// 使用 ZRangeByScore 按 ID 范围读取
+	// Min: startID, Max: +inf
+	ids, err := database.RDB.ZRangeByScore(ctx, bucketKey, &redis.ZRangeBy{
+		Min:    fmt.Sprintf("%d", startID),
+		Max:    "+inf",
+		Count:  int64(FetchBatchSize),
+		Offset: 0,
+	}).Result()
+
+	if err != nil {
+		return
+	}
+
+	// 如果当前 bucket 读不到数据，有可能是因为刚好跨 bucket 了
+	// 尝试读下一个 bucket (简单容错)
+	if len(ids) == 0 {
+		nextStartID := (startID/TaskBucketSize + 1) * TaskBucketSize
+		nextBucketKey := getTaskBucketKey(jobID, nextStartID)
+		ids, _ = database.RDB.ZRangeByScore(ctx, nextBucketKey, &redis.ZRangeBy{
+			Min:    fmt.Sprintf("%d", nextStartID),
+			Max:    "+inf",
+			Count:  int64(FetchBatchSize),
+			Offset: 0,
+		}).Result()
+	}
+
+	if len(ids) == 0 {
+		return
+	}
+
+	// 获取详情 (注意：这里需要兼容 Task Key 的格式，建议 MGET 时尝试两种格式，或者统一格式)
+	// 在 addShardedTransferTasks 中我们使用了 tx:task:%d:%d (无 {})
+	var keys []string
+	for _, id := range ids {
+		keys = append(keys, fmt.Sprintf("tx:task:%d:%s", jobID, id))
+	}
+
+	jsonList, err := database.RDB.MGet(ctx, keys...).Result()
+	if err != nil {
+		return
+	}
+
+	bufferMutex.RLock()
+	ch, exists := txJobBuffers[jobID]
+	bufferMutex.RUnlock()
+	if !exists {
+		return
+	}
+
+	processed := 0
+	var maxID int64 = 0
+
+	for i, item := range jsonList {
+		if item == nil {
+			continue
+		}
+		str, ok := item.(string)
+		if !ok {
+			continue
+		}
+
+		var task models.TransferTask
+		if err := json.Unmarshal([]byte(str), &task); err == nil {
+			if task.Status == "PENDING" {
+				select {
+				case ch <- task:
+					processed++
+					// 记录读取到的最大 ID
+					if task.ID > maxID {
+						maxID = task.ID
+					}
+				default:
+					// Buffer full
+					goto FINISH
+				}
+			} else {
+				// 就算不是 PENDING，也算处理过了（跳过），需要更新 offset
+				// 只是这里我们假设 ZRange 取出的都是有效 ID，如果这里 continue 了，
+				// 我们依然需要推进 maxID，否则会死循环卡在非 PENDING 任务上。
+				// 由于我们是按 ID 顺序读的，我们应该以 ids[i] 来更新 maxID
+				// 简单起见，我们在 FINISH 块用 ids 的最后一个值更新
+			}
+		}
+
+		// 辅助更新 maxID (以防上面的 task 解析失败或跳过)
+		var currentID int64
+		fmt.Sscanf(ids[i], "%d", &currentID)
+		if currentID > maxID {
+			maxID = currentID
+		}
+	}
+
+FINISH:
+	if processed > 0 || maxID > lastTaskID {
+		// 如果 Buffer 满了提前退出，maxID 应该是已处理的最后一个。
+		// 如果全部处理完，maxID 是 ids 的最后一个。
+		if maxID > 0 {
+			database.RDB.Set(ctx, offsetKey, maxID, 0)
+		}
+	}
+}
+func fillLeagcyTxJobBuffer(jobID int64) {
 	ctx := context.Background()
 	lockKey := fmt.Sprintf("tx:job:%d:lock", jobID)
 
@@ -1123,21 +1405,25 @@ func fillTxJobBuffer(jobID int64) {
 	processed := 0
 	for _, item := range jsonList {
 		processed++
-		if item == nil { continue }
+		if item == nil {
+			continue
+		}
 		str, ok := item.(string)
-		if !ok { continue }
+		if !ok {
+			continue
+		}
 
 		var task models.TransferTask
 		if err := json.Unmarshal([]byte(str), &task); err == nil {
 			if task.Status != "PENDING" {
-				continue 
+				continue
 			}
 			select {
 			case ch <- task:
 				count++
 			default:
 				// Buffer full, back off the 'processed' count for this item as we didn't consume it
-				processed-- 
+				processed--
 				goto FINISH
 			}
 		}
@@ -1160,7 +1446,9 @@ func AcquireTransferTasks(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	if req.Limit <= 0 { req.Limit = 10 }
+	if req.Limit <= 0 {
+		req.Limit = 10
+	}
 
 	tasks := []models.TransferTask{}
 
@@ -1183,18 +1471,22 @@ func AcquireTransferTasks(c *gin.Context) {
 	// We might serve stale buffer for stopped jobs. Acceptable for now.
 
 	for _, jid := range jobIDs {
-		if len(tasks) >= req.Limit { break }
+		if len(tasks) >= req.Limit {
+			break
+		}
 
 		bufferMutex.RLock()
 		ch, ok := txJobBuffers[jid]
 		bufferMutex.RUnlock()
-		if !ok { continue }
+		if !ok {
+			continue
+		}
 
 		if len(ch) < BufferLowWater {
 			triggerTxRefill(jid)
 		}
 
-		loop:
+	loop:
 		for len(tasks) < req.Limit {
 			select {
 			case t := <-ch:
@@ -1213,7 +1505,7 @@ func BatchUpdateTransfer(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
-	
+
 	if len(updates) == 0 {
 		c.JSON(http.StatusOK, gin.H{"status": "no updates"})
 		return
@@ -1224,8 +1516,10 @@ func BatchUpdateTransfer(c *gin.Context) {
 
 	for _, u := range updates {
 		data, err := json.Marshal(u)
-		if err != nil { continue }
-		
+		if err != nil {
+			continue
+		}
+
 		pipe.Set(ctx, fmt.Sprintf("tx:task:%d", u.ID), data, 0)
 	}
 
@@ -1237,746 +1531,481 @@ func BatchUpdateTransfer(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"status": "updated"})
 
+}
+
+// --- Ffmpeg Task Logic ---
+
+func AddFfmpegTasksToJob(jobID int64, tasks []models.FfmpegTask) (int, error) {
+
+	if len(tasks) == 0 {
+
+		return 0, nil
+
 	}
 
-	
+	ctx := context.Background()
 
-	// --- Ffmpeg Task Logic ---
+	jobKey := fmt.Sprintf("ff:job:%d:tasks", jobID)
 
-	
+	// Determine start ID
 
-	func AddFfmpegTasksToJob(jobID int64, tasks []models.FfmpegTask) (int, error) {
+	lastIDs, err := database.RDB.ZRevRange(ctx, jobKey, 0, 0).Result()
 
-		if len(tasks) == 0 {
+	var startID int64
 
-			return 0, nil
+	if err != nil || len(lastIDs) == 0 {
 
-		}
+		startID = jobID * 1000000
 
-	
+	} else {
 
-		ctx := context.Background()
+		fmt.Sscanf(lastIDs[0], "%d", &startID)
 
-		jobKey := fmt.Sprintf("ff:job:%d:tasks", jobID)
+		startID++
 
-	
+	}
 
-		// Determine start ID
+	now := time.Now()
 
-		lastIDs, err := database.RDB.ZRevRange(ctx, jobKey, 0, 0).Result()
+	pipe := database.RDB.Pipeline()
 
-		var startID int64
+	for i, task := range tasks {
 
-		if err != nil || len(lastIDs) == 0 {
+		task.ID = startID + int64(i)
 
-			startID = jobID * 1000000
+		task.JobID = jobID
 
-		} else {
+		task.CreatedAt = now
 
-			fmt.Sscanf(lastIDs[0], "%d", &startID)
+		task.UpdatedAt = now
 
-			startID++
-
-		}
-
-	
-
-		now := time.Now()
-
-		pipe := database.RDB.Pipeline()
-
-	
-
-		for i, task := range tasks {
-
-			task.ID = startID + int64(i)
-
-			task.JobID = jobID
-
-			task.CreatedAt = now
-
-			task.UpdatedAt = now
-
-			
-
-			data, err := json.Marshal(task)
-
-			if err != nil {
-
-				continue
-
-			}
-
-	
-
-			taskKey := fmt.Sprintf("ff:task:%d", task.ID)
-
-			pipe.Set(ctx, taskKey, data, 0)
-
-			pipe.ZAdd(ctx, jobKey, redis.Z{
-
-				Score:  float64(task.ID),
-
-				Member: task.ID,
-
-			})
-
-		}
-
-	
-
-		_, err = pipe.Exec(ctx)
+		data, err := json.Marshal(task)
 
 		if err != nil {
 
-			return 0, err
+			continue
 
 		}
 
-		return len(tasks), nil
+		taskKey := fmt.Sprintf("ff:task:%d", task.ID)
+
+		pipe.Set(ctx, taskKey, data, 0)
+
+		pipe.ZAdd(ctx, jobKey, redis.Z{
+
+			Score: float64(task.ID),
+
+			Member: task.ID,
+		})
 
 	}
 
-	
+	_, err = pipe.Exec(ctx)
 
-	func checkAndRefillFfmpegBuffers() {
-		var jobs []models.FfmpegJob
-		if err := database.DB.Where("status IN ?", []models.JobStatus{models.StatusPending, models.StatusRunning}).Find(&jobs).Error; err != nil {
-			return
-		}
+	if err != nil {
 
-		ctx := context.Background()
-
-		for _, job := range jobs {
-			jid := int64(job.ID)
-			ensureFfmpegBuffer(jid)
-
-			bufferMutex.RLock()
-			ch, exists := ffmpegJobBuffers[jid]
-			bufferMutex.RUnlock()
-
-			if !exists {
-				continue
-			}
-
-			if job.PendingCount > 0 && len(ch) == 0 {
-				key := fmt.Sprintf("ff:%d", jid)
-				if _, filling := fillingMap.Load(key); !filling {
-					offsetKey := fmt.Sprintf("ff:job:%d:offset", jid)
-					jobKey := fmt.Sprintf("ff:job:%d:tasks", jid)
-
-					total, _ := database.RDB.ZCard(ctx, jobKey).Result()
-					offsetStr, _ := database.RDB.Get(ctx, offsetKey).Result()
-					var offset int64
-					if offsetStr != "" {
-						fmt.Sscanf(offsetStr, "%d", &offset)
-					}
-
-					if total > 0 && offset >= total {
-						fmt.Printf("Resetting offset for stuck ffmpeg job %d (Total: %d, Offset: %d, Pending: %d)\n", jid, total, offset, job.PendingCount)
-						database.RDB.Set(ctx, offsetKey, 0, 0)
-					}
-				}
-			}
-
-			if len(ch) < BufferLowWater {
-				triggerFfmpegRefill(jid)
-			}
-		}
-	}
-
-	
-
-	func ensureFfmpegBuffer(jobID int64) {
-
-		bufferMutex.Lock()
-
-		defer bufferMutex.Unlock()
-
-		if _, ok := ffmpegJobBuffers[jobID]; !ok {
-
-			ffmpegJobBuffers[jobID] = make(chan models.FfmpegTask, BufferSize)
-
-		}
+		return 0, err
 
 	}
 
-	
+	return len(tasks), nil
 
-	func triggerFfmpegRefill(jobID int64) {
+}
 
-		key := fmt.Sprintf("ff:%d", jobID)
-
-		if _, filling := fillingMap.Load(key); !filling {
-
-			fillingMap.Store(key, true)
-
-			go func(jid int64) {
-
-				defer fillingMap.Delete(fmt.Sprintf("ff:%d", jid))
-
-				fillFfmpegJobBuffer(jid)
-
-			}(jobID)
-
-		}
-
+func checkAndRefillFfmpegBuffers() {
+	var jobs []models.FfmpegJob
+	if err := database.DB.Where("status IN ?", []models.JobStatus{models.StatusPending, models.StatusRunning}).Find(&jobs).Error; err != nil {
+		return
 	}
 
-	
+	ctx := context.Background()
 
-	func fillFfmpegJobBuffer(jobID int64) {
-
-		ctx := context.Background()
-
-		lockKey := fmt.Sprintf("ff:job:%d:lock", jobID)
-
-	
-
-		ok, err := database.RDB.SetNX(ctx, lockKey, 1, LockExpiration).Result()
-
-		if err != nil || !ok {
-
-			return
-
-		}
-
-		defer database.RDB.Del(ctx, lockKey)
-
-	
-
-		offsetKey := fmt.Sprintf("ff:job:%d:offset", jobID)
-
-		offsetStr, _ := database.RDB.Get(ctx, offsetKey).Result()
-
-		var offset int64
-
-		if offsetStr != "" {
-
-			fmt.Sscanf(offsetStr, "%d", &offset)
-
-		}
-
-	
-
-		jobKey := fmt.Sprintf("ff:job:%d:tasks", jobID)
-
-		start := offset
-
-		stop := offset + int64(FetchBatchSize) - 1
-
-	
-
-		ids, err := database.RDB.ZRange(ctx, jobKey, start, stop).Result()
-
-		if err != nil || len(ids) == 0 {
-
-			return
-
-		}
-
-	
-
-		var keys []string
-
-		for _, id := range ids {
-
-			keys = append(keys, fmt.Sprintf("ff:task:%s", id))
-
-		}
-
-	
-
-		jsonList, err := database.RDB.MGet(ctx, keys...).Result()
-
-		if err != nil {
-
-			return
-
-		}
-
-	
+	for _, job := range jobs {
+		jid := int64(job.ID)
+		ensureFfmpegBuffer(jid)
 
 		bufferMutex.RLock()
-
-		ch, exists := ffmpegJobBuffers[jobID]
-
+		ch, exists := ffmpegJobBuffers[jid]
 		bufferMutex.RUnlock()
-
-	
 
 		if !exists {
-
-			return
-
+			continue
 		}
 
-	
+		if job.PendingCount > 0 && len(ch) == 0 {
+			key := fmt.Sprintf("ff:%d", jid)
+			if _, filling := fillingMap.Load(key); !filling {
+				offsetKey := fmt.Sprintf("ff:job:%d:offset", jid)
+				jobKey := fmt.Sprintf("ff:job:%d:tasks", jid)
 
-		count := 0
-		processed := 0
-
-		for _, item := range jsonList {
-			processed++
-
-			if item == nil {
-				continue
-			}
-
-			str, ok := item.(string)
-			if !ok {
-				continue
-			}
-
-			var task models.FfmpegTask
-			if err := json.Unmarshal([]byte(str), &task); err == nil {
-				if task.Status != "PENDING" {
-					continue
+				total, _ := database.RDB.ZCard(ctx, jobKey).Result()
+				offsetStr, _ := database.RDB.Get(ctx, offsetKey).Result()
+				var offset int64
+				if offsetStr != "" {
+					fmt.Sscanf(offsetStr, "%d", &offset)
 				}
 
-				select {
-				case ch <- task:
-					count++
-				default:
-					processed--
-					goto FINISH
+				if total > 0 && offset >= total {
+					fmt.Printf("Resetting offset for stuck ffmpeg job %d (Total: %d, Offset: %d, Pending: %d)\n", jid, total, offset, job.PendingCount)
+					database.RDB.Set(ctx, offsetKey, 0, 0)
 				}
 			}
 		}
 
-	FINISH:
-		if processed > 0 {
-			newOffset := offset + int64(processed)
-			database.RDB.Set(ctx, offsetKey, newOffset, 0)
+		if len(ch) < BufferLowWater {
+			triggerFfmpegRefill(jid)
 		}
+	}
+}
+
+func ensureFfmpegBuffer(jobID int64) {
+
+	bufferMutex.Lock()
+
+	defer bufferMutex.Unlock()
+
+	if _, ok := ffmpegJobBuffers[jobID]; !ok {
+
+		ffmpegJobBuffers[jobID] = make(chan models.FfmpegTask, BufferSize)
 
 	}
 
-	
+}
 
-	func AcquireFfmpegTasks(c *gin.Context) {
+func triggerFfmpegRefill(jobID int64) {
 
-		type AcquireRequest struct {
+	key := fmt.Sprintf("ff:%d", jobID)
 
-			WorkerID string `json:"worker_id"`
+	if _, filling := fillingMap.Load(key); !filling {
 
-			Limit    int    `json:"limit"`
+		fillingMap.Store(key, true)
 
+		go func(jid int64) {
+
+			defer fillingMap.Delete(fmt.Sprintf("ff:%d", jid))
+
+			fillFfmpegJobBuffer(jid)
+
+		}(jobID)
+
+	}
+
+}
+
+func fillFfmpegJobBuffer(jobID int64) {
+
+	ctx := context.Background()
+
+	lockKey := fmt.Sprintf("ff:job:%d:lock", jobID)
+
+	ok, err := database.RDB.SetNX(ctx, lockKey, 1, LockExpiration).Result()
+
+	if err != nil || !ok {
+
+		return
+
+	}
+
+	defer database.RDB.Del(ctx, lockKey)
+
+	offsetKey := fmt.Sprintf("ff:job:%d:offset", jobID)
+
+	offsetStr, _ := database.RDB.Get(ctx, offsetKey).Result()
+
+	var offset int64
+
+	if offsetStr != "" {
+
+		fmt.Sscanf(offsetStr, "%d", &offset)
+
+	}
+
+	jobKey := fmt.Sprintf("ff:job:%d:tasks", jobID)
+
+	start := offset
+
+	stop := offset + int64(FetchBatchSize) - 1
+
+	ids, err := database.RDB.ZRange(ctx, jobKey, start, stop).Result()
+
+	if err != nil || len(ids) == 0 {
+
+		return
+
+	}
+
+	var keys []string
+
+	for _, id := range ids {
+
+		keys = append(keys, fmt.Sprintf("ff:task:%s", id))
+
+	}
+
+	jsonList, err := database.RDB.MGet(ctx, keys...).Result()
+
+	if err != nil {
+
+		return
+
+	}
+
+	bufferMutex.RLock()
+
+	ch, exists := ffmpegJobBuffers[jobID]
+
+	bufferMutex.RUnlock()
+
+	if !exists {
+
+		return
+
+	}
+
+	count := 0
+	processed := 0
+
+	for _, item := range jsonList {
+		processed++
+
+		if item == nil {
+			continue
 		}
 
-		var req AcquireRequest
-
-		if err := c.ShouldBindJSON(&req); err != nil {
-
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-
-			return
-
+		str, ok := item.(string)
+		if !ok {
+			continue
 		}
 
-		if req.Limit <= 0 { req.Limit = 1 }
-
-	
-
-		tasks := []models.FfmpegTask{}
-
-	
-
-		bufferMutex.RLock()
-
-		var jobIDs []int64
-
-		for jid := range ffmpegJobBuffers {
-
-			jobIDs = append(jobIDs, jid)
-
-		}
-
-		bufferMutex.RUnlock()
-
-	
-
-		if len(jobIDs) == 0 {
-
-			c.JSON(http.StatusOK, tasks)
-
-			return
-
-		}
-
-	
-
-		for _, jid := range jobIDs {
-
-			if len(tasks) >= req.Limit { break }
-
-	
-
-			bufferMutex.RLock()
-
-			ch, ok := ffmpegJobBuffers[jid]
-
-			bufferMutex.RUnlock()
-
-			if !ok { continue }
-
-	
-
-			if len(ch) < BufferLowWater {
-
-				triggerFfmpegRefill(jid)
-
+		var task models.FfmpegTask
+		if err := json.Unmarshal([]byte(str), &task); err == nil {
+			if task.Status != "PENDING" {
+				continue
 			}
 
-	
-
-			loop:
-
-			for len(tasks) < req.Limit {
-
-				select {
-
-				case t := <-ch:
-
-					tasks = append(tasks, t)
-
-				default:
-
-					break loop
-
-				}
-
+			select {
+			case ch <- task:
+				count++
+			default:
+				processed--
+				goto FINISH
 			}
-
 		}
+	}
+
+FINISH:
+	if processed > 0 {
+		newOffset := offset + int64(processed)
+		database.RDB.Set(ctx, offsetKey, newOffset, 0)
+	}
+
+}
+
+func AcquireFfmpegTasks(c *gin.Context) {
+
+	type AcquireRequest struct {
+		WorkerID string `json:"worker_id"`
+
+		Limit int `json:"limit"`
+	}
+
+	var req AcquireRequest
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+
+		return
+
+	}
+
+	if req.Limit <= 0 {
+		req.Limit = 1
+	}
+
+	tasks := []models.FfmpegTask{}
+
+	bufferMutex.RLock()
+
+	var jobIDs []int64
+
+	for jid := range ffmpegJobBuffers {
+
+		jobIDs = append(jobIDs, jid)
+
+	}
+
+	bufferMutex.RUnlock()
+
+	if len(jobIDs) == 0 {
 
 		c.JSON(http.StatusOK, tasks)
 
+		return
+
 	}
 
-	
+	for _, jid := range jobIDs {
 
-	func BatchUpdateFfmpeg(c *gin.Context) {
+		if len(tasks) >= req.Limit {
+			break
+		}
 
-	
+		bufferMutex.RLock()
 
-		var updates []models.FfmpegTask
+		ch, ok := ffmpegJobBuffers[jid]
 
-	
+		bufferMutex.RUnlock()
 
-		if err := c.ShouldBindJSON(&updates); err != nil {
+		if !ok {
+			continue
+		}
 
-	
+		if len(ch) < BufferLowWater {
 
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-
-	
-
-			return
-
-	
+			triggerFfmpegRefill(jid)
 
 		}
 
-	
+	loop:
 
-		
+		for len(tasks) < req.Limit {
 
-	
+			select {
 
-		if len(updates) == 0 {
+			case t := <-ch:
 
-	
+				tasks = append(tasks, t)
 
-			c.JSON(http.StatusOK, gin.H{"status": "no updates"})
+			default:
 
-	
-
-			return
-
-	
-
-		}
-
-	
-
-	
-
-	
-
-		ctx := context.Background()
-
-	
-
-	
-
-	
-
-		// 1. Fetch existing tasks to compare status
-
-	
-
-		var keys []string
-
-	
-
-		for _, u := range updates {
-
-	
-
-			keys = append(keys, fmt.Sprintf("ff:task:%d", u.ID))
-
-	
-
-		}
-
-	
-
-	
-
-	
-
-		existingJSONs, err := database.RDB.MGet(ctx, keys...).Result()
-
-	
-
-		if err != nil {
-
-	
-
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch existing tasks: " + err.Error()})
-
-	
-
-			return
-
-	
-
-		}
-
-	
-
-	
-
-	
-
-		pipe := database.RDB.Pipeline()
-
-	
-
-	
-
-	
-
-		for i, u := range updates {
-
-	
-
-			val := existingJSONs[i]
-
-	
-
-			if val == nil { continue }
-
-	
-
-			str, ok := val.(string)
-
-	
-
-			if !ok { continue }
-
-	
-
-	
-
-	
-
-			var existing models.FfmpegTask
-
-	
-
-			if err := json.Unmarshal([]byte(str), &existing); err != nil {
-
-	
-
-				continue
-
-	
+				break loop
 
 			}
 
-	
+		}
 
-	
+	}
 
-	
+	c.JSON(http.StatusOK, tasks)
 
-			oldStatus := existing.Status
+}
 
-	
+func BatchUpdateFfmpeg(c *gin.Context) {
 
-			newStatus := u.Status
+	var updates []models.FfmpegTask
 
-	
+	if err := c.ShouldBindJSON(&updates); err != nil {
 
-	
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 
-	
+		return
 
-			// Update fields
+	}
 
-	
+	if len(updates) == 0 {
 
-			existing.Status = newStatus
+		c.JSON(http.StatusOK, gin.H{"status": "no updates"})
 
-	
+		return
 
-			existing.UpdatedAt = time.Now()
+	}
 
-	
+	ctx := context.Background()
 
-			if newStatus == "RUNNING" && existing.StartedAt.IsZero() {
+	// 1. Fetch existing tasks to compare status
 
-	
+	var keys []string
 
-				existing.StartedAt = time.Now()
+	for _, u := range updates {
 
-	
+		keys = append(keys, fmt.Sprintf("ff:task:%d", u.ID))
 
-			}
+	}
 
-	
+	existingJSONs, err := database.RDB.MGet(ctx, keys...).Result()
 
-			if (newStatus == "COMPLETED" || newStatus == "FAILED") && existing.CompletedAt.IsZero() {
+	if err != nil {
 
-	
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch existing tasks: " + err.Error()})
 
-				existing.CompletedAt = time.Now()
+		return
 
-	
+	}
 
-			}
+	pipe := database.RDB.Pipeline()
 
-	
+	for i, u := range updates {
 
-	
+		val := existingJSONs[i]
 
-	
+		if val == nil {
+			continue
+		}
 
-			// Save to Redis
+		str, ok := val.(string)
 
-	
+		if !ok {
+			continue
+		}
 
-			data, _ := json.Marshal(existing)
+		var existing models.FfmpegTask
 
-	
+		if err := json.Unmarshal([]byte(str), &existing); err != nil {
 
-			pipe.Set(ctx, fmt.Sprintf("ff:task:%d", existing.ID), data, 0)
+			continue
 
-	
+		}
 
-	
+		oldStatus := existing.Status
 
-	
+		newStatus := u.Status
 
-					// Sync to Postgres if status changed or progress update
+		// Update fields
 
-	
+		existing.Status = newStatus
 
-	
+		existing.UpdatedAt = time.Now()
 
-	
+		if newStatus == "RUNNING" && existing.StartedAt.IsZero() {
 
-					if oldStatus != newStatus || u.TotalCount > 0 || u.SuccessCount > 0 || u.FailedCount > 0 {
+			existing.StartedAt = time.Now()
 
-	
+		}
 
-	
+		if (newStatus == "COMPLETED" || newStatus == "FAILED") && existing.CompletedAt.IsZero() {
 
-	
+			existing.CompletedAt = time.Now()
 
-						jobID := existing.JobID
+		}
 
-	
+		// Save to Redis
 
-	
+		data, _ := json.Marshal(existing)
 
-	
+		pipe.Set(ctx, fmt.Sprintf("ff:task:%d", existing.ID), data, 0)
 
-			
+		// Sync to Postgres if status changed or progress update
 
-	
+		if oldStatus != newStatus || u.TotalCount > 0 || u.SuccessCount > 0 || u.FailedCount > 0 {
 
-	
+			jobID := existing.JobID
 
-	
+			// If status changed, use status logic
 
-						// If status changed, use status logic
+			// BUT if we have progress counts, use them to update counts absolutely.
 
-	
+			// We prioritize absolute counts if provided (from worker reporting)
 
-	
+			if u.TotalCount > 0 || u.SuccessCount > 0 || u.FailedCount > 0 {
 
-	
+				pending := u.TotalCount - (u.SuccessCount + u.FailedCount)
 
-						// BUT if we have progress counts, use them to update counts absolutely.
+				if pending < 0 {
+					pending = 0
+				}
 
-	
-
-	
-
-	
-
-						
-
-	
-
-	
-
-	
-
-						// We prioritize absolute counts if provided (from worker reporting)
-
-	
-
-	
-
-	
-
-						if u.TotalCount > 0 || u.SuccessCount > 0 || u.FailedCount > 0 {
-
-	
-
-	
-
-	
-
-							pending := u.TotalCount - (u.SuccessCount + u.FailedCount)
-
-	
-
-	
-
-	
-
-							if pending < 0 { pending = 0 }
-
-	
-
-	
-
-	
-
-			
-
-	
-
-	
-
-	
-
-							query := `
+				query := `
 
 	
 
@@ -2050,189 +2079,51 @@ func BatchUpdateTransfer(c *gin.Context) {
 
 							`
 
-	
+				database.DB.Exec(query, u.TotalCount, u.SuccessCount, u.FailedCount, pending, newStatus, jobID)
 
-	
+			} else if oldStatus != newStatus {
 
-	
+				// Legacy status-based delta update (if no counts provided)
 
-							database.DB.Exec(query, u.TotalCount, u.SuccessCount, u.FailedCount, pending, newStatus, jobID)
+				var pendingDelta, runningDelta, successDelta, failedDelta int
 
-	
+				// Decrement old
 
-	
+				switch oldStatus {
 
-	
+				case "PENDING":
+					pendingDelta--
 
-			
+				case "RUNNING":
+					runningDelta--
 
-	
+				case "COMPLETED":
+					successDelta--
 
-	
+				case "FAILED":
+					failedDelta--
 
-	
+				}
 
-						} else if oldStatus != newStatus {
+				// Increment new
 
-	
+				switch newStatus {
 
-	
+				case "PENDING":
+					pendingDelta++
 
-	
+				case "RUNNING":
+					runningDelta++
 
-							// Legacy status-based delta update (if no counts provided)
+				case "COMPLETED":
+					successDelta++
 
-	
+				case "FAILED":
+					failedDelta++
 
-	
+				}
 
-	
-
-							var pendingDelta, runningDelta, successDelta, failedDelta int
-
-	
-
-	
-
-	
-
-			
-
-	
-
-	
-
-	
-
-							// Decrement old
-
-	
-
-	
-
-	
-
-							switch oldStatus {
-
-	
-
-	
-
-	
-
-							case "PENDING": pendingDelta--
-
-	
-
-	
-
-	
-
-							case "RUNNING": runningDelta--
-
-	
-
-	
-
-	
-
-							case "COMPLETED": successDelta--
-
-	
-
-	
-
-	
-
-							case "FAILED": failedDelta--
-
-	
-
-	
-
-	
-
-							}
-
-	
-
-	
-
-	
-
-			
-
-	
-
-	
-
-	
-
-							// Increment new
-
-	
-
-	
-
-	
-
-							switch newStatus {
-
-	
-
-	
-
-	
-
-							case "PENDING": pendingDelta++
-
-	
-
-	
-
-	
-
-							case "RUNNING": runningDelta++
-
-	
-
-	
-
-	
-
-							case "COMPLETED": successDelta++
-
-	
-
-	
-
-	
-
-							case "FAILED": failedDelta++
-
-	
-
-	
-
-	
-
-							}
-
-	
-
-	
-
-	
-
-			
-
-	
-
-	
-
-	
-
-							query := `
+				query := `
 
 	
 
@@ -2306,62 +2197,24 @@ func BatchUpdateTransfer(c *gin.Context) {
 
 							`
 
-	
+				database.DB.Exec(query, pendingDelta, runningDelta, successDelta, failedDelta, newStatus, jobID)
 
-	
-
-	
-
-							database.DB.Exec(query, pendingDelta, runningDelta, successDelta, failedDelta, newStatus, jobID)
-
-	
-
-	
-
-	
-
-						}
-
-	
-
-	
-
-	
-
-					}
-
-	
+			}
 
 		}
-
-	
-
-	
-
-	
-
-		_, err = pipe.Exec(ctx)
-
-	
-
-		if err != nil {
-
-	
-
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-
-	
-
-			return
-
-	
-
-		}
-
-	
-
-		c.JSON(http.StatusOK, gin.H{"status": "updated"})
-
-	
 
 	}
+
+	_, err = pipe.Exec(ctx)
+
+	if err != nil {
+
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+
+		return
+
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "updated"})
+
+}
