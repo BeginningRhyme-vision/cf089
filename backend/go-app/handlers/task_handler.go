@@ -1154,9 +1154,9 @@ func addLegacyTransferTasks(jobID int64, inputs []TransferTaskInput) (int, error
 }
 
 // --- Transfer Task Buffer Logic ---
-
 func checkAndRefillTxBuffers() {
 	var jobs []models.TransferJob
+	// 查找状态为 Running 的 Job
 	if err := database.DB.Where("status IN ?", []models.JobStatus{models.StatusRunning}).Find(&jobs).Error; err != nil {
 		return
 	}
@@ -1175,23 +1175,42 @@ func checkAndRefillTxBuffers() {
 			continue
 		}
 
-		// Check for stuck state (Pending > 0, Buffer Empty, Not Filling, Offset >= Total)
+		// 检查卡死状态: Pending > 0, Buffer Empty, Not Filling
 		if job.PendingCount > 0 && len(ch) == 0 {
 			key := fmt.Sprintf("tx:%d", jid)
 			if _, filling := fillingMap.Load(key); !filling {
-				offsetKey := fmt.Sprintf("tx:job:%d:offset", jid)
-				jobKey := fmt.Sprintf("tx:job:%d:tasks", jid)
 
-				total, _ := database.RDB.ZCard(ctx, jobKey).Result()
-				offsetStr, _ := database.RDB.Get(ctx, offsetKey).Result()
+				// 【修改点】根据模式检查 Offset 是否异常
+				isSharded := isJobSharded(ctx, jid)
+				var total int64
 				var offset int64
+				var offsetKey string
+
+				if isSharded {
+					// --- 新模式逻辑 ---
+					offsetKey = fmt.Sprintf("tx:job:%d:offset", jid)
+					// 获取 Max ID 作为 Total 的近似值
+					maxIDStr, _ := database.RDB.Get(ctx, fmt.Sprintf("tx:job:%d:max_id", jid)).Result()
+					fmt.Sscanf(maxIDStr, "%d", &total)
+				} else {
+					// --- 旧模式逻辑 ---
+					offsetKey = fmt.Sprintf("tx:job:%d:offset", jid)
+					jobKey := fmt.Sprintf("tx:job:%d:tasks", jid)
+					totalCount, _ := database.RDB.ZCard(ctx, jobKey).Result()
+					total = totalCount
+				}
+
+				// 获取当前 Offset
+				offsetStr, _ := database.RDB.Get(ctx, offsetKey).Result()
 				if offsetStr != "" {
 					fmt.Sscanf(offsetStr, "%d", &offset)
 				}
 
+				// 判定逻辑：如果 Offset 已经跑到了 Total (甚至超过)，但 Pending 依然 > 0
+				// 说明 Offset 可能跑过头了或者中间有跳过，导致 Buffer 填不进数据
 				if total > 0 && offset >= total {
-					// Reset offset
-					fmt.Printf("Resetting offset for stuck transfer job %d (Total: %d, Offset: %d, Pending: %d)\n", jid, total, offset, job.PendingCount)
+					fmt.Printf("Resetting offset for stuck transfer job %d (Total/Max: %d, Offset: %d, Pending: %d)\n", jid, total, offset, job.PendingCount)
+					// 重置 Offset 重新扫描
 					database.RDB.Set(ctx, offsetKey, 0, 0)
 				}
 			}
@@ -1202,6 +1221,54 @@ func checkAndRefillTxBuffers() {
 		}
 	}
 }
+
+// func checkAndRefillTxBuffers() {
+// 	var jobs []models.TransferJob
+// 	if err := database.DB.Where("status IN ?", []models.JobStatus{models.StatusRunning}).Find(&jobs).Error; err != nil {
+// 		return
+// 	}
+
+// 	ctx := context.Background()
+
+// 	for _, job := range jobs {
+// 		jid := int64(job.JobID)
+// 		ensureTxBuffer(jid)
+
+// 		bufferMutex.RLock()
+// 		ch, exists := txJobBuffers[jid]
+// 		bufferMutex.RUnlock()
+
+// 		if !exists {
+// 			continue
+// 		}
+
+// 		// Check for stuck state (Pending > 0, Buffer Empty, Not Filling, Offset >= Total)
+// 		if job.PendingCount > 0 && len(ch) == 0 {
+// 			key := fmt.Sprintf("tx:%d", jid)
+// 			if _, filling := fillingMap.Load(key); !filling {
+// 				offsetKey := fmt.Sprintf("tx:job:%d:offset", jid)
+// 				jobKey := fmt.Sprintf("tx:job:%d:tasks", jid)
+
+// 				total, _ := database.RDB.ZCard(ctx, jobKey).Result()
+// 				offsetStr, _ := database.RDB.Get(ctx, offsetKey).Result()
+// 				var offset int64
+// 				if offsetStr != "" {
+// 					fmt.Sscanf(offsetStr, "%d", &offset)
+// 				}
+
+// 				if total > 0 && offset >= total {
+// 					// Reset offset
+// 					fmt.Printf("Resetting offset for stuck transfer job %d (Total: %d, Offset: %d, Pending: %d)\n", jid, total, offset, job.PendingCount)
+// 					database.RDB.Set(ctx, offsetKey, 0, 0)
+// 				}
+// 			}
+// 		}
+
+// 		if len(ch) < BufferLowWater {
+// 			triggerTxRefill(jid)
+// 		}
+// 	}
+// }
 
 func ensureTxBuffer(jobID int64) {
 	bufferMutex.Lock()
@@ -1287,7 +1354,6 @@ func fillShardedTxBuffer(ctx context.Context, jobID int64) {
 	}
 
 	// 获取详情 (注意：这里需要兼容 Task Key 的格式，建议 MGET 时尝试两种格式，或者统一格式)
-	// 在 addShardedTransferTasks 中我们使用了 tx:task:%d:%d (无 {})
 	var keys []string
 	for _, id := range ids {
 		keys = append(keys, fmt.Sprintf("tx:task:%d:%s", jobID, id))
@@ -1498,7 +1564,6 @@ func AcquireTransferTasks(c *gin.Context) {
 	}
 	c.JSON(http.StatusOK, tasks)
 }
-
 func BatchUpdateTransfer(c *gin.Context) {
 	var updates []models.TransferTask
 	if err := c.ShouldBindJSON(&updates); err != nil {
@@ -1514,13 +1579,26 @@ func BatchUpdateTransfer(c *gin.Context) {
 	ctx := context.Background()
 	pipe := database.RDB.Pipeline()
 
+	// 【修改点】 缓存 Job 模式，避免循环内频繁 check
+	jobModeCache := make(map[int64]bool)
+
 	for _, u := range updates {
 		data, err := json.Marshal(u)
 		if err != nil {
 			continue
 		}
 
-		pipe.Set(ctx, fmt.Sprintf("tx:task:%d", u.ID), data, 0)
+		// 确定 Job 模式
+		isSharded, known := jobModeCache[u.JobID]
+		if !known {
+			isSharded = isJobSharded(ctx, u.JobID)
+			jobModeCache[u.JobID] = isSharded
+		}
+
+		var taskKey string
+		taskKey = fmt.Sprintf("tx:task:%d:%d", u.JobID, u.ID)
+
+		pipe.Set(ctx, taskKey, data, 0)
 	}
 
 	_, err := pipe.Exec(ctx)
@@ -1530,8 +1608,41 @@ func BatchUpdateTransfer(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "updated"})
-
 }
+
+// func BatchUpdateTransfer(c *gin.Context) {
+// 	var updates []models.TransferTask
+// 	if err := c.ShouldBindJSON(&updates); err != nil {
+// 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+// 		return
+// 	}
+
+// 	if len(updates) == 0 {
+// 		c.JSON(http.StatusOK, gin.H{"status": "no updates"})
+// 		return
+// 	}
+
+// 	ctx := context.Background()
+// 	pipe := database.RDB.Pipeline()
+
+// 	for _, u := range updates {
+// 		data, err := json.Marshal(u)
+// 		if err != nil {
+// 			continue
+// 		}
+
+// 		pipe.Set(ctx, fmt.Sprintf("tx:task:%d", u.ID), data, 0)
+// 	}
+
+// 	_, err := pipe.Exec(ctx)
+// 	if err != nil {
+// 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+// 		return
+// 	}
+
+// 	c.JSON(http.StatusOK, gin.H{"status": "updated"})
+
+// }
 
 // --- Ffmpeg Task Logic ---
 

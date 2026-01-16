@@ -156,8 +156,107 @@ func ListPendingTransferJobs(c *gin.Context) {
 }
 
 // --- Reusable Retry Logic ---
+// 复用 task_handler.go 中的 isJobSharded 和 getTaskBucketKey 逻辑
+// 注意：确保这两个文件在同一个 package handlers 下
 
 func RetryTransferTasksLogic(jobID int, initialStatus models.JobStatus) {
+	ctx := context.Background()
+
+	// 探测任务模式
+	if isJobSharded(ctx, int64(jobID)) {
+		retryShardedTransferTasks(ctx, jobID, initialStatus) // 【新】分片重试
+	} else {
+		retryLegacyTransferTasks(jobID, initialStatus) // 【旧】原有逻辑
+	}
+}
+
+// 【旧逻辑】保持原样，专门处理旧任务
+// 【新逻辑】处理分片任务
+func retryShardedTransferTasks(ctx context.Context, jobID int, initialStatus models.JobStatus) {
+	resetCount := 0
+
+	// 遍历所有可能的 Bucket
+	// 由于我们不知道具体有多少个 Bucket，可以尝试遍历直到连续空 Bucket 出现，或者设置一个较大的安全上限
+	// 这里设置上限 200 (覆盖 1000万任务)，足够大部分场景
+	for bucket := 0; bucket < 200; bucket++ {
+		// 使用不带 {} 的新 Key
+		bucketKey := fmt.Sprintf("tx:job:%d:tasks:%d", jobID, bucket)
+
+		// 每次取整个 Bucket (5万条)，或者分批取。为了简单和内存安全，这里直接 ZRange 整个 Bucket
+		// 如果 Bucket 很大，建议内部再做分页
+		ids, err := database.RDB.ZRange(ctx, bucketKey, 0, -1).Result()
+		if err != nil || len(ids) == 0 {
+			// 如果前几个 Bucket 有数据，中间断了，可能是数据问题，也可能是遍历完了。
+			// 简单策略：如果 bucket=0 都没数据，那肯定没数据；如果中间空了，尝试跳过继续
+			if bucket == 0 {
+				break
+			}
+			// 如果连续空了 5 个 bucket，认为后面没有了
+			// (这里简化处理，直接 continue，直到循环结束)
+			continue
+		}
+
+		var keys []string
+		for _, tid := range ids {
+			// 新 Task Key 格式 (不带 {})
+			keys = append(keys, fmt.Sprintf("tx:task:%d:%s", jobID, tid))
+		}
+
+		// 分批 MGet (避免一次请求太大)
+		mgetBatch := 500
+		for i := 0; i < len(keys); i += mgetBatch {
+			end := i + mgetBatch
+			if end > len(keys) {
+				end = len(keys)
+			}
+
+			batchKeys := keys[i:end]
+			results, _ := database.RDB.MGet(ctx, batchKeys...).Result()
+
+			pipe := database.RDB.Pipeline()
+			hasUpdates := false
+
+			for k, val := range results {
+				if val == nil {
+					continue
+				}
+				str, ok := val.(string)
+				if !ok {
+					continue
+				}
+
+				var task models.TransferTask
+				if err := json.Unmarshal([]byte(str), &task); err == nil {
+					if task.Status == "FAILED" {
+						task.Status = "PENDING"
+						task.UpdatedAt = time.Now()
+						task.ErrorMessage = ""
+
+						data, _ := json.Marshal(task)
+						pipe.Set(ctx, batchKeys[k], data, 0)
+						hasUpdates = true
+						resetCount++
+					}
+				}
+			}
+			if hasUpdates {
+				pipe.Exec(ctx)
+			}
+		}
+	}
+
+	if resetCount > 0 {
+		database.DB.Exec("UPDATE transfer_jobs SET failed_count = failed_count - ?, pending_count = pending_count + ? WHERE job_id = ?", resetCount, resetCount, jobID)
+
+		// 重置新 Offset (不带 {})
+		database.RDB.Set(ctx, fmt.Sprintf("tx:job:%d:offset", jobID), 0, 0)
+
+		if initialStatus == models.StatusCompleted || initialStatus == models.StatusFailed {
+			database.DB.Model(&models.TransferJob{JobID: uint(jobID)}).Update("status", models.StatusPending)
+		}
+	}
+}
+func retryLegacyTransferTasks(jobID int, initialStatus models.JobStatus) {
 	ctx := context.Background()
 	jobKey := fmt.Sprintf("tx:job:%d:tasks", jobID)
 
@@ -505,7 +604,7 @@ func cleanupTransferJobRedis(ctx context.Context, jobID uint) {
 	// 尝试清理旧的 Task 详情
 	taskIDs, _ := database.RDB.ZRange(ctx, legacyJobKey, 0, -1).Result()
 	for _, tid := range taskIDs {
-		pipe.Unlink(ctx, fmt.Sprintf("tx:task:{%d}:%s", jobID, tid))
+		pipe.Unlink(ctx, fmt.Sprintf("tx:task:%d:%s", jobID, tid))
 	}
 
 	// 2. 清理新格式 (Sharded)
