@@ -13,10 +13,6 @@ const cellStyle = {
   display: 'inline-block' 
 };
 
-const modalDetailStyle = {
-  wordBreak: 'break-all',
-};
-
 const FfmpegJobList = () => {
   const [jobs, setJobs] = useState([]);
   const [metadataList, setMetadataList] = useState([]);
@@ -255,26 +251,53 @@ const FfmpegJobList = () => {
         width={700}
       >
         {selectedJob && (
-          <Descriptions column={{ xs: 1, sm: 1, md: 2 }} bordered>
-            <Descriptions.Item label="Job ID">{selectedJob.id}</Descriptions.Item>
-            <Descriptions.Item label="Metadata ID">{selectedJob.metadata_id}</Descriptions.Item>
-            <Descriptions.Item label="S3 Prefix" span={2}>
-              <div style={modalDetailStyle}>{selectedJob.s3_prefix}</div>
-            </Descriptions.Item>
-            <Descriptions.Item label="S3 Upload Prefix" span={2}>
-              <div style={modalDetailStyle}>{selectedJob.s3_upload_prefix}</div>
-            </Descriptions.Item>
-            <Descriptions.Item label="Is Incremental">{selectedJob.is_incremental ? 'Yes' : 'No'}</Descriptions.Item>
-            <Descriptions.Item label="Periodic Interval">{selectedJob.periodic_interval > 0 ? `${selectedJob.periodic_interval}s` : 'N/A'}</Descriptions.Item>
-            <Descriptions.Item label="Status"><Tag color={statusColors[selectedJob.status]}>{selectedJob.status}</Tag></Descriptions.Item>
-            <Descriptions.Item label="Total Count">{selectedJob.total_count}</Descriptions.Item>
-            <Descriptions.Item label="Pending Count">{selectedJob.pending_count}</Descriptions.Item>
-            <Descriptions.Item label="Running Count">{selectedJob.running_count}</Descriptions.Item>
-            <Descriptions.Item label="Success Count">{selectedJob.success_count}</Descriptions.Item>
-            <Descriptions.Item label="Failed Count">{selectedJob.failed_count}</Descriptions.Item>
-            <Descriptions.Item label="Created At">{selectedJob.created_at}</Descriptions.Item>
-            <Descriptions.Item label="Updated At">{selectedJob.updated_at}</Descriptions.Item>
-          </Descriptions>
+          <div style={{ border: '1px solid #f0f0f0' }}>
+            {[
+              { label: 'Job ID', value: selectedJob.id },
+              { label: 'Metadata ID', value: selectedJob.metadata_id },
+              { label: 'S3 Prefix', value: selectedJob.s3_prefix, fullWidth: true },
+              { label: 'S3 Upload Prefix', value: selectedJob.s3_upload_prefix, fullWidth: true },
+              { label: 'Is Incremental', value: selectedJob.is_incremental ? 'Yes' : 'No' },
+              { label: 'Periodic Interval', value: selectedJob.periodic_interval > 0 ? `${selectedJob.periodic_interval}s` : 'N/A' },
+              { label: 'Status', value: <Tag color={statusColors[selectedJob.status]}>{selectedJob.status}</Tag> },
+              { label: 'Total Count', value: selectedJob.total_count },
+              { label: 'Pending Count', value: selectedJob.pending_count },
+              { label: 'Running Count', value: selectedJob.running_count },
+              { label: 'Success Count', value: selectedJob.success_count },
+              { label: 'Failed Count', value: selectedJob.failed_count },
+              { label: 'Created At', value: selectedJob.created_at },
+              { label: 'Updated At', value: selectedJob.updated_at },
+            ].map((item, index, arr) => (
+              <div 
+                key={index}
+                style={{ 
+                  display: 'flex', 
+                  borderBottom: (index < arr.length - 1) ? '1px solid #f0f0f0' : 'none',
+                  flexWrap: 'wrap'
+                }}
+              >
+                <div style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  fontWeight: 'bold',
+                  background: '#fafafa',
+                  borderRight: '1px solid #f0f0f0',
+                  flex: '0 0 150px'
+                }}>
+                  {item.label}
+                </div>
+                <div style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  flex: 1,
+                  overflowWrap: 'break-word',
+                  wordWrap: 'break-word',
+                }}>
+                  {item.value}
+                </div>
+              </div>
+            ))}
+          </div>
         )}
       </Modal>
     </div>

@@ -5,7 +5,10 @@ import { useParams, useNavigate, Link } from 'react-router-dom';
 import api from '../api';
 
 const modalDetailStyle = {
-  wordBreak: 'break-all',
+  overflowWrap: 'break-word',
+  wordWrap: 'break-word',
+  wordBreak: 'normal',
+  whiteSpace: 'normal',
 };
 
 const YoutubeJobDetail = () => {
