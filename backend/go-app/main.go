@@ -29,7 +29,7 @@ func main() {
 	// Start periodic redis cleanup
 	handlers.StartPeriodicCleanup()
 
-	// Start transfer job completion monitor
+	// Start transfer job completion monitor.
 	handlers.StartTransferJobMonitor()
 
 	r := routes.SetupRouter()
