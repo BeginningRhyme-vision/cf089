@@ -58,7 +58,7 @@ jobs:
               shanghai-tke/applications/unbound-future-admin-transfer-agent-cannary/transfer-agent.yaml
             stable_files: |
               silicon-tke/applications/unbound-future-admin-backend_frontend/worker-transfer-scanner.yaml
-              shanghai-tke/applications/unbound-future-admin-transfer-agent/transfer-agent.yaml       
+              shanghai-tke/applications/unbound-future-admin-transfer-agent/transfer-agent.yaml
 
           - component: FFmpeg Worker & Scanner
             context: backend/worker_ffmpeg
