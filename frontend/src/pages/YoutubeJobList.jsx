@@ -6,6 +6,14 @@ import api from '../api';
 
 const { TextArea } = Input;
 
+const cellStyle = {
+  maxWidth: 180,
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  display: 'inline-block' 
+};
+
 const YoutubeJobList = () => {
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -149,7 +157,16 @@ const YoutubeJobList = () => {
 
   const columns = [
     { title: 'ID', dataIndex: 'id', key: 'id', width: 60 },
-    { title: 'R2 Prefix', dataIndex: 'r2_prefix', key: 'r2_prefix' },
+    { 
+      title: 'R2 Prefix', 
+      dataIndex: 'r2_prefix', 
+      key: 'r2_prefix',
+      render: (text) => (
+        <div style={cellStyle} title={text}>
+          {text}
+        </div>
+      )
+    },
     { 
       title: 'Download Mode', 
       dataIndex: 'download_mode', 
@@ -193,12 +210,6 @@ const YoutubeJobList = () => {
       dataIndex: 'failed_count', 
       key: 'failed_count',
       width: 80
-    },
-    { 
-      title: 'Created At',
-      dataIndex: 'created_at',
-      key: 'created_at',
-      width: 180
     },
     { 
       title: 'Action',

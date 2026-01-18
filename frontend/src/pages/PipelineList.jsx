@@ -7,6 +7,14 @@ import api from '../api';
 const { TextArea } = Input;
 const { Option } = Select;
 
+const cellStyle = {
+  maxWidth: 250,
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  display: 'inline-block' 
+};
+
 const PipelineList = () => {
   const [jobs, setJobs] = useState([]);
   const [metadataList, setMetadataList] = useState([]);
@@ -78,7 +86,16 @@ const PipelineList = () => {
 
   const columns = [
     { title: 'ID', dataIndex: 'id', key: 'id', width: 60 },
-    { title: 'Name', dataIndex: 'name', key: 'name' },
+    { 
+      title: 'Name', 
+      dataIndex: 'name', 
+      key: 'name',
+      render: (text) => (
+        <div style={cellStyle} title={text}>
+          {text}
+        </div>
+      )
+    },
     {
       title: 'Status',
       dataIndex: 'status',

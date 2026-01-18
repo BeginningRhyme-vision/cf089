@@ -3,6 +3,14 @@ import { Table, Button, Modal, Form, Input, message, Popconfirm } from 'antd';
 import { PlusOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons';
 import api from '../api';
 
+const cellStyle = {
+  maxWidth: 200,
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  display: 'inline-block' 
+};
+
 const MetadataList = () => {
   const [data, setData] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -72,9 +80,36 @@ const MetadataList = () => {
 
   const columns = [
     { title: 'ID', dataIndex: 'id', key: 'id', width: 80 },
-    { title: 'Client Name', dataIndex: 'client_name', key: 'client_name' },
-    { title: 'Endpoint', dataIndex: 'endpoint', key: 'endpoint' },
-    { title: 'Access Key', dataIndex: 'ak', key: 'ak' },
+    { 
+      title: 'Client Name', 
+      dataIndex: 'client_name', 
+      key: 'client_name',
+      render: (text) => (
+        <div style={cellStyle} title={text}>
+          {text}
+        </div>
+      )
+    },
+    { 
+      title: 'Endpoint', 
+      dataIndex: 'endpoint', 
+      key: 'endpoint',
+      render: (text) => (
+        <div style={cellStyle} title={text}>
+          {text}
+        </div>
+      )
+    },
+    { 
+      title: 'Access Key', 
+      dataIndex: 'ak', 
+      key: 'ak',
+      render: (text) => (
+        <div style={cellStyle} title={text}>
+          {text}
+        </div>
+      )
+    },
     {
       title: 'Action',
       key: 'action',

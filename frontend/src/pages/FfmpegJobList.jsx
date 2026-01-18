@@ -5,6 +5,18 @@ import api from '../api';
 
 const { Option } = Select;
 
+const cellStyle = {
+  maxWidth: 250,
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  display: 'inline-block' 
+};
+
+const modalDetailStyle = {
+  wordBreak: 'break-all',
+};
+
 const FfmpegJobList = () => {
   const [jobs, setJobs] = useState([]);
   const [metadataList, setMetadataList] = useState([]);
@@ -103,7 +115,16 @@ const FfmpegJobList = () => {
   const columns = [
     { title: 'ID', dataIndex: 'id', key: 'id', width: 60 },
     { title: 'Metadata ID', dataIndex: 'metadata_id', key: 'metadata_id', width: 100 },
-    { title: 'S3 Prefix', dataIndex: 's3_prefix', key: 's3_prefix' },
+    { 
+      title: 'S3 Prefix', 
+      dataIndex: 's3_prefix', 
+      key: 's3_prefix',
+      render: (text) => (
+        <div style={cellStyle} title={text}>
+          {text}
+        </div>
+      ) 
+    },
     { 
       title: 'Inc', 
       dataIndex: 'is_incremental', 
@@ -233,8 +254,12 @@ const FfmpegJobList = () => {
           <Descriptions column={2} bordered>
             <Descriptions.Item label="Job ID">{selectedJob.id}</Descriptions.Item>
             <Descriptions.Item label="Metadata ID">{selectedJob.metadata_id}</Descriptions.Item>
-            <Descriptions.Item label="S3 Prefix">{selectedJob.s3_prefix}</Descriptions.Item>
-            <Descriptions.Item label="S3 Upload Prefix">{selectedJob.s3_upload_prefix}</Descriptions.Item>
+            <Descriptions.Item label="S3 Prefix" span={2}>
+              <div style={modalDetailStyle}>{selectedJob.s3_prefix}</div>
+            </Descriptions.Item>
+            <Descriptions.Item label="S3 Upload Prefix" span={2}>
+              <div style={modalDetailStyle}>{selectedJob.s3_upload_prefix}</div>
+            </Descriptions.Item>
             <Descriptions.Item label="Is Incremental">{selectedJob.is_incremental ? 'Yes' : 'No'}</Descriptions.Item>
             <Descriptions.Item label="Periodic Interval">{selectedJob.periodic_interval > 0 ? `${selectedJob.periodic_interval}s` : 'N/A'}</Descriptions.Item>
             <Descriptions.Item label="Status"><Tag color={statusColors[selectedJob.status]}>{selectedJob.status}</Tag></Descriptions.Item>

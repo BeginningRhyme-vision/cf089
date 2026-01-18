@@ -5,6 +5,18 @@ import api from '../api';
 
 const { Option } = Select;
 
+const cellStyle = {
+  maxWidth: 180,
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  display: 'inline-block' 
+};
+
+const modalDetailStyle = {
+  wordBreak: 'break-all',
+};
+
 const JobList = () => {
   const [jobs, setJobs] = useState([]);
   const [metadataList, setMetadataList] = useState([]);
@@ -25,7 +37,6 @@ const JobList = () => {
       const res = await api.get(`/jobs/?page=${page}&limit=${pageSize}`);
       setJobs(res.data);
       
-      // 假设后端在响应头中返回总数
       if (res.headers && res.headers['x-total-count']) {
         setPagination(prev => ({
           ...prev,
@@ -34,7 +45,6 @@ const JobList = () => {
           total: parseInt(res.headers['x-total-count'])
         }));
       } else {
-        // 如果没有获取到总数，则基于当前数据长度进行更新
         setPagination(prev => ({
           ...prev,
           current: page,
@@ -111,8 +121,26 @@ const JobList = () => {
   const columns = [
     { title: 'ID', dataIndex: 'job_id', key: 'job_id', width: 60 },
     { title: 'Metadata ID', dataIndex: 'metadata_id', key: 'metadata_id', width: 100 },
-    { title: 'Source', dataIndex: 'src_dir', key: 'src_dir' },
-    { title: 'Dest', dataIndex: 'dst_dir', key: 'dst_dir' },
+    { 
+      title: 'Source', 
+      dataIndex: 'src_dir', 
+      key: 'src_dir',
+      render: (text) => (
+        <div style={cellStyle} title={text}>
+          {text}
+        </div>
+      ) 
+    },
+    { 
+      title: 'Dest', 
+      dataIndex: 'dst_dir', 
+      key: 'dst_dir',
+      render: (text) => (
+        <div style={cellStyle} title={text}>
+          {text}
+        </div>
+      )
+    },
     { 
       title: 'Status', 
       dataIndex: 'status', 
@@ -246,8 +274,12 @@ const JobList = () => {
           <Descriptions column={2} bordered>
             <Descriptions.Item label="Job ID">{selectedJob.job_id}</Descriptions.Item>
             <Descriptions.Item label="Client/Metadata ID">{selectedJob.metadata_id}</Descriptions.Item>
-            <Descriptions.Item label="Source">{selectedJob.src_dir}</Descriptions.Item>
-            <Descriptions.Item label="Destination">{selectedJob.dst_dir}</Descriptions.Item>
+            <Descriptions.Item label="Source" span={2}>
+              <div style={modalDetailStyle}>{selectedJob.src_dir}</div>
+            </Descriptions.Item>
+            <Descriptions.Item label="Destination" span={2}>
+              <div style={modalDetailStyle}>{selectedJob.dst_dir}</div>
+            </Descriptions.Item>
             <Descriptions.Item label="Include">{selectedJob.include || '-'}</Descriptions.Item>
             <Descriptions.Item label="Exclude">{selectedJob.exclude || '-'}</Descriptions.Item>
             <Descriptions.Item label="Delete Source">{selectedJob.delete_source ? 'Yes' : 'No'}</Descriptions.Item>
@@ -267,7 +299,9 @@ const JobList = () => {
             <Descriptions.Item label="End Time">{selectedJob.end_time || '-'}</Descriptions.Item>
             <Descriptions.Item label="Duration">{selectedJob.duration_seconds} seconds</Descriptions.Item>
             <Descriptions.Item label="Execution Count">{selectedJob.execution_count}</Descriptions.Item>
-            <Descriptions.Item label="Result Message">{selectedJob.result_message || 'N/A'}</Descriptions.Item>
+            <Descriptions.Item label="Result Message" span={2}>
+              <div style={modalDetailStyle}>{selectedJob.result_message || 'N/A'}</div>
+            </Descriptions.Item>
             <Descriptions.Item label="Created At">{selectedJob.created_at}</Descriptions.Item>
             <Descriptions.Item label="Updated At">{selectedJob.updated_at}</Descriptions.Item>
           </Descriptions>

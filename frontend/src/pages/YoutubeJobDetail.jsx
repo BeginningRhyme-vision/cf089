@@ -4,6 +4,10 @@ import { ReloadOutlined, ArrowLeftOutlined } from '@ant-design/icons';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import api from '../api';
 
+const modalDetailStyle = {
+  wordBreak: 'break-all',
+};
+
 const YoutubeJobDetail = () => {
   const { jobId } = useParams();
   const navigate = useNavigate();
@@ -101,8 +105,8 @@ const YoutubeJobDetail = () => {
   const columns = [
     { title: 'ID', dataIndex: 'id', key: 'id', width: 60 },
     { title: 'Video ID', dataIndex: 'video_id', key: 'video_id', width: 120 },
-    { title: 'Title', dataIndex: 'title', key: 'title', ellipsis: true },
-    { title: 'URL', dataIndex: 'url', key: 'url', ellipsis: true },
+    { title: 'Title', dataIndex: 'title', key: 'title', ellipsis: true, width: 250 },
+    { title: 'URL', dataIndex: 'url', key: 'url', ellipsis: true, width: 250 },
     { 
       title: 'Status', 
       dataIndex: 'status', 
@@ -115,6 +119,7 @@ const YoutubeJobDetail = () => {
       dataIndex: 'error_message', 
       key: 'error_message', 
       ellipsis: true,
+      width: 300,
       render: (text) => text ? <span style={{color: 'red'}} title={text}>{text}</span> : '-'
     },
     { title: 'Updated At', dataIndex: 'updated_at', key: 'updated_at', width: 180 },
@@ -131,7 +136,7 @@ const YoutubeJobDetail = () => {
 
       <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h2>
-          Job Details: {job?.r2_prefix}
+          Job Details: <span style={modalDetailStyle}>{job?.r2_prefix}</span>
           {job && <Tag color={statusColors[job.status] || 'default'} style={{ marginLeft: 12 }}>{job.status}</Tag>}
         </h2>
         <div>
