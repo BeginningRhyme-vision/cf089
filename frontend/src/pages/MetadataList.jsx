@@ -108,7 +108,8 @@ const MetadataList = () => {
         <div style={cellStyle} title={text}>
           {text}
         </div>
-      )
+      ),
+      responsive: ['md']
     },
     {
       title: 'Action',
@@ -131,7 +132,7 @@ const MetadataList = () => {
           Add Client Metadata
         </Button>
       </div>
-      <Table columns={columns} dataSource={data} rowKey="id" loading={loading} />
+      <Table columns={columns} dataSource={data} rowKey="id" loading={loading} scroll={{ x: 'max-content' }} />
       
       <Modal 
         title={editingItem ? "Edit Metadata" : "Add Metadata"} 

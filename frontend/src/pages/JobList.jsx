@@ -120,7 +120,7 @@ const JobList = () => {
 
   const columns = [
     { title: 'ID', dataIndex: 'job_id', key: 'job_id', width: 60 },
-    { title: 'Metadata ID', dataIndex: 'metadata_id', key: 'metadata_id', width: 100 },
+    { title: 'Metadata ID', dataIndex: 'metadata_id', key: 'metadata_id', width: 100, responsive: ['md'] },
     { 
       title: 'Source', 
       dataIndex: 'src_dir', 
@@ -194,7 +194,8 @@ const JobList = () => {
         columns={columns} 
         dataSource={jobs} 
         rowKey="job_id" 
-        loading={loading} 
+        loading={loading}
+        scroll={{ x: 'max-content' }}
         pagination={{
           current: pagination.current,
           pageSize: pagination.pageSize,
@@ -271,7 +272,7 @@ const JobList = () => {
         width={700}
       >
         {selectedJob && (
-          <Descriptions column={2} bordered>
+          <Descriptions column={{ xs: 1, sm: 1, md: 2 }} bordered>
             <Descriptions.Item label="Job ID">{selectedJob.job_id}</Descriptions.Item>
             <Descriptions.Item label="Client/Metadata ID">{selectedJob.metadata_id}</Descriptions.Item>
             <Descriptions.Item label="Source" span={2}>

@@ -114,7 +114,7 @@ const FfmpegJobList = () => {
 
   const columns = [
     { title: 'ID', dataIndex: 'id', key: 'id', width: 60 },
-    { title: 'Metadata ID', dataIndex: 'metadata_id', key: 'metadata_id', width: 100 },
+    { title: 'Metadata ID', dataIndex: 'metadata_id', key: 'metadata_id', width: 100, responsive: ['md'] },
     { 
       title: 'S3 Prefix', 
       dataIndex: 's3_prefix', 
@@ -130,7 +130,8 @@ const FfmpegJobList = () => {
       dataIndex: 'is_incremental', 
       key: 'is_incremental',
       width: 60,
-      render: (val) => val ? <Tag color="blue">Yes</Tag> : <Tag>No</Tag>
+      render: (val) => val ? <Tag color="blue">Yes</Tag> : <Tag>No</Tag>,
+      responsive: ['md']
     },
     { 
       title: 'Status', 
@@ -141,12 +142,14 @@ const FfmpegJobList = () => {
     { 
       title: 'Success', 
       dataIndex: 'success_count', 
-      key: 'success_count' 
+      key: 'success_count',
+      responsive: ['md']
     },
     { 
       title: 'Failed', 
       dataIndex: 'failed_count', 
-      key: 'failed_count' 
+      key: 'failed_count',
+      responsive: ['md']
     },
     { 
       title: 'Action',
@@ -186,7 +189,8 @@ const FfmpegJobList = () => {
         columns={columns} 
         dataSource={jobs} 
         rowKey="id" 
-        loading={loading} 
+        loading={loading}
+        scroll={{ x: 'max-content' }}
         pagination={{
           current: pagination.current,
           pageSize: pagination.pageSize,
@@ -251,7 +255,7 @@ const FfmpegJobList = () => {
         width={700}
       >
         {selectedJob && (
-          <Descriptions column={2} bordered>
+          <Descriptions column={{ xs: 1, sm: 1, md: 2 }} bordered>
             <Descriptions.Item label="Job ID">{selectedJob.id}</Descriptions.Item>
             <Descriptions.Item label="Metadata ID">{selectedJob.metadata_id}</Descriptions.Item>
             <Descriptions.Item label="S3 Prefix" span={2}>

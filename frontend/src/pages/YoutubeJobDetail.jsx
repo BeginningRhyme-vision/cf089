@@ -150,32 +150,32 @@ const YoutubeJobDetail = () => {
 
       {job && (
         <Row gutter={16} style={{ marginBottom: 24 }}>
-          <Col span={4}>
+          <Col xs={12} sm={8} md={4}>
             <Card size="small">
               <Statistic title="Total" value={job.total_count} />
             </Card>
           </Col>
-          <Col span={4}>
+          <Col xs={12} sm={8} md={4}>
             <Card size="small">
               <Statistic title="Success" value={job.success_count} valueStyle={{ color: '#3f8600' }} />
             </Card>
           </Col>
-          <Col span={4}>
+          <Col xs={12} sm={8} md={4}>
             <Card size="small">
               <Statistic title="Failed" value={job.failed_count} valueStyle={{ color: '#cf1322' }} />
             </Card>
           </Col>
-          <Col span={4}>
+          <Col xs={12} sm={8} md={4}>
             <Card size="small">
               <Statistic title="Running" value={job.running_count} valueStyle={{ color: '#faad14' }} />
             </Card>
           </Col>
-          <Col span={4}>
+          <Col xs={12} sm={8} md={4}>
             <Card size="small">
               <Statistic title="Pending" value={job.pending_count} valueStyle={{ color: '#1890ff' }} />
             </Card>
           </Col>
-          <Col span={4}>
+          <Col xs={12} sm={8} md={4}>
             <Card size="small">
               <Statistic 
                 title="Job Status" 

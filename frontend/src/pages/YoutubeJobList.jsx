@@ -171,8 +171,9 @@ const YoutubeJobList = () => {
       title: 'Download Mode', 
       dataIndex: 'download_mode', 
       key: 'download_mode',
-      width: 100,
-      render: (mode) => <Tag color="blue">{mode.toUpperCase()}</Tag>
+      width: 120,
+      render: (mode) => <Tag color="blue">{mode.toUpperCase()}</Tag>,
+      responsive: ['md']
     },
     { 
       title: 'Status', 
@@ -185,31 +186,36 @@ const YoutubeJobList = () => {
       title: 'Total', 
       dataIndex: 'total_count', 
       key: 'total_count',
-      width: 70
+      width: 70,
+      responsive: ['sm']
     },
     { 
       title: 'Pending', 
       dataIndex: 'pending_count', 
       key: 'pending_count',
-      width: 80
+      width: 80,
+      responsive: ['sm']
     },
     { 
       title: 'Running', 
       dataIndex: 'running_count', 
       key: 'running_count',
-      width: 80
+      width: 80,
+      responsive: ['md']
     },
     { 
       title: 'Success', 
       dataIndex: 'success_count', 
       key: 'success_count',
-      width: 80
+      width: 80,
+      responsive: ['md']
     },
     { 
       title: 'Failed', 
       dataIndex: 'failed_count', 
       key: 'failed_count',
-      width: 80
+      width: 80,
+      responsive: ['md']
     },
     { 
       title: 'Action',
@@ -260,7 +266,8 @@ const YoutubeJobList = () => {
         columns={columns} 
         dataSource={jobs} 
         rowKey="id" 
-        loading={loading} 
+        loading={loading}
+        scroll={{ x: 'max-content' }}
         pagination={{
           current: pagination.current,
           pageSize: pagination.pageSize,

@@ -113,7 +113,7 @@ const PipelineList = () => {
             </Space>
         )
     },
-    { title: 'Created At', dataIndex: 'created_at', key: 'created_at' },
+    { title: 'Created At', dataIndex: 'created_at', key: 'created_at', responsive: ['md'] },
   ];
 
   return (
@@ -127,7 +127,7 @@ const PipelineList = () => {
         </Space>
       </div>
       
-      <Table columns={columns} dataSource={jobs} rowKey="id" loading={loading} />
+      <Table columns={columns} dataSource={jobs} rowKey="id" loading={loading} scroll={{ x: 'max-content' }} />
 
       <Modal 
         title="Create Pipeline Job" 
