@@ -2027,6 +2027,7 @@ func updateCompletedTransferJobs() {
 			status = ?
 			AND pending_count = 0
 			AND total_count > 0
+			AND periodic_interval > 0 
 	`
 	result := database.DB.Exec(query, models.StatusCompleted, models.StatusRunning)
 	if result.Error != nil {
