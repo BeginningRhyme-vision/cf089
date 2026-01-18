@@ -5,7 +5,18 @@ export const useAuthStore = create((set) => {
   // 检查是否为开发环境，如果是则使用模拟用户数据
   const isDev = process.env.NODE_ENV === 'development';
   let initialToken = Cookies.get('token') || null;
-  let initialUser = Cookies.get('user') ? JSON.parse(Cookies.get('user')) : null;
+  
+  let initialUser = null;
+  try {
+    const userCookie = Cookies.get('user');
+    if (userCookie) {
+      initialUser = JSON.parse(userCookie);
+    }
+  } catch (error) {
+    console.error("Failed to parse user cookie:", error);
+    // If parsing fails, user remains null, and we remove the bad cookie.
+    Cookies.remove('user');
+  }
   
   // 如果在开发环境中且没有认证信息，则使用模拟数据
   if (isDev && !initialToken && !initialUser) {
