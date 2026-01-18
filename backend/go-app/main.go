@@ -29,6 +29,9 @@ func main() {
 	// Start periodic redis cleanup
 	handlers.StartPeriodicCleanup()
 
+	// Start transfer job completion monitor
+	handlers.StartTransferJobMonitor()
+
 	r := routes.SetupRouter()
 
 	log.Println("Starting server on :8080")

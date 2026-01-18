@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
+	"log"
 	"net/http"
 	"sync"
 	"time"
@@ -1980,7 +1981,7 @@ func AcquireFfmpegTasks(c *gin.Context) {
 
 	loop:
 
-		for len(tasks) < req.Limit {
+		for len(tasks) >= req.Limit {
 
 			select {
 
@@ -1997,9 +1998,42 @@ func AcquireFfmpegTasks(c *gin.Context) {
 		}
 
 	}
+}
 
-	c.JSON(http.StatusOK, tasks)
+func StartTransferJobMonitor() {
+	go func() {
 
+		ticker := time.NewTicker(15 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			updateCompletedTransferJobs()
+		}
+	}()
+}
+
+func updateCompletedTransferJobs() {
+	query := `
+		UPDATE transfer_jobs
+		SET
+			status = ?,
+			end_time = NOW(),
+			duration_seconds = CASE
+				WHEN start_time IS NOT NULL THEN
+					EXTRACT(EPOCH FROM (NOW() - start_time))::int
+				ELSE
+					EXTRACT(EPOCH FROM (NOW() - created_at))::int
+			END
+		WHERE
+			status = ?
+			AND pending_count = 0
+			AND total_count > 0
+	`
+	result := database.DB.Exec(query, models.StatusCompleted, models.StatusRunning)
+	if result.Error != nil {
+		log.Printf("Error updating completed transfer jobs: %v", result.Error)
+	} else if result.RowsAffected > 0 {
+		log.Printf("Automatically completed %d transfer jobs", result.RowsAffected)
+	}
 }
 
 func BatchUpdateFfmpeg(c *gin.Context) {
