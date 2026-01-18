@@ -192,6 +192,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           echo "${{ env.TARGET_FILES }}" | while IFS= read -r FILE_PATH; do
+            FILE_PATH=$(echo "$FILE_PATH" | xargs) # Trim leading/trailing whitespace
             if [ -z "$FILE_PATH" ]; then continue; fi
             
             if [ -f "$FILE_PATH" ]; then
