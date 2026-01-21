@@ -50,15 +50,15 @@ type SrcConfig struct {
 }
 
 var (
-	cfg            *Config
-	s3Client       *s3.Client
+	cfg             *Config
+	s3Client        *s3.Client
 	s3PresignClient *s3.PresignClient
-	bucketName     string
-	apiBaseURL     string
-	jobCache       sync.Map // map[int64]JobInfo (JobID -> JobInfo)
-	workerID       string
-	internalClient *http.Client
-	externalClient *http.Client
+	bucketName      string
+	apiBaseURL      string
+	jobCache        sync.Map // map[int64]JobInfo (JobID -> JobInfo)
+	workerID        string
+	internalClient  *http.Client
+	externalClient  *http.Client
 
 	// Metrics
 	TasksProcessed = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -109,8 +109,8 @@ func initClients() {
 }
 
 const (
-	ChunkSize            = 16 * 1024 * 1024 // 32MB
-	MaxConcurrentWorkers = 200
+	ChunkSize            = 6 * 1024 * 1024 // 32MB
+	MaxConcurrentWorkers = 50
 	TaskBufferSize       = 200
 )
 
@@ -710,7 +710,7 @@ func cleanupIncompleteMultipartUploads(prefix string) error {
 		if err != nil {
 			log.Printf("Failed to abort upload %s (ID: %s): %v", *upload.Key, *upload.UploadId, err)
 		} else {
-			log.Printf("Aborted incomplete upload: %s (ID: %s, Initiated: %v)", 
+			log.Printf("Aborted incomplete upload: %s (ID: %s, Initiated: %v)",
 				*upload.Key, *upload.UploadId, *upload.Initiated)
 		}
 	}
@@ -758,8 +758,8 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 
 	// Log request details in JSON format
 	requestLog := map[string]interface{}{
-		"url":     cfg.Storage.DownloadServiceURL,
-		"method":  "POST",
+		"url":    cfg.Storage.DownloadServiceURL,
+		"method": "POST",
 		"headers": map[string]string{
 			"Content-Type": "application/json",
 		},
