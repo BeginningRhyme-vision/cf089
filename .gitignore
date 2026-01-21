@@ -39,8 +39,15 @@ frontend.pid
 # Logs
 *.log
 nohup.out
+<<<<<<< Updated upstream
 
 
 # frontend 
 frontend/vite.config.js
 frontend/package-lock.json
+=======
+config_back.yaml
+script/*
+*_test.go
+config_back_local.yaml
+>>>>>>> Stashed changes

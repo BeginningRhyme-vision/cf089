@@ -52,9 +52,10 @@ type SrcConfig struct {
 var (
 	cfg            *Config
 	s3Client       *s3.Client
+	s3PresignClient *s3.PresignClient
 	bucketName     string
 	apiBaseURL     string
-	jobCache       sync.Map // map[int64]string (JobID -> R2Prefix)
+	jobCache       sync.Map // map[int64]JobInfo (JobID -> JobInfo)
 	workerID       string
 	internalClient *http.Client
 	externalClient *http.Client
@@ -100,6 +101,7 @@ func initClients() {
 			}
 		}
 	}
+	// No proxy
 	externalClient = &http.Client{
 		Transport: externalTransport,
 		Timeout:   30 * time.Second,
@@ -128,8 +130,11 @@ type YoutubeTask struct {
 }
 
 type JobInfo struct {
-	ID       uint   `json:"id"`
-	R2Prefix string `json:"r2_prefix"`
+	ID               uint   `json:"id"`
+	R2Prefix         string `json:"r2_prefix"`
+	AudioExtension   string `json:"audio_extension"`
+	VideoExtension   string `json:"video_extension"`
+	FilenameTemplate string `json:"filename_template"`
 }
 
 type UpdateTaskRequest struct {
@@ -309,6 +314,9 @@ func initS3() {
 	s3Client = s3.NewFromConfig(c2, func(o *s3.Options) {
 		o.UsePathStyle = true
 	})
+
+	// Initialize presign client for generating presigned URLs
+	s3PresignClient = s3.NewPresignClient(s3Client)
 }
 
 func acquireTasks() ([]YoutubeTask, error) {
@@ -335,7 +343,103 @@ func acquireTasks() ([]YoutubeTask, error) {
 	return tasks, nil
 }
 
-func getJobPrefix(jobID int64) (string, error) {
+func sanitizeTitle(title string) string {
+	// Simple sanitization: replace non-alphanumeric chars with underscore, keep dots and dashes
+	// Or just remove very bad chars.
+	// Let's replace anything that is not letter, number, dot, dash, underscore with underscore.
+	// For simplicity, just replacing / with _ and trimming is usually enough for S3/R2 keys unless restricted.
+	// But to be safe:
+	safe := strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '.' || r == '-' || r == '_' {
+			return r
+		}
+		return '_'
+	}, title)
+	return strings.Trim(safe, "_")
+}
+
+func strftimeToGo(format string) string {
+	// Basic mapping of strftime to Go layout
+	mapping := map[string]string{
+		"%Y": "2006",
+		"%m": "01",
+		"%d": "02",
+		"%H": "15",
+		"%M": "04",
+		"%S": "05",
+	}
+	for k, v := range mapping {
+		format = strings.ReplaceAll(format, k, v)
+	}
+	return format
+}
+
+func generateFilename(template, prefix, videoID, title, ext string) string {
+	if template == "" {
+		// Default behavior
+		// Ensure trailing slash on prefix
+		if prefix != "" && !strings.HasSuffix(prefix, "/") {
+			prefix += "/"
+		}
+		// If audio/video differentiation is needed, the caller usually appends suffix.
+		// But here we are generating the base path.
+		// Wait, existing logic was: prefix + videoID + "_audio." + ext
+		// The template replaces that entirely.
+		// So if no template, we return empty string to signal "use default logic" or we handle default logic here?
+		// To be compatible with previous logic which distinguished audio/video suffixes,
+		// we should probably let the caller handle default if this returns empty,
+		// OR we pass a "type" (audio/video) to this function?
+		// The prompt says: "支持自定义文件的路径名称... 比如 $(date ...)/%(id).%(ext)"
+		// If template is provided, we use it. If not, we fall back.
+		return ""
+	}
+
+	filename := template
+
+	// 1. Date replacement: $(date +FORMAT)
+	// Find all occurrences
+	for {
+		start := strings.Index(filename, "$(date +")
+		if start == -1 {
+			break
+		}
+		end := strings.Index(filename[start:], ")")
+		if end == -1 {
+			break
+		}
+		end += start
+
+		fullToken := filename[start : end+1] // $(date +...)
+		formatStr := filename[start+8 : end] // The part after "+", e.g. %Y%m%d_%H
+
+		goLayout := strftimeToGo(formatStr)
+		timeStr := time.Now().Format(goLayout)
+
+		filename = strings.Replace(filename, fullToken, timeStr, 1)
+	}
+
+	// 2. Variables replacement
+	filename = strings.ReplaceAll(filename, "%(id)", videoID)
+	filename = strings.ReplaceAll(filename, "%(title)", sanitizeTitle(title))
+	filename = strings.ReplaceAll(filename, "%(ext)", ext)
+
+	// Prepend prefix if not absolute (usually we just prepend R2Prefix)
+	// The user said: "拼接 R2Prefix + 自定义文件名"
+	// So we always prepend Prefix.
+
+	// Ensure prefix has slash if it exists
+	if prefix != "" && !strings.HasSuffix(prefix, "/") {
+		prefix += "/"
+	}
+
+	// If the template starts with /, remove it to avoid double slash with prefix?
+	// Usually keys don't start with /
+	filename = strings.TrimPrefix(filename, "/")
+
+	return prefix + filename
+}
+
+func getJobInfo(jobID int64) (JobInfo, error) {
 	if val, ok := jobCache.Load(jobID); ok {
 		return val.(string), nil
 	}
@@ -386,11 +490,16 @@ func processTask(t YoutubeTask) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ext := "m4a" // Default
-			if strings.Contains(t.AudioURL, ".webm") {
-				ext = "webm"
+			ext := jobInfo.AudioExtension
+
+			var key string
+			customKey := generateFilename(jobInfo.FilenameTemplate, jobInfo.R2Prefix, t.VideoID, t.Title, ext)
+			if customKey != "" {
+				key = customKey
+			} else {
+				key = fmt.Sprintf("%s%s_audio.%s", prefix, t.VideoID, ext)
 			}
-			key := fmt.Sprintf("%s%s_audio.%s", prefix, t.VideoID, ext)
+
 			if err := transferFile(t.AudioURL, key, t.AudioSize); err != nil {
 				errChan <- fmt.Errorf("audio failed: %w", err)
 			}
@@ -401,9 +510,14 @@ func processTask(t YoutubeTask) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ext := "mp4"
-			if strings.Contains(t.VideoURL, ".webm") {
-				ext = "webm"
+			ext := jobInfo.VideoExtension
+
+			var key string
+			customKey := generateFilename(jobInfo.FilenameTemplate, jobInfo.R2Prefix, t.VideoID, t.Title, ext)
+			if customKey != "" {
+				key = customKey
+			} else {
+				key = fmt.Sprintf("%s%s_video.%s", prefix, t.VideoID, ext)
 			}
 			key := fmt.Sprintf("%s%s_video.%s", prefix, t.VideoID, ext)
 			if err := transferFile(t.VideoURL, key, t.VideoSize); err != nil {
@@ -507,6 +621,16 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 	default:
 	}
 
+	// Verify all parts were uploaded
+	if len(completedParts) != numParts {
+		s3Client.AbortMultipartUpload(context.TODO(), &s3.AbortMultipartUploadInput{
+			Bucket:   aws.String(bucketName),
+			Key:      aws.String(key),
+			UploadId: aws.String(uploadID),
+		})
+		return fmt.Errorf("incomplete upload: expected %d parts, got %d parts", numParts, len(completedParts))
+	}
+
 	// Sort parts
 	for i := 0; i < len(completedParts); i++ {
 		for j := i + 1; j < len(completedParts); j++ {
@@ -524,36 +648,125 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 			Parts: completedParts,
 		},
 	})
-	if err == nil {
-		log.Printf("Successfully uploaded: %s", key)
+	if err != nil {
+		// If CompleteMultipartUpload fails, abort the upload to clean up
+		s3Client.AbortMultipartUpload(context.TODO(), &s3.AbortMultipartUploadInput{
+			Bucket:   aws.String(bucketName),
+			Key:      aws.String(key),
+			UploadId: aws.String(uploadID),
+		})
+		return fmt.Errorf("failed to complete multipart upload: %w", err)
+	}
+	log.Printf("Successfully uploaded: %s", key)
+	return nil
+}
+
+// listIncompleteMultipartUploads 列出所有未完成的多部分上传
+func listIncompleteMultipartUploads(prefix string) ([]types.MultipartUpload, error) {
+	ctx := context.Background()
+	var uploads []types.MultipartUpload
+
+	paginator := s3.NewListMultipartUploadsPaginator(s3Client, &s3.ListMultipartUploadsInput{
+		Bucket: aws.String(bucketName),
+		Prefix: aws.String(prefix),
+	})
+
+	for paginator.HasMorePages() {
+		output, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		uploads = append(uploads, output.Uploads...)
 	}
 
+	return uploads, nil
+}
+
+// abortIncompleteMultipartUpload 中止一个未完成的多部分上传
+func abortIncompleteMultipartUpload(key string, uploadID string) error {
+	_, err := s3Client.AbortMultipartUpload(context.TODO(), &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(bucketName),
+		Key:      aws.String(key),
+		UploadId: aws.String(uploadID),
+	})
 	return err
 }
 
+// cleanupIncompleteMultipartUploads 清理指定前缀的所有未完成的多部分上传
+func cleanupIncompleteMultipartUploads(prefix string) error {
+	uploads, err := listIncompleteMultipartUploads(prefix)
+	if err != nil {
+		return fmt.Errorf("failed to list incomplete uploads: %w", err)
+	}
+
+	if len(uploads) == 0 {
+		log.Printf("No incomplete multipart uploads found with prefix: %s", prefix)
+		return nil
+	}
+
+	log.Printf("Found %d incomplete multipart upload(s) with prefix: %s", len(uploads), prefix)
+	for _, upload := range uploads {
+		err := abortIncompleteMultipartUpload(*upload.Key, *upload.UploadId)
+		if err != nil {
+			log.Printf("Failed to abort upload %s (ID: %s): %v", *upload.Key, *upload.UploadId, err)
+		} else {
+			log.Printf("Aborted incomplete upload: %s (ID: %s, Initiated: %v)", 
+				*upload.Key, *upload.UploadId, *upload.Initiated)
+		}
+	}
+
+	return nil
+}
+
 func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end int64) (string, error) {
-	// Construct Presigned URL for the destination?
-	// The Python script: presigned_url = f"{parsed_url.scheme}://{R2_BUCKET_NAME}.{parsed_url.netloc}/{key}"
-	// This format implies R2 virtual host style.
-	// We need to match what the External Service expects.
-	// Let's replicate the python logic exactly.
+	// Generate presigned URL for UploadPart
+	ctx := context.TODO()
+	presignRequest, err := s3PresignClient.PresignUploadPart(ctx, &s3.UploadPartInput{
+		Bucket:     aws.String(bucketName),
+		Key:        aws.String(key),
+		PartNumber: aws.Int32(partNum),
+		UploadId:   aws.String(uploadID),
+	}, func(opts *s3.PresignOptions) {
+		// Set expiration time (default is 15 minutes, we'll use 1 hour for safety)
+		opts.Expires = time.Duration(1 * time.Hour)
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to generate presigned URL for part %d: %w", partNum, err)
+	}
 
-	u, _ := http.NewRequest("GET", cfg.Storage.Src.Endpoint, nil)
-	// host: <account>.r2.cloudflarestorage.com
-	// scheme: https
-
-	destURL := fmt.Sprintf("%s://%s.%s/%s", u.URL.Scheme, bucketName, u.URL.Host, key)
+	// Get the presigned URL
+	presignedURL := presignRequest.URL
+	// Also forward any required signed headers (some S3-compatible providers require these)
+	signedHeaders := map[string]string{}
+	for k, vals := range presignRequest.SignedHeader {
+		if len(vals) > 0 {
+			signedHeaders[k] = vals[0]
+		}
+	}
 
 	payload := map[string]interface{}{
 		"fileUrl":    srcURL,
 		"offset":     start,
 		"size":       end - start + 1,
-		"r2Key":      destURL, // Python sent destinationUrl here
+		"r2Key":      presignedURL, // Send presigned URL instead of plain URL
+		"headers":    signedHeaders,
 		"partNumber": partNum,
 		"uploadId":   uploadID,
 	}
 
 	body, _ := json.Marshal(payload)
+
+	// Log request details in JSON format
+	requestLog := map[string]interface{}{
+		"url":     cfg.Storage.DownloadServiceURL,
+		"method":  "POST",
+		"headers": map[string]string{
+			"Content-Type": "application/json",
+		},
+		"body": payload,
+	}
+	requestLogJSON, _ := json.MarshalIndent(requestLog, "", "  ")
+	log.Printf("[REQUEST DEBUG] Chunk %d - Request details:\n%s", partNum, string(requestLogJSON))
 
 	// Retry logic
 	var lastErr error
@@ -619,4 +832,95 @@ func updateTask(req UpdateTaskRequest) {
 		io.Copy(io.Discard, resp.Body)
 		resp.Body.Close()
 	}
+}
+
+// getFileSizeFromURL 通过 HTTP HEAD 请求获取文件大小
+// 如果无法获取，返回错误
+func getFileSizeFromURL(url string) (int64, error) {
+	// 对于 YouTube CDN URL，直接尝试 GET Range 请求（HEAD 通常不支持）
+	// 添加必要的 headers
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return 0, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	// 添加 User-Agent 和其他 headers（YouTube CDN 需要）
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "*/*")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+	req.Header.Set("Accept-Encoding", "identity")         // 禁用压缩，确保 Content-Length 准确
+	req.Header.Set("Referer", "https://www.youtube.com/") // YouTube CDN 可能需要 Referer
+	req.Header.Set("Range", "bytes=0-0")                  // 只请求第一个字节，用于获取 Content-Length
+
+	// 使用 externalClient（带代理）来获取文件大小
+	// Go 的 http.Client 默认会跟随重定向（最多 10 次）
+	resp, err := externalClient.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("failed to get file size: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// 处理 206 Partial Content（Range 请求的响应）
+	if resp.StatusCode == http.StatusPartialContent {
+		contentRange := resp.Header.Get("Content-Range")
+		if contentRange != "" {
+			// Content-Range: bytes 0-0/24134379 或 bytes */24134379
+			// 使用 strings 包更可靠地解析
+			// 格式：bytes start-end/total 或 bytes */total
+			if strings.HasPrefix(contentRange, "bytes ") {
+				parts := strings.Split(contentRange, "/")
+				if len(parts) == 2 {
+					var total int64
+					if _, err := fmt.Sscanf(strings.TrimSpace(parts[1]), "%d", &total); err == nil && total > 0 {
+						return total, nil
+					}
+				}
+			}
+			// 如果解析失败，记录详细信息
+			return 0, fmt.Errorf("failed to parse Content-Range header: %q (status: %d)", contentRange, resp.StatusCode)
+		}
+		// 对于 Range 请求，如果没有 Content-Range header，无法确定总大小
+		// ContentLength 只表示返回的字节数（通常是 1），不是总文件大小
+		return 0, fmt.Errorf("206 Partial Content response missing Content-Range header (status: %d, Content-Length: %d)", resp.StatusCode, resp.ContentLength)
+	}
+
+	// 处理 200 OK（某些服务器可能不支持 Range，直接返回完整文件）
+	// 注意：如果发送了 Range 请求但收到 200 OK，通常意味着服务器不支持 Range 或返回了完整文件
+	if resp.StatusCode == http.StatusOK {
+		// 优先尝试从 Content-Range 获取（某些服务器即使返回 200 也会包含 Content-Range）
+		contentRange := resp.Header.Get("Content-Range")
+		if contentRange != "" {
+			// 使用 strings 包解析
+			if strings.HasPrefix(contentRange, "bytes ") {
+				parts := strings.Split(contentRange, "/")
+				if len(parts) == 2 {
+					var total int64
+					if _, err := fmt.Sscanf(strings.TrimSpace(parts[1]), "%d", &total); err == nil && total > 0 {
+						return total, nil
+					}
+				}
+			}
+		}
+		// 如果发送了 Range 请求但收到 200 OK，且 ContentLength 很小（如 1 字节），
+		// 这可能是错误响应，不应该信任 ContentLength
+		if resp.ContentLength > 0 {
+			// 如果 ContentLength 异常小（小于 100 字节），可能是错误响应
+			if resp.ContentLength < 100 {
+				return 0, fmt.Errorf("received 200 OK with suspiciously small Content-Length: %d bytes (URL may have expired or be invalid)", resp.ContentLength)
+			}
+			return resp.ContentLength, nil
+		}
+		return 0, fmt.Errorf("200 OK response missing Content-Length header")
+	}
+
+	// 处理 302/301 重定向（虽然 client.CheckRedirect 应该已经处理了，但以防万一）
+	if resp.StatusCode == http.StatusFound || resp.StatusCode == http.StatusMovedPermanently {
+		location := resp.Header.Get("Location")
+		if location != "" {
+			// 递归调用，但限制深度
+			return getFileSizeFromURL(location)
+		}
+	}
+
+	return 0, fmt.Errorf("unexpected status code: %d (URL may require authentication or specific headers, or may have expired)", resp.StatusCode)
 }
