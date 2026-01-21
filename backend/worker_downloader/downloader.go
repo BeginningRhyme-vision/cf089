@@ -110,8 +110,8 @@ func initClients() {
 
 const (
 	ChunkSize            = 6 * 1024 * 1024 // 32MB
-	MaxConcurrentWorkers = 50
-	TaskBufferSize       = 200
+	MaxConcurrentWorkers = 5
+	TaskBufferSize       = 20
 )
 
 // --- Models ---
