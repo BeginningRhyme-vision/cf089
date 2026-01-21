@@ -726,10 +726,11 @@ func AddTasksToTransferJob(c *gin.Context) {
 // --- Youtube Jobs ---
 
 type CreateYoutubeJobRequest struct {
-	R2Prefix     string   `json:"r2_prefix" form:"r2_prefix"`
-	FileUrl      string   `json:"file_url" form:"file_url"`
-	DownloadMode string   `json:"download_mode" form:"download_mode"`
-	Tasks        []string `json:"tasks" form:"-"` // List of URLs
+	R2Prefix               string   `json:"r2_prefix" form:"r2_prefix"`
+	FileUrl                string   `json:"file_url" form:"file_url"`
+	DownloadMode           string   `json:"download_mode" form:"download_mode"`
+	VideoSelectionStrategy string   `json:"video_selection_strategy" form:"video_selection_strategy"`
+	Tasks                  []string `json:"tasks" form:"-"` // List of URLs
 }
 
 func CreateYoutubeJob(c *gin.Context) {
@@ -746,6 +747,7 @@ func CreateYoutubeJob(c *gin.Context) {
 		req.R2Prefix = c.PostForm("r2_prefix")
 		req.FileUrl = c.PostForm("file_url")
 		req.DownloadMode = c.PostForm("download_mode")
+		req.VideoSelectionStrategy = c.PostForm("video_selection_strategy")
 
 		// Handle file upload
 		file, err := c.FormFile("file")
@@ -815,15 +817,19 @@ func CreateYoutubeJob(c *gin.Context) {
 
 	// 1. Create Job in PG
 	job := models.YoutubeJob{
-		R2Prefix:     req.R2Prefix,
-		DownloadMode: req.DownloadMode,
-		Status:       models.StatusPending,
-		TotalCount:   len(req.Tasks),
-		PendingCount: len(req.Tasks),
+		R2Prefix:               req.R2Prefix,
+		DownloadMode:           req.DownloadMode,
+		VideoSelectionStrategy: req.VideoSelectionStrategy,
+		Status:                 models.StatusPending,
+		TotalCount:             len(req.Tasks),
+		PendingCount:           len(req.Tasks),
 	}
 
 	if job.DownloadMode == "" {
 		job.DownloadMode = "both"
+	}
+	if job.VideoSelectionStrategy == "" {
+		job.VideoSelectionStrategy = "highest_quality"
 	}
 
 	if err := database.DB.Create(&job).Error; err != nil {

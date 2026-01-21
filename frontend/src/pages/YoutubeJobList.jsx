@@ -69,6 +69,7 @@ const YoutubeJobList = () => {
         const formData = new FormData();
         formData.append('r2_prefix', values.r2_prefix);
         formData.append('download_mode', values.download_mode || 'both');
+        formData.append('video_selection_strategy', values.video_selection_strategy || 'highest_quality');
         formData.append('file', fileList[0]);
         if (values.file_url) {
             formData.append('file_url', values.file_url);
@@ -96,6 +97,7 @@ const YoutubeJobList = () => {
         const payload = {
             r2_prefix: values.r2_prefix,
             download_mode: values.download_mode || 'both',
+            video_selection_strategy: values.video_selection_strategy || 'highest_quality',
             tasks: tasks,
             file_url: values.file_url
         };
@@ -173,6 +175,14 @@ const YoutubeJobList = () => {
       key: 'download_mode',
       width: 120,
       render: (mode) => <Tag color="blue">{mode.toUpperCase()}</Tag>,
+      responsive: ['md']
+    },
+    { 
+      title: 'Strategy', 
+      dataIndex: 'video_selection_strategy', 
+      key: 'video_selection_strategy',
+      width: 120,
+      render: (mode) => <Tag color="purple">{mode ? mode.toUpperCase() : 'HIGHEST'}</Tag>,
       responsive: ['md']
     },
     { 
@@ -303,6 +313,16 @@ const YoutubeJobList = () => {
                 <Select.Option value="both">Video + Audio</Select.Option>
                 <Select.Option value="audio">Audio Only</Select.Option>
                 <Select.Option value="video">Video Only</Select.Option>
+            </Select>
+          </Form.Item>
+          <Form.Item
+            name="video_selection_strategy"
+            label="Video Selection Strategy"
+            initialValue="highest_quality"
+          >
+            <Select>
+                <Select.Option value="highest_quality">Highest Quality (Default)</Select.Option>
+                <Select.Option value="hd_priority">HD Priority (Prefer 1080p/720p)</Select.Option>
             </Select>
           </Form.Item>
           <Form.Item 

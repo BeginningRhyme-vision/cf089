@@ -74,16 +74,17 @@ func (TransferJob) TableName() string {
 }
 
 type YoutubeJob struct {
-	ID           uint      `gorm:"primaryKey" json:"id"`
-	R2Prefix     string    `gorm:"size:1024;not null" json:"r2_prefix"`
-	DownloadMode string    `gorm:"type:varchar(20);default:'both'" json:"download_mode"` // 'both', 'audio', 'video'
-	Status       JobStatus `gorm:"type:varchar(50);default:'PENDING'" json:"status"`
-	TotalCount   int       `gorm:"default:0" json:"total_count"`
-	PendingCount int       `gorm:"default:0" json:"pending_count"`
-	RunningCount int       `gorm:"default:0" json:"running_count"`
-	SuccessCount int       `gorm:"default:0" json:"success_count"`
-	FailedCount  int       `gorm:"default:0" json:"failed_count"`
-	CreatedAt    time.Time `gorm:"autoCreateTime" json:"created_at"`
+	ID                     uint      `gorm:"primaryKey" json:"id"`
+	R2Prefix               string    `gorm:"size:1024;not null" json:"r2_prefix"`
+	DownloadMode           string    `gorm:"type:varchar(20);default:'both'" json:"download_mode"` // 'both', 'audio', 'video'
+	VideoSelectionStrategy string    `gorm:"type:varchar(50);default:'highest_quality'" json:"video_selection_strategy"`
+	Status                 JobStatus `gorm:"type:varchar(50);default:'PENDING'" json:"status"`
+	TotalCount             int       `gorm:"default:0" json:"total_count"`
+	PendingCount           int       `gorm:"default:0" json:"pending_count"`
+	RunningCount           int       `gorm:"default:0" json:"running_count"`
+	SuccessCount           int       `gorm:"default:0" json:"success_count"`
+	FailedCount            int       `gorm:"default:0" json:"failed_count"`
+	CreatedAt              time.Time `gorm:"autoCreateTime" json:"created_at"`
 }
 
 func (YoutubeJob) TableName() string {
