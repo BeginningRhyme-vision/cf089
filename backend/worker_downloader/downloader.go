@@ -441,26 +441,26 @@ func generateFilename(template, prefix, videoID, title, ext string) string {
 
 func getJobInfo(jobID int64) (JobInfo, error) {
 	if val, ok := jobCache.Load(jobID); ok {
-		return val.(string), nil
+		return val.(JobInfo), nil
 	}
 
 	resp, err := internalClient.Get(fmt.Sprintf("%s/youtube-jobs/%d", apiBaseURL, jobID))
 	if err != nil {
-		return "", err
+		return JobInfo{}, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("job not found")
+		return JobInfo{}, fmt.Errorf("job not found")
 	}
 
 	var job JobInfo
 	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
-		return "", err
+		return JobInfo{}, err
 	}
 
-	jobCache.Store(jobID, job.R2Prefix)
-	return job.R2Prefix, nil
+	jobCache.Store(jobID, job)
+	return job, nil
 }
 
 func processTask(t YoutubeTask) {
@@ -472,12 +472,13 @@ func processTask(t YoutubeTask) {
 	updateTaskStatus(t.ID, "RUNNING")
 	log.Printf("Task %d (%s) RUNNING", t.ID, t.VideoID)
 
-	prefix, err := getJobPrefix(t.JobID)
+	jobInfo, err := getJobInfo(t.JobID)
 	if err != nil {
 		reportError(t.ID, "Failed to get job info: "+err.Error())
 		return
 	}
 
+	prefix := jobInfo.R2Prefix
 	// Ensure trailing slash
 	if prefix != "" && !strings.HasSuffix(prefix, "/") {
 		prefix += "/"
@@ -519,7 +520,6 @@ func processTask(t YoutubeTask) {
 			} else {
 				key = fmt.Sprintf("%s%s_video.%s", prefix, t.VideoID, ext)
 			}
-			key := fmt.Sprintf("%s%s_video.%s", prefix, t.VideoID, ext)
 			if err := transferFile(t.VideoURL, key, t.VideoSize); err != nil {
 				errChan <- fmt.Errorf("video failed: %w", err)
 			}
