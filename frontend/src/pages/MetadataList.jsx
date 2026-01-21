@@ -95,7 +95,7 @@ const MetadataList = () => {
       dataIndex: 'endpoint', 
       key: 'endpoint',
       render: (text) => (
-        <div style={cellStyle} title={text}>
+        <div style={{ ...cellStyle, maxWidth: 400 }} title={text}>
           {text}
         </div>
       )
