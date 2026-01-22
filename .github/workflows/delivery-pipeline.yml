@@ -13,5 +13,5 @@ on:
 
 jobs:
   deploy:
-    uses: unbound-future/github-actions/unbound-future-admin/delivery-pipeline.yml@main
+    uses: unbound-future/github-actions/.github/workflows/unbound-future-admin/delivery-pipeline.yml@main
     secrets: inherit
