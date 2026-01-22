@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -109,10 +110,47 @@ func initClients() {
 }
 
 const (
-	ChunkSize            = 6 * 1024 * 1024 // 32MB
-	MaxConcurrentWorkers = 5
-	TaskBufferSize       = 40
+// 默认值：6MB (注意原注释写的是32MB但实际是6MB，这里保持实际值不变)
+// 可通过环境变量 DOWNLOAD_CHUNK_SIZE 覆盖
+// 可通过环境变量 DOWNLOAD_MAX_CONCURRENT_WORKERS 覆盖
+// 可通过环境变量 DOWNLOAD_TASK_BUFFER_SIZE 覆盖
 )
+
+var (
+	ChunkSize            int64 = getDefaultChunkSize()
+	MaxConcurrentWorkers       = getDefaultMaxConcurrentWorkers()
+	TaskBufferSize             = getDefaultTaskBufferSize()
+)
+
+func getDefaultChunkSize() int64 {
+	chunkSizeStr := os.Getenv("DOWNLOAD_CHUNK_SIZE")
+	if chunkSizeStr != "" {
+		if chunkSize, err := strconv.ParseInt(chunkSizeStr, 10, 64); err == nil {
+			return chunkSize
+		}
+	}
+	return 6 * 1024 * 1024 // 默认 6MB
+}
+
+func getDefaultMaxConcurrentWorkers() int {
+	workersStr := os.Getenv("DOWNLOAD_MAX_CONCURRENT_WORKERS")
+	if workersStr != "" {
+		if workers, err := strconv.Atoi(workersStr); err == nil {
+			return workers
+		}
+	}
+	return 5 // 默认值
+}
+
+func getDefaultTaskBufferSize() int {
+	bufferStr := os.Getenv("DOWNLOAD_TASK_BUFFER_SIZE")
+	if bufferStr != "" {
+		if buffer, err := strconv.Atoi(bufferStr); err == nil {
+			return buffer
+		}
+	}
+	return 40 // 默认值
+}
 
 // --- Models ---
 
@@ -179,7 +217,7 @@ func main() {
 	go func() {
 		for {
 			// Backpressure: if channel is mostly full, wait a bit
-			if len(taskChan) >= (TaskBufferSize)*0.95 {
+			if len(taskChan) >= (TaskBufferSize)/9 {
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
