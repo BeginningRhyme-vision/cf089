@@ -103,9 +103,11 @@ func initClients() {
 		}
 	}
 	// No proxy
+	// Use longer timeout for upload operations (5 minutes)
+	// Upload service may need time to download from YouTube CDN and upload to R2
 	externalClient = &http.Client{
 		Transport: externalTransport,
-		Timeout:   30 * time.Second,
+		Timeout:   5 * time.Minute,
 	}
 }
 
