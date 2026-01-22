@@ -179,7 +179,7 @@ func main() {
 	go func() {
 		for {
 			// Backpressure: if channel is mostly full, wait a bit
-			if len(taskChan) >= TaskBufferSize-20 {
+			if len(taskChan) >= (TaskBufferSize)*0.95 {
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
