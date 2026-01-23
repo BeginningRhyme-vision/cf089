@@ -323,6 +323,7 @@ const YoutubeJobList = () => {
             <Select>
                 <Select.Option value="highest_quality">Highest Quality (Default)</Select.Option>
                 <Select.Option value="hd_priority">HD Priority (Prefer 1080p/720p)</Select.Option>
+                <Select.Option value="best_1080p_plus">Best 1080P+ (Fail if &lt; 1080P)</Select.Option>
             </Select>
           </Form.Item>
           <Form.Item 

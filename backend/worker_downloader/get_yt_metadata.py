@@ -142,6 +142,14 @@ def process_metadata(task, ydl_opts):
                     # 策略 D (保底): 如果还没选到，选现存最高的 >= 720
                     if not best_video:
                          best_video = next((f for f in video_candidates if f.get('height', 0) >= 720), None)
+                elif video_strategy == 'best_1080p_plus':
+                    # 策略: 仅下载 1080P 及以上
+                    valid_candidates = [f for f in video_candidates if f.get('height', 0) >= 1080]
+                    if not valid_candidates:
+                        raise Exception("Video quality too low (max height < 1080P). Requirement: best_1080p_plus.")
+                    
+                    # 取最好的 (video_candidates 已经是降序，所以第一个就是最好的)
+                    best_video = valid_candidates[0]
                 else:
                     # Default: highest_quality
                     if video_candidates:
