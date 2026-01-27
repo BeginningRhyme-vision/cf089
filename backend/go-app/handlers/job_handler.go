@@ -378,8 +378,9 @@ func RetryYoutubeTasksLogic(jobID int, initialStatus models.JobStatus) {
 
 					data, _ := json.Marshal(task)
 					pipe.Set(ctx, keys[i], data, 0)
-					// Push back to download queue
-					pipe.RPush(ctx, "queue:youtube:download_ready", task.ID)
+					// Push back to download queue (根据 Job 的 MachineName 推入对应的队列)
+					queueName := getDownloadQueueName(task.JobID)
+					pipe.RPush(ctx, queueName, task.ID)
 
 					hasUpdates = true
 					resetCount++
@@ -730,6 +731,7 @@ type CreateYoutubeJobRequest struct {
 	FileUrl                string   `json:"file_url" form:"file_url"`
 	DownloadMode           string   `json:"download_mode" form:"download_mode"`
 	VideoSelectionStrategy string   `json:"video_selection_strategy" form:"video_selection_strategy"`
+	MachineName            string   `json:"machine_name" form:"machine_name"` // 绑定的主机名，为空表示所有主机都可以处理
 	Tasks                  []string `json:"tasks" form:"-"` // List of URLs
 }
 
@@ -748,6 +750,7 @@ func CreateYoutubeJob(c *gin.Context) {
 		req.FileUrl = c.PostForm("file_url")
 		req.DownloadMode = c.PostForm("download_mode")
 		req.VideoSelectionStrategy = c.PostForm("video_selection_strategy")
+		req.MachineName = c.PostForm("machine_name")
 
 		// Handle file upload
 		file, err := c.FormFile("file")
@@ -820,6 +823,7 @@ func CreateYoutubeJob(c *gin.Context) {
 		R2Prefix:               req.R2Prefix,
 		DownloadMode:           req.DownloadMode,
 		VideoSelectionStrategy: req.VideoSelectionStrategy,
+		MachineName:            req.MachineName,
 		Status:                 models.StatusPending,
 		TotalCount:             len(req.Tasks),
 		PendingCount:           len(req.Tasks),
@@ -864,6 +868,34 @@ func ListYoutubeJobs(c *gin.Context) {
 		return
 	}
 
+	// 为每个 Job 从数据库查询最新的任务计数
+	for i := range jobs {
+		var counts struct {
+			Total    int64
+			Pending  int64
+			Running  int64
+			Success  int64
+			Failed   int64
+		}
+		
+		database.DB.Model(&models.YoutubeTaskRecord{}).
+			Where("job_id = ?", jobs[i].ID).
+			Select(`
+				COUNT(*) as total,
+				SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END) as pending,
+				SUM(CASE WHEN status = 'RUNNING' THEN 1 ELSE 0 END) as running,
+				SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END) as success,
+				SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) as failed
+			`).
+			Scan(&counts)
+		
+		jobs[i].TotalCount = int(counts.Total)
+		jobs[i].PendingCount = int(counts.Pending)
+		jobs[i].RunningCount = int(counts.Running)
+		jobs[i].SuccessCount = int(counts.Success)
+		jobs[i].FailedCount = int(counts.Failed)
+	}
+
 	// Count total records for pagination
 	var total int64
 	if err := database.DB.Model(&models.YoutubeJob{}).Count(&total).Error; err != nil {
@@ -882,6 +914,34 @@ func GetYoutubeJob(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Job not found"})
 		return
 	}
+	
+	// 直接从数据库查询任务计数
+	var counts struct {
+		Total    int64
+		Pending  int64
+		Running  int64
+		Success  int64
+		Failed   int64
+	}
+	
+	database.DB.Model(&models.YoutubeTaskRecord{}).
+		Where("job_id = ?", id).
+		Select(`
+			COUNT(*) as total,
+			SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END) as pending,
+			SUM(CASE WHEN status = 'RUNNING' THEN 1 ELSE 0 END) as running,
+			SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END) as success,
+			SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) as failed
+		`).
+		Scan(&counts)
+	
+	// 更新 Job 的计数
+	job.TotalCount = int(counts.Total)
+	job.PendingCount = int(counts.Pending)
+	job.RunningCount = int(counts.Running)
+	job.SuccessCount = int(counts.Success)
+	job.FailedCount = int(counts.Failed)
+	
 	c.JSON(http.StatusOK, job)
 }
 
@@ -1035,6 +1095,223 @@ func RetryFailedYoutubeTasks(c *gin.Context) {
 	go RetryYoutubeTasksLogic(jobID, job.Status)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Retry initiated in background"})
+}
+
+// RetryNonCompletedYoutubeTasks 从 PostgreSQL 查询非 COMPLETED 状态的任务，检查是否在队列中，如果不在则重新入队
+func RetryNonCompletedYoutubeTasks(c *gin.Context) {
+	id := c.Param("id")
+	jobID, _ := strconv.Atoi(id)
+
+	var job models.YoutubeJob
+	if err := database.DB.First(&job, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Job not found"})
+		return
+	}
+
+	// 从 PostgreSQL 查询非 COMPLETED 状态的任务
+	var tasks []models.YoutubeTaskRecord
+	if err := database.DB.Where("job_id = ? AND status != ?", jobID, "COMPLETED").Find(&tasks).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query tasks: " + err.Error()})
+		return
+	}
+
+	ctx := context.Background()
+	pipe := database.RDB.Pipeline()
+	queuedCount := 0
+	skippedCount := 0
+
+	// 获取 Job 的 machine_name 来确定队列名
+	// 使用 task_handler.go 中的函数来获取队列名
+	jobMachineName := getJobMachineName(int64(jobID))
+	metadataQueueName := getMetadataQueueName(int64(jobID))
+	
+	log.Printf("[RetryNonCompletedYoutubeTasks] Job %d machine_name: '%s', metadata queue: %s", jobID, jobMachineName, metadataQueueName)
+
+	// 检查队列中已有的任务ID（用于去重）
+	// 需要检查所有可能的队列：特定机器队列和 all 队列
+	existingInQueue := make(map[int64]bool)
+	
+	// 检查特定机器的 metadata_retry 队列（如果 Job 有 machine_name）
+	if jobMachineName != "" {
+		specificQueueName := fmt.Sprintf("queue:youtube:metadata_retry:%s", jobMachineName)
+		if queueLength, _ := database.RDB.LLen(ctx, specificQueueName).Result(); queueLength > 0 {
+			queueTaskIDs, _ := database.RDB.LRange(ctx, specificQueueName, 0, -1).Result()
+			for _, idStr := range queueTaskIDs {
+				if taskID, err := strconv.ParseInt(idStr, 10, 64); err == nil {
+					existingInQueue[taskID] = true
+				}
+			}
+			log.Printf("[RetryNonCompletedYoutubeTasks] Found %d tasks in specific metadata queue: %s", queueLength, specificQueueName)
+		}
+	}
+	
+	// 检查 all 队列
+	allQueueName := "queue:youtube:metadata_retry:all"
+	if queueLength, _ := database.RDB.LLen(ctx, allQueueName).Result(); queueLength > 0 {
+		queueTaskIDs, _ := database.RDB.LRange(ctx, allQueueName, 0, -1).Result()
+		for _, idStr := range queueTaskIDs {
+			if taskID, err := strconv.ParseInt(idStr, 10, 64); err == nil {
+				existingInQueue[taskID] = true
+			}
+		}
+		log.Printf("[RetryNonCompletedYoutubeTasks] Found %d tasks in all metadata queue: %s", queueLength, allQueueName)
+	}
+	
+	// 也检查下载队列（以防任务已经在下载队列中）
+	targetQueueName := getDownloadQueueName(int64(jobID))
+	if queueLength, _ := database.RDB.LLen(ctx, targetQueueName).Result(); queueLength > 0 {
+		queueTaskIDs, _ := database.RDB.LRange(ctx, targetQueueName, 0, -1).Result()
+		for _, idStr := range queueTaskIDs {
+			if taskID, err := strconv.ParseInt(idStr, 10, 64); err == nil {
+				existingInQueue[taskID] = true
+			}
+		}
+		log.Printf("[RetryNonCompletedYoutubeTasks] Found %d tasks in download queue: %s", queueLength, targetQueueName)
+	}
+
+	// 统计需要更新的状态计数
+	statusCounts := make(map[string]int)
+	var taskIDsToUpdate []int64
+	
+	for _, task := range tasks {
+		taskID := int64(task.ID)
+		
+		// 检查任务是否已经在队列中
+		if existingInQueue[taskID] {
+			skippedCount++
+			continue
+		}
+
+		// 记录旧状态用于计数更新
+		oldStatus := task.Status
+		statusCounts[oldStatus]++
+
+		// 先从 Redis 读取现有任务数据，保留 URL 等字段
+		taskKey := fmt.Sprintf("task:%d", taskID)
+		existingTaskData, err := database.RDB.Get(ctx, taskKey).Result()
+		var redisTask models.YoutubeTask
+		hasRedisData := false
+		
+		if err == nil && existingTaskData != "" {
+			// 成功从 Redis 读取到数据，解析它
+			if err := json.Unmarshal([]byte(existingTaskData), &redisTask); err == nil {
+				hasRedisData = true
+				// 保留 URL 字段（如果 Redis 中有的话）
+				log.Printf("[RetryNonCompletedYoutubeTasks] Preserving URL from Redis for task %d: %s", taskID, redisTask.URL)
+			}
+		}
+		
+		// 更新任务状态为 PENDING（重置状态）
+		// 如果 Redis 中有数据，使用 Redis 的任务对象；否则创建新的
+		if hasRedisData {
+			redisTask.Status = "PENDING"
+			redisTask.WorkerID = ""
+			redisTask.ErrorMessage = ""
+			redisTask.UpdatedAt = time.Now()
+			// URL 字段已经保留，不需要修改
+		} else {
+			// Redis 中没有数据，从 PostgreSQL 数据创建新任务对象
+			// 注意：YoutubeTaskRecord 没有 URL 字段，所以 URL 会是空的
+			redisTask = models.YoutubeTask{
+				ID:           taskID,
+				JobID:        int64(task.JobID),
+				URL:          "", // PostgreSQL 中没有 URL，所以是空的
+				Status:       "PENDING",
+				WorkerID:     "",
+				ErrorMessage: "",
+				Title:        task.Title,
+				VideoID:      task.VideoID,
+				AudioURL:     task.AudioURL,
+				AudioSize:    task.AudioSize,
+				VideoURL:     task.VideoURL,
+				VideoSize:    task.VideoSize,
+				UpdatedAt:    time.Now(),
+			}
+			log.Printf("[RetryNonCompletedYoutubeTasks] Task %d not found in Redis, creating new task object (URL will be empty)", taskID)
+		}
+
+		// 更新 Redis 中的任务数据
+		taskData, err := json.Marshal(redisTask)
+		if err != nil {
+			log.Printf("[RetryNonCompletedYoutubeTasks] Failed to marshal task %d: %v", taskID, err)
+			continue
+		}
+		pipe.Set(ctx, taskKey, taskData, 0)
+
+		// 收集需要更新的任务ID（批量更新 PostgreSQL）
+		taskIDsToUpdate = append(taskIDsToUpdate, taskID)
+
+		// 所有非 COMPLETED 状态的任务都推入 metadata_retry 队列，让 metadata worker 重新处理
+		pipe.RPush(ctx, metadataQueueName, taskID)
+		queuedCount++
+		log.Printf("[RetryNonCompletedYoutubeTasks] Queued task %d (status: %s -> PENDING) to metadata queue: %s (will be processed by metadata worker)", taskID, oldStatus, metadataQueueName)
+	}
+	
+	// 批量更新 PostgreSQL 中的任务状态
+	if len(taskIDsToUpdate) > 0 {
+		database.DB.Model(&models.YoutubeTaskRecord{}).
+			Where("id IN ? AND job_id = ?", taskIDsToUpdate, jobID).
+			Updates(map[string]interface{}{
+				"status":        "PENDING",
+				"worker_id":     "",
+				"error_message": "",
+				"updated_at":    time.Now(),
+			})
+		log.Printf("[RetryNonCompletedYoutubeTasks] Updated %d tasks in PostgreSQL to PENDING", len(taskIDsToUpdate))
+	}
+
+	// 执行 pipeline
+	if queuedCount > 0 {
+		_, err := pipe.Exec(ctx)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to queue tasks: " + err.Error()})
+			return
+		}
+
+		// 直接从数据库重新计算并更新 Job 的计数
+		var counts struct {
+			Total    int64
+			Pending  int64
+			Running  int64
+			Success  int64
+			Failed   int64
+		}
+		
+		database.DB.Model(&models.YoutubeTaskRecord{}).
+			Where("job_id = ?", jobID).
+			Select(`
+				COUNT(*) as total,
+				SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END) as pending,
+				SUM(CASE WHEN status = 'RUNNING' THEN 1 ELSE 0 END) as running,
+				SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END) as success,
+				SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) as failed
+			`).
+			Scan(&counts)
+		
+		// 更新 Job 计数
+		database.DB.Model(&models.YoutubeJob{}).
+			Where("id = ?", jobID).
+			Updates(map[string]interface{}{
+				"total_count":   counts.Total,
+				"pending_count": counts.Pending,
+				"running_count": counts.Running,
+				"success_count": counts.Success,
+				"failed_count":  counts.Failed,
+			})
+		
+		log.Printf("[RetryNonCompletedYoutubeTasks] Updated job %d counts from database: total=%d, pending=%d, running=%d, success=%d, failed=%d", 
+			jobID, counts.Total, counts.Pending, counts.Running, counts.Success, counts.Failed)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":       "Retry completed",
+		"queued_count":  queuedCount,
+		"skipped_count": skippedCount,
+		"total_tasks":   len(tasks),
+		"queue_name":    metadataQueueName, // 所有任务都推入 metadata_retry 队列
+		"status_changes": statusCounts,
+		"note":          "All non-COMPLETED tasks have been reset to PENDING and queued to metadata_retry queue for reprocessing by metadata worker",
+	})
 }
 
 // --- Ffmpeg Jobs ---

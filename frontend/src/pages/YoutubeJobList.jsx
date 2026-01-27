@@ -19,6 +19,7 @@ const YoutubeJobList = () => {
   const [loading, setLoading] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [fileList, setFileList] = useState([]);
+  const [machineNames, setMachineNames] = useState([]);
   const [pagination, setPagination] = useState({
     current: 1,
     pageSize: 10,
@@ -58,7 +59,28 @@ const YoutubeJobList = () => {
 
   useEffect(() => {
     fetchJobs(pagination.current, pagination.pageSize);
+    fetchMachineNames();
   }, [pagination.current, pagination.pageSize]);
+
+  const handleTableChange = (page, pageSize) => {
+    setPagination(prev => ({
+      ...prev,
+      current: page,
+      pageSize: pageSize
+    }));
+  };
+
+  const fetchMachineNames = async () => {
+    try {
+      const res = await api.get('/worker-cookie-configs/machine-names');
+      if (res.data && res.data.machine_names) {
+        setMachineNames(res.data.machine_names);
+      }
+    } catch (error) {
+      // 如果获取失败，不影响主流程，只是没有主机名列表
+      console.warn('Failed to fetch machine names:', error);
+    }
+  };
 
   const handleCreate = async () => {
     try {
@@ -70,6 +92,9 @@ const YoutubeJobList = () => {
         formData.append('r2_prefix', values.r2_prefix);
         formData.append('download_mode', values.download_mode || 'both');
         formData.append('video_selection_strategy', values.video_selection_strategy || 'highest_quality');
+        if (values.machine_name) {
+          formData.append('machine_name', values.machine_name);
+        }
         formData.append('file', fileList[0]);
         if (values.file_url) {
             formData.append('file_url', values.file_url);
@@ -101,6 +126,9 @@ const YoutubeJobList = () => {
             tasks: tasks,
             file_url: values.file_url
         };
+        if (values.machine_name) {
+          payload.machine_name = values.machine_name;
+        }
 
         await api.post('/youtube-jobs/', payload);
       }
@@ -184,6 +212,14 @@ const YoutubeJobList = () => {
       width: 120,
       render: (mode) => <Tag color="purple">{mode ? mode.toUpperCase() : 'HIGHEST'}</Tag>,
       responsive: ['md']
+    },
+    { 
+      title: 'Machine Name', 
+      dataIndex: 'machine_name', 
+      key: 'machine_name',
+      width: 150,
+      render: (name) => name ? <Tag color="cyan">{name}</Tag> : <Tag color="default">All</Tag>,
+      responsive: ['lg']
     },
     { 
       title: 'Status', 
@@ -322,7 +358,27 @@ const YoutubeJobList = () => {
           >
             <Select>
                 <Select.Option value="highest_quality">Highest Quality (Default)</Select.Option>
-                <Select.Option value="hd_priority">HD Priority (Prefer 1080p/720p)</Select.Option>
+                <Select.Option value="hd_priority">HD Priority (1080P &gt; 720P &gt; 1080P+)</Select.Option>
+                <Select.Option value="ultra_priority">Ultra Priority (1080P+ &gt; 1080P)</Select.Option>
+                <Select.Option value="min_1080p">Minimum 1080P (Skip if not available)</Select.Option>
+            </Select>
+          </Form.Item>
+          <Form.Item
+            name="machine_name"
+            label="Machine Name (Optional)"
+            help="绑定到特定主机，留空表示所有主机都可以处理"
+          >
+            <Select
+              allowClear
+              placeholder="选择主机名或留空（所有主机）"
+              showSearch
+              filterOption={(input, option) =>
+                (option?.children ?? '').toLowerCase().includes(input.toLowerCase())
+              }
+            >
+              {machineNames.map(name => (
+                <Select.Option key={name} value={name}>{name}</Select.Option>
+              ))}
             </Select>
           </Form.Item>
           <Form.Item 

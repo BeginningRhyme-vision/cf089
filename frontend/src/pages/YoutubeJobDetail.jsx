@@ -17,7 +17,14 @@ const YoutubeJobDetail = () => {
   const [job, setJob] = useState(null);
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [pagination, setPagination] = useState({ current: 1, pageSize: 50, total: 0 });
+  const [pagination, setPagination] = useState({ 
+    current: 1, 
+    pageSize: 100,  // 增加默认每页显示数量
+    total: 0,
+    showSizeChanger: true,  // 显示每页数量选择器
+    showTotal: (total, range) => `${range[0]}-${range[1]} of ${total} tasks`,  // 显示总数信息
+    pageSizeOptions: ['50', '100', '200', '500', '1000']  // 每页数量选项
+  });
 
   const fetchJob = useCallback(async () => {
     try {
@@ -28,7 +35,7 @@ const YoutubeJobDetail = () => {
     }
   }, [jobId]);
 
-  const fetchRecords = useCallback(async (page = 1, pageSize = 50) => {
+  const fetchRecords = useCallback(async (page = 1, pageSize = 100) => {
     setLoading(true);
     try {
               // Use new Batch Fetch endpoint
@@ -56,7 +63,7 @@ const YoutubeJobDetail = () => {
 
   useEffect(() => {
     fetchJob();
-    fetchRecords(1, 50);
+    fetchRecords(1, pagination.pageSize);
   }, [fetchJob, fetchRecords]);
 
   // Polling
@@ -87,12 +94,12 @@ const YoutubeJobDetail = () => {
 
   const handleRetry = async () => {
     try {
-      const res = await api.post(`/youtube-jobs/${jobId}/retry`);
-      message.success(`Retried ${res.data.reset_count} tasks`);
+      const res = await api.post(`/youtube-jobs/${jobId}/retry-non-completed`);
+      message.success(`Retry completed: ${res.data.queued_count} tasks queued, ${res.data.skipped_count} tasks skipped (already in queue)`);
       fetchJob();
       fetchRecords(pagination.current, pagination.pageSize);
     } catch (error) {
-      message.error('Failed to retry tasks');
+      message.error('Failed to retry tasks: ' + (error.response?.data?.error || error.message));
     }
   };
 
@@ -144,8 +151,8 @@ const YoutubeJobDetail = () => {
         </h2>
         <div>
           {job && <span style={{ marginRight: 16, color: '#888' }}>Created: {new Date(job.created_at).toLocaleString()}</span>}
-          {job && job.failed_count > 0 && (
-            <Button onClick={handleRetry} style={{ marginRight: 8 }} danger>Retry Failed</Button>
+          {job && (job.failed_count > 0 || job.pending_count > 0 || job.running_count > 0) && (
+            <Button onClick={handleRetry} style={{ marginRight: 8 }} danger>Retry Non-Completed</Button>
           )}
           <Button icon={<ReloadOutlined />} onClick={() => { fetchJob(); fetchRecords(pagination.current, pagination.pageSize); }}>Refresh</Button>
         </div>
@@ -195,9 +202,15 @@ const YoutubeJobDetail = () => {
         dataSource={records} 
         rowKey="id" 
         loading={loading} 
-        pagination={pagination}
+        pagination={{
+          ...pagination,
+          showSizeChanger: true,
+          showTotal: (total, range) => `Showing ${range[0]}-${range[1]} of ${total} tasks`,
+          pageSizeOptions: ['50', '100', '200', '500', '1000']
+        }}
         onChange={handleTableChange}
         size="small"
+        scroll={{ x: 'max-content' }}
       />
     </div>
   );

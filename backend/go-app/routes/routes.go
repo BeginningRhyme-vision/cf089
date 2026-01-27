@@ -61,6 +61,7 @@ func SetupRouter() *gin.Engine {
             ytJobs.GET("/:id", handlers.GetYoutubeJob)
             ytJobs.POST("/:id/tasks", handlers.AddTasksToYoutubeJob)
             ytJobs.POST("/:id/retry", handlers.RetryFailedYoutubeTasks)
+            ytJobs.POST("/:id/retry-non-completed", handlers.RetryNonCompletedYoutubeTasks)
             ytJobs.DELETE("/pending", handlers.DeletePendingYoutubeJobs)
             ytJobs.DELETE("/:id", handlers.DeleteYoutubeJob)
         }
@@ -117,6 +118,19 @@ func SetupRouter() *gin.Engine {
             pipelines.GET("/", handlers.ListPipelineJobs)
             pipelines.GET("/:id", handlers.GetPipelineJob)
             pipelines.POST("/:id/retry", handlers.RetryPipelineJob)
+        }
+
+        // Worker Cookie Configs
+        cookieConfigs := api.Group("/worker-cookie-configs")
+        {
+            cookieConfigs.GET("", handlers.GetWorkerCookieConfig)
+            cookieConfigs.GET("/machine-names", handlers.ListWorkerMachineNames)
+        }
+
+        // Youtube Tasks (Database Records)
+        youtubeTasks := api.Group("/youtube-tasks")
+        {
+            youtubeTasks.POST("/update", handlers.UpdateYoutubeTaskRecord)
         }
 	}
 

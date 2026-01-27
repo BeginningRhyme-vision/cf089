@@ -58,6 +58,16 @@ type WorkerConfig struct {
 }
 
 func LoadConfig() (*Config, error) {
+	var configPath string
+
+	// Check if config file is specified via environment variable
+	if envPath := os.Getenv("CONFIG_FILE"); envPath != "" {
+		if _, err := os.Stat(envPath); err == nil {
+			configPath = envPath
+		} else {
+			return nil, fmt.Errorf("config file specified in CONFIG_FILE not found: %s", envPath)
+		}
+	} else {
 	// Assuming running from backend/go-app or similar depth
 	// Try to find config.yaml in logical places
     // We are at backend/go-app, config is at root
@@ -70,7 +80,6 @@ func LoadConfig() (*Config, error) {
         "../../../config.yaml",
     }
 
-    var configPath string
     for _, p := range paths {
         if _, err := os.Stat(p); err == nil {
             configPath = p
@@ -80,6 +89,7 @@ func LoadConfig() (*Config, error) {
 
     if configPath == "" {
         return nil, fmt.Errorf("config.yaml not found")
+		}
     }
 
 	data, err := os.ReadFile(configPath)
