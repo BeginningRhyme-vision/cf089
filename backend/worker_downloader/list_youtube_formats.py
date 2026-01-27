@@ -21,7 +21,7 @@ def load_config():
         if os.path.exists(p):
             try:
                 with open(p, 'r') as f:
-                    print(f"Loaded config from: {p}")
+                    print(f"Loaded  config from: {p}")
                     return yaml.safe_load(f)
             except Exception as e:
                 print(f"Error loading config from {p}: {e}")
