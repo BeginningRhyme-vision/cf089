@@ -153,8 +153,10 @@ func scanStuckYoutubeTasks() {
 
 				var t models.YoutubeTask
 				if err := json.Unmarshal([]byte(str), &t); err == nil {
-					// Check if Running AND Created > 3 hours
-					if t.Status == "RUNNING" && time.Since(t.CreatedAt) > 3*time.Hour {
+					// Check if task is stuck (RUNNING or METADATA_PROCESSING) AND Created > 3 hours
+					// METADATA_PROCESSING 是 metadata worker 使用的状态，避免与 download worker 的 RUNNING 混淆
+					if (t.Status == "RUNNING" || t.Status == "METADATA_PROCESSING") && time.Since(t.CreatedAt) > 3*time.Hour {
+						oldStatus := t.Status
 						t.Status = "PENDING"
 						t.WorkerID = ""
 						t.ErrorMessage = "Reset by stuck monitor"
@@ -167,7 +169,7 @@ func scanStuckYoutubeTasks() {
 						queueName := getMetadataQueueName(t.JobID)
 						pipe.RPush(ctx, queueName, t.ID)
 
-						trackStatusChange(t.JobID, "RUNNING", "PENDING")
+						trackStatusChange(t.JobID, oldStatus, "PENDING")
 						hasUpdates = true
 					}
 				}
@@ -578,8 +580,15 @@ func BatchUpdate(c *gin.Context) {
 		}
 
 		oldStatus := existing.Status
+		// 记录更新前的字段值，用于调试
+		oldURL := existing.URL
+		oldTitle := existing.Title
+		oldVideoID := existing.VideoID
+		
 		log.Printf("[BatchUpdate] Processing task %d: old_status=%s, update_status=%s, update_video_id='%s', update_audio_url=%v, update_video_url=%v, update_title='%s'", 
 			u.ID, oldStatus, u.Status, u.VideoID, u.AudioURL != "", u.VideoURL != "", u.Title)
+		log.Printf("[BatchUpdate] Task %d before update: url='%s', title='%s', video_id='%s'", 
+			u.ID, oldURL, oldTitle, oldVideoID)
 
 		// 2. Merge fields (only update if provided/valid)
 		if u.Status != "" {
@@ -595,15 +604,22 @@ func BatchUpdate(c *gin.Context) {
 			existing.IsDownloadFail = true
 		}
 		// Clear error/failure flags if restarting
-		if u.Status == "RUNNING" || u.Status == "PENDING" {
+		// METADATA_PROCESSING 是 metadata worker 使用的状态，也需要清除错误标志
+		if u.Status == "RUNNING" || u.Status == "PENDING" || u.Status == "METADATA_PROCESSING" {
 			existing.IsDownloadFail = false
 			existing.ErrorMessage = ""
 		}
 		// URL 字段：只在有提供时才更新，否则保留原有值（确保 URL 不会丢失）
+		// 重要：不要清空 URL，即使更新请求中没有 URL 字段
 		if u.URL != "" {
 			existing.URL = u.URL
 		}
-		// Metadata fields
+		// 如果原有 URL 存在但更新请求中没有 URL，确保保留
+		if existing.URL == "" && oldURL != "" {
+			log.Printf("[BatchUpdate] WARNING: Task %d URL would be lost (old='%s'), preserving it", u.ID, oldURL)
+			existing.URL = oldURL
+		}
+		// Metadata fields - 只在有提供时才更新，否则保留原有值
 		if u.AudioURL != "" {
 			existing.AudioURL = u.AudioURL
 		}
@@ -616,12 +632,26 @@ func BatchUpdate(c *gin.Context) {
 		if u.VideoSize != 0 {
 			existing.VideoSize = u.VideoSize
 		}
+		// Title 和 VideoID：只在有提供时才更新，否则保留原有值
 		if u.Title != "" {
 			existing.Title = u.Title
+		}
+		// 如果原有 Title 存在但更新请求中没有 Title，确保保留
+		if existing.Title == "" && oldTitle != "" {
+			log.Printf("[BatchUpdate] WARNING: Task %d Title would be lost (old='%s'), preserving it", u.ID, oldTitle)
+			existing.Title = oldTitle
 		}
 		if u.VideoID != "" {
 			existing.VideoID = u.VideoID
 		}
+		// 如果原有 VideoID 存在但更新请求中没有 VideoID，确保保留
+		if existing.VideoID == "" && oldVideoID != "" {
+			log.Printf("[BatchUpdate] WARNING: Task %d VideoID would be lost (old='%s'), preserving it", u.ID, oldVideoID)
+			existing.VideoID = oldVideoID
+		}
+		
+		log.Printf("[BatchUpdate] Task %d after update: url='%s', title='%s', video_id='%s'", 
+			u.ID, existing.URL, existing.Title, existing.VideoID)
 
 		// Track Status Change
 		if u.Status != "" && existing.JobID != 0 {
@@ -629,7 +659,8 @@ func BatchUpdate(c *gin.Context) {
 		}
 
 		existing.UpdatedAt = time.Now()
-		if u.Status == "RUNNING" && existing.StartedAt.IsZero() {
+		// METADATA_PROCESSING 和 RUNNING 都表示任务正在处理中，需要设置 StartedAt
+		if (u.Status == "RUNNING" || u.Status == "METADATA_PROCESSING") && existing.StartedAt.IsZero() {
 			existing.StartedAt = time.Now()
 		}
 		if (u.Status == "COMPLETED" || u.Status == "FAILED") && existing.CompletedAt.IsZero() {
@@ -1475,6 +1506,7 @@ func AddTasksToJob(jobID int64, urls []string) (int, error) {
 		batchUrls := urls[i:end]
 		var zMembers []redis.Z
 		var taskKeys []string
+		var taskRecords []models.YoutubeTaskRecord // 用于批量插入数据库
 		pipe := database.RDB.Pipeline()
 
 		for j, url := range batchUrls {
@@ -1502,6 +1534,16 @@ func AddTasksToJob(jobID int64, urls []string) (int, error) {
 				Score:  float64(task.ID),
 				Member: task.ID,
 			})
+			
+			// 同时创建数据库记录
+			taskRecord := models.YoutubeTaskRecord{
+				ID:        uint(taskID),
+				JobID:     uint(jobID),
+				Status:    "PENDING",
+				CreatedAt: now,
+				UpdatedAt: now,
+			}
+			taskRecords = append(taskRecords, taskRecord)
 		}
 
 		if len(zMembers) > 0 {
@@ -1521,6 +1563,28 @@ func AddTasksToJob(jobID int64, urls []string) (int, error) {
 				cleanupPipe.Exec(ctx)
 				return totalAdded, err
 			}
+			
+			// 批量插入数据库记录（使用 ON CONFLICT 避免重复）
+			if len(taskRecords) > 0 {
+				// 使用 GORM 的 CreateInBatches 批量插入
+				// 如果记录已存在（通过唯一索引 idx_job_task），则忽略错误
+				// 注意：GORM 的 CreateInBatches 不支持 ON CONFLICT，所以我们需要捕获错误并忽略唯一索引冲突
+				if err := database.DB.CreateInBatches(taskRecords, 1000).Error; err != nil {
+					// 检查是否是唯一索引冲突（记录已存在）
+					if strings.Contains(err.Error(), "duplicate key") || 
+					   strings.Contains(err.Error(), "UNIQUE constraint") ||
+					   strings.Contains(err.Error(), "idx_job_task") {
+						// 记录已存在，这是正常的（可能是重试或并发创建），忽略错误
+						log.Printf("INFO: Some task records for job %d batch %d already exist (this is normal for retries): %v", 
+							jobID, i/batchSize, err)
+					} else {
+						// 其他错误，记录警告但继续
+						log.Printf("WARNING: Failed to batch insert task records for job %d batch %d: %v", 
+							jobID, i/batchSize, err)
+					}
+				}
+			}
+			
 			totalAdded += len(zMembers)
 		}
 	}

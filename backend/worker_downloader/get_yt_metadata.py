@@ -404,6 +404,143 @@ def api_save_task_record(task_data):
         traceback.print_exc()
         return False
 
+# R2 客户端缓存
+_r2_client_cache = None
+_r2_bucket_cache = None
+
+def get_r2_client():
+    """获取 R2 客户端（从配置中读取，带缓存）"""
+    global _r2_client_cache, _r2_bucket_cache
+    
+    # 如果已缓存，直接返回
+    if _r2_client_cache is not None:
+        return _r2_client_cache, _r2_bucket_cache
+    
+    config = load_config()
+    storage = config.get('storage', {})
+    src = storage.get('src', {})
+    
+    endpoint = src.get('endpoint')
+    access_key = src.get('access_key')
+    secret_key = src.get('secret_key')
+    
+    if not all([endpoint, access_key, secret_key]):
+        return None, None
+    
+    try:
+        # 从 endpoint 中提取 bucket 名称（如果包含在路径中）
+        # 例如: https://account.r2.cloudflarestorage.com/bucket-name
+        parsed = urlparse(endpoint)
+        bucket_name = parsed.path.strip('/')
+        
+        # 构建基础 endpoint（不包含 bucket 路径）
+        base_endpoint = f"{parsed.scheme}://{parsed.netloc}"
+        
+        # 创建 S3 客户端（R2 兼容 S3 API）
+        s3_client = boto3.client(
+            's3',
+            endpoint_url=base_endpoint,
+            aws_access_key_id=access_key,
+            aws_secret_access_key=secret_key,
+            region_name='auto'
+        )
+        
+        # 缓存客户端和 bucket 名称
+        _r2_client_cache = s3_client
+        _r2_bucket_cache = bucket_name if bucket_name else None
+        
+        return s3_client, _r2_bucket_cache
+    except Exception as e:
+        print(f"  ⚠ 创建 R2 客户端失败: {e}")
+        return None, None
+
+def check_r2_object_exists(key):
+    """检查 R2 中是否存在指定的对象"""
+    try:
+        s3_client, bucket_name = get_r2_client()
+        if not s3_client or not bucket_name:
+            return False
+        
+        # 使用 HeadObject 检查对象是否存在
+        s3_client.head_object(Bucket=bucket_name, Key=key)
+        return True
+    except ClientError as e:
+        error_code = e.response.get('Error', {}).get('Code', '')
+        if error_code == '404':
+            return False
+        # 其他错误（如权限问题）也返回 False，但不打印（避免日志过多）
+        return False
+    except Exception as e:
+        # 静默处理错误，避免日志过多
+        return False
+
+def build_r2_key(r2_prefix, video_id, download_mode, file_type, job_info):
+    """
+    构建 R2 存储的 key（文件路径）
+    与 Go 代码中的 generateFilename 逻辑保持一致
+    
+    参数:
+        r2_prefix: R2 前缀路径
+        video_id: YouTube 视频 ID
+        download_mode: 'both', 'audio', 'video'
+        file_type: 'audio' 或 'video'
+        job_info: Job 信息（包含 filename_template, audio_extension, video_extension）
+    
+    返回:
+        str: R2 key（文件路径）
+    """
+    # 获取文件扩展名
+    if file_type == 'audio':
+        ext = job_info.get('audio_extension', 'm4a')
+    else:  # video
+        ext = job_info.get('video_extension', 'mp4')
+    
+    # 检查是否有自定义文件名模板
+    filename_template = job_info.get('filename_template', '')
+    
+    if filename_template:
+        # 使用自定义模板（类似 Go 代码中的 generateFilename）
+        from datetime import datetime
+        import re
+        filename = filename_template
+        
+        # 1. 替换日期变量 $(date +FORMAT)
+        while True:
+            match = re.search(r'\$\(date\s*\+([^)]+)\)', filename)
+            if not match:
+                break
+            
+            format_str = match.group(1)  # 例如: %Y%m%d_%H
+            # 将 strftime 格式转换为 Python datetime 格式
+            # %Y -> %Y, %m -> %m, %d -> %d, %H -> %H, %M -> %M, %S -> %S
+            python_format = format_str  # Python 和 strftime 格式相同
+            
+            time_str = datetime.now().strftime(python_format)
+            # 替换整个匹配项
+            filename = filename[:match.start()] + time_str + filename[match.end():]
+        
+        # 2. 替换变量
+        filename = filename.replace('%(id)', video_id)
+        filename = filename.replace('%(ext)', ext)
+        # title 暂时使用 video_id（如果需要 title，需要从任务中获取）
+        # 注意：这里 title 可能为空，使用 video_id 作为占位符
+        title = video_id  # 简化处理，实际应该从任务中获取
+        # 简单的 title 清理（移除特殊字符）
+        safe_title = re.sub(r'[^\w\s-]', '_', title).strip('_')
+        filename = filename.replace('%(title)', safe_title)
+        
+        # 3. 移除开头的 /
+        filename = filename.lstrip('/')
+        
+        # 4. 拼接 prefix
+        prefix = r2_prefix.rstrip('/') + '/' if r2_prefix else ''
+        return prefix + filename
+    else:
+        # 默认格式: prefix + video_id + "_audio.ext" 或 "_video.ext"
+        prefix = r2_prefix.rstrip('/') + '/' if r2_prefix else ''
+        suffix = f"_{file_type}.{ext}"
+        return prefix + video_id + suffix
+
 def validate_and_get_final_url(format_obj):
     """
     验证格式并获取最终的 CDN URL（与 get_youtube.sh 的 --get-url 行为一致）
@@ -1007,12 +1144,26 @@ def main():
             print(f"Acquired {len(initial_tasks)} tasks on startup. (Running: {len(futures)})")
             for t in initial_tasks:
                 print(f"  Task {t.get('id')}: {t.get('url', '')[:50]}")
-            running_updates = [{
-                "id": t['id'],
-                "job_id": t['job_id'],
-                "status": "RUNNING",
-                "worker_id": WORKER_ID
-            } for t in initial_tasks]
+            # 发送完整的任务对象，包含所有字段，避免字段丢失
+            # 使用 METADATA_PROCESSING 状态，避免与 download worker 的 RUNNING 状态混淆
+            running_updates = []
+            for t in initial_tasks:
+                update = {
+                    "id": t.get('id'),
+                    "job_id": t.get('job_id'),
+                    "status": "METADATA_PROCESSING",
+                    "worker_id": WORKER_ID,
+                    # 保留所有现有字段
+                    "url": t.get('url', ''),
+                    "title": t.get('title', ''),
+                    "video_id": t.get('video_id', ''),
+                    "audio_url": t.get('audio_url', ''),
+                    "audio_size": t.get('audio_size', 0),
+                    "video_url": t.get('video_url', ''),
+                    "video_size": t.get('video_size', 0),
+                    "error_message": t.get('error_message', ''),
+                }
+                running_updates.append(update)
             api_update_task_batch(running_updates)
             for t in initial_tasks:
                 f = executor.submit(process_metadata, t, ydl_opts)
@@ -1075,13 +1226,26 @@ def main():
                         has_urls = bool(t.get('audio_url') or t.get('video_url'))
                         print(f"  - Task {task_id}: video_id='{video_id}', has_urls={has_urls}, url={t.get('url', '')[:50]}")
                     
-                    # Mark RUNNING
-                    running_updates = [{
-                        "id": t['id'],
-                        "job_id": t['job_id'],
-                        "status": "RUNNING",
-                        "worker_id": WORKER_ID
-                    } for t in tasks]
+                    # Mark METADATA_PROCESSING - 发送完整的任务对象，包含所有字段，避免字段丢失
+                    # 使用 METADATA_PROCESSING 状态，避免与 download worker 的 RUNNING 状态混淆
+                    running_updates = []
+                    for t in tasks:
+                        update = {
+                            "id": t.get('id'),
+                            "job_id": t.get('job_id'),
+                            "status": "METADATA_PROCESSING",
+                            "worker_id": WORKER_ID,
+                            # 保留所有现有字段
+                            "url": t.get('url', ''),
+                            "title": t.get('title', ''),
+                            "video_id": t.get('video_id', ''),
+                            "audio_url": t.get('audio_url', ''),
+                            "audio_size": t.get('audio_size', 0),
+                            "video_url": t.get('video_url', ''),
+                            "video_size": t.get('video_size', 0),
+                            "error_message": t.get('error_message', ''),
+                        }
+                        running_updates.append(update)
                     api_update_task_batch(running_updates)
                     
                     # Submit

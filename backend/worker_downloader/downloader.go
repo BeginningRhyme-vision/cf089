@@ -62,6 +62,9 @@ var (
 	internalClient  *http.Client
 	externalClient  *http.Client
 
+	// Global rate limiter for download requests (chunks per minute)
+	globalRateLimiter *RateLimiter
+
 	// Metrics
 	TasksProcessed = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "worker_downloader_tasks_processed_total",
@@ -73,6 +76,72 @@ var (
 		Help: "Duration of downloads",
 	})
 )
+
+// RateLimiter 速率限制器：控制每分钟的请求数
+type RateLimiter struct {
+	requestsPerMinute int
+	requestTimes      []time.Time
+	mu                sync.Mutex
+}
+
+// NewRateLimiter 创建新的速率限制器
+func NewRateLimiter(requestsPerMinute int) *RateLimiter {
+	return &RateLimiter{
+		requestsPerMinute: requestsPerMinute,
+		requestTimes:      make([]time.Time, 0),
+	}
+}
+
+// Acquire 获取许可，如果超过限制则等待
+func (rl *RateLimiter) Acquire() {
+	if rl.requestsPerMinute <= 0 {
+		return // 无限制
+	}
+
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+
+	now := time.Now()
+	oneMinuteAgo := now.Add(-1 * time.Minute)
+
+	// 移除一分钟之前的请求记录
+	validTimes := make([]time.Time, 0)
+	for _, t := range rl.requestTimes {
+		if t.After(oneMinuteAgo) {
+			validTimes = append(validTimes, t)
+		}
+	}
+	rl.requestTimes = validTimes
+
+	currentCount := len(rl.requestTimes)
+
+	// 如果当前分钟内的请求数已达到限制，等待
+	if currentCount >= rl.requestsPerMinute {
+		// 计算需要等待的时间（直到最早的请求超过1分钟）
+		oldestTime := rl.requestTimes[0]
+		waitTime := time.Minute - now.Sub(oldestTime) + 100*time.Millisecond // 加100ms缓冲
+		if waitTime > 0 {
+			log.Printf("[RateLimiter] Rate limit reached (%d/%d requests/min), waiting %.2f seconds", 
+				currentCount, rl.requestsPerMinute, waitTime.Seconds())
+			rl.mu.Unlock()
+			time.Sleep(waitTime)
+			rl.mu.Lock()
+			// 等待后再次清理过期记录
+			now = time.Now()
+			oneMinuteAgo = now.Add(-1 * time.Minute)
+			validTimes = make([]time.Time, 0)
+			for _, t := range rl.requestTimes {
+				if t.After(oneMinuteAgo) {
+					validTimes = append(validTimes, t)
+				}
+			}
+			rl.requestTimes = validTimes
+		}
+	}
+
+	// 记录本次请求时间
+	rl.requestTimes = append(rl.requestTimes, time.Now())
+}
 
 func initClients() {
 	// Internal Client - No Proxy
@@ -125,6 +194,7 @@ var (
 	MaxConcurrentWorkers           = getDefaultMaxConcurrentWorkers()
 	TaskBufferSize                 = getDefaultTaskBufferSize()
 	ConcurrentChunksPerFile         = getDefaultConcurrentChunksPerFile() // 每个文件内部的并发chunk数量
+	GlobalRequestsPerMinute         = getDefaultGlobalRequestsPerMinute() // 全局每分钟请求数限制
 )
 
 func getDefaultChunkSize() int64 {
@@ -155,7 +225,17 @@ func getDefaultConcurrentChunksPerFile() int {
 			return chunks
 		}
 	}
-	return 10 // 默认30个并发chunk（从5增加到30以提高单个文件传输速度）
+	return 10 // 默认10个并发chunk（每个文件内部的并发数）
+}
+
+func getDefaultGlobalRequestsPerMinute() int {
+	rateStr := os.Getenv("DOWNLOAD_REQUESTS_PER_MINUTE")
+	if rateStr != "" {
+		if rate, err := strconv.Atoi(rateStr); err == nil {
+			return rate
+		}
+	}
+	return 200 // 默认每分钟200个请求（全局限制）
 }
 
 func getDefaultTaskBufferSize() int {
@@ -228,6 +308,9 @@ func main() {
 	// Initialize MachineName
 	machineName = getMachineName()
 
+	// Initialize global rate limiter
+	globalRateLimiter = NewRateLimiter(GlobalRequestsPerMinute)
+
 	log.Printf("=== Go Downloader Worker Started ===")
 	log.Printf("Worker ID: %s", workerID)
 	log.Printf("Machine Name: %s", machineName)
@@ -238,6 +321,7 @@ func main() {
 	log.Printf("Max Concurrent Workers: %d", MaxConcurrentWorkers)
 	log.Printf("Chunk Size: %d bytes (%.2f MB)", ChunkSize, float64(ChunkSize)/(1024*1024))
 	log.Printf("Concurrent Chunks Per File: %d", ConcurrentChunksPerFile)
+	log.Printf("Global Requests Per Minute: %d", GlobalRequestsPerMinute)
 	log.Printf("Note: This worker connects to backend API, not database directly")
 	log.Printf("=====================================")
 
@@ -474,6 +558,11 @@ func acquireTasks() ([]YoutubeTask, error) {
 
 	if len(tasks) > 0 {
 		log.Printf("  ✓ Successfully decoded %d tasks", len(tasks))
+		// 记录每个任务的详细信息，用于调试
+		for i, task := range tasks {
+			log.Printf("  Task[%d]: ID=%d, VideoID=%s, AudioURL=%v (size=%d), VideoURL=%v (size=%d)", 
+				i, task.ID, task.VideoID, task.AudioURL != "", task.AudioSize, task.VideoURL != "", task.VideoSize)
+		}
 	} else {
 		log.Printf("  ℹ No tasks in response (empty array)")
 	}
@@ -625,6 +714,10 @@ func processTask(t YoutubeTask) {
 	errChan := make(chan error, 2)
 	var wg sync.WaitGroup
 
+	// 记录任务信息，用于调试
+	log.Printf("Task %d: AudioURL=%v (size=%d), VideoURL=%v (size=%d)", 
+		t.ID, t.AudioURL != "", t.AudioSize, t.VideoURL != "", t.VideoSize)
+
 	if t.AudioURL != "" {
 		wg.Add(1)
 		go func() {
@@ -639,10 +732,16 @@ func processTask(t YoutubeTask) {
 				key = fmt.Sprintf("%s%s_audio.%s", prefix, t.VideoID, ext)
 			}
 
+			log.Printf("Task %d: Starting audio download to %s (size=%d)", t.ID, key, t.AudioSize)
 			if err := transferFile(t.AudioURL, key, t.AudioSize); err != nil {
+				log.Printf("Task %d: Audio download failed: %v", t.ID, err)
 				errChan <- fmt.Errorf("audio failed: %w", err)
+			} else {
+				log.Printf("Task %d: Audio download completed successfully", t.ID)
 			}
 		}()
+	} else {
+		log.Printf("Task %d: No AudioURL, skipping audio download", t.ID)
 	}
 
 	if t.VideoURL != "" {
@@ -658,14 +757,23 @@ func processTask(t YoutubeTask) {
 			} else {
 				key = fmt.Sprintf("%s%s_video.%s", prefix, t.VideoID, ext)
 			}
+
+			log.Printf("Task %d: Starting video download to %s (size=%d)", t.ID, key, t.VideoSize)
 			if err := transferFile(t.VideoURL, key, t.VideoSize); err != nil {
+				log.Printf("Task %d: Video download failed: %v", t.ID, err)
 				errChan <- fmt.Errorf("video failed: %w", err)
+			} else {
+				log.Printf("Task %d: Video download completed successfully", t.ID)
 			}
 		}()
+	} else {
+		log.Printf("Task %d: No VideoURL, skipping video download", t.ID)
 	}
 
+	log.Printf("Task %d: Waiting for downloads to complete...", t.ID)
 	wg.Wait()
 	close(errChan)
+	log.Printf("Task %d: All downloads completed, checking errors...", t.ID)
 
 	var errs []string
 	for e := range errChan {
@@ -791,6 +899,8 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 		wg.Add(1)
 		go func(pNum int32, s, e int64) {
 			defer wg.Done()
+			
+			// 1. 先获取文件内部的并发限制（每个文件的并发chunk数）
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
@@ -800,7 +910,10 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 				return
 			default:
 			}
-			// 移除延迟以提高速度（如果需要限流，可以通过调整 ConcurrentChunksPerFile 来控制）
+			
+			// 2. 获取全局速率限制许可（每分钟200个请求）
+			// 这确保所有文件的chunk上传请求总数不超过每分钟200个
+			globalRateLimiter.Acquire()
 			
 			// Log chunk details for debugging
 			chunkSize := e - s + 1

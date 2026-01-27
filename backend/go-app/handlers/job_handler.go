@@ -953,11 +953,49 @@ func cleanupYoutubeJobRedis(ctx context.Context, jobID uint) {
 	// but ZRange is okay for reasonable sizes.
 	taskIDs, err := database.RDB.ZRange(ctx, jobKey, 0, -1).Result()
 	if err == nil && len(taskIDs) > 0 {
-		pipe := database.RDB.Pipeline()
-		for _, tid := range taskIDs {
-			pipe.Del(ctx, fmt.Sprintf("task:%s", tid))
+		// 获取 Job 的 machine_name 来确定队列名
+		jobMachineName := getJobMachineName(int64(jobID))
+		
+		// 确定需要清理的队列列表
+		var downloadQueues []string
+		var metadataQueues []string
+		
+		if jobMachineName != "" {
+			// Job 有指定的 machine_name，清理特定机器队列和 all 队列
+			downloadQueues = []string{
+				fmt.Sprintf("queue:youtube:download_ready:%s", jobMachineName),
+				"queue:youtube:download_ready:all",
+			}
+			metadataQueues = []string{
+				fmt.Sprintf("queue:youtube:metadata_retry:%s", jobMachineName),
+				"queue:youtube:metadata_retry:all",
+			}
+		} else {
+			// Job 没有 machine_name，只清理 all 队列
+			downloadQueues = []string{"queue:youtube:download_ready:all"}
+			metadataQueues = []string{"queue:youtube:metadata_retry:all"}
 		}
+		
+		pipe := database.RDB.Pipeline()
+		
+		// 从所有相关队列中移除任务 ID
+		for _, tid := range taskIDs {
+			// 删除任务详情
+			pipe.Del(ctx, fmt.Sprintf("task:%s", tid))
+			
+			// 从下载队列中移除（LRem 移除所有匹配的元素）
+			for _, queueName := range downloadQueues {
+				pipe.LRem(ctx, queueName, 0, tid) // 0 表示移除所有匹配的元素
+			}
+			
+			// 从 metadata 队列中移除
+			for _, queueName := range metadataQueues {
+				pipe.LRem(ctx, queueName, 0, tid)
+			}
+		}
+		
 		pipe.Exec(ctx)
+		log.Printf("[cleanupYoutubeJobRedis] Cleaned up %d tasks from queues for job %d (machine_name: %s)", len(taskIDs), jobID, jobMachineName)
 	}
 
 	// 2. Delete Job Key and metadata
