@@ -423,11 +423,17 @@ func initS3() {
 	log.Printf("S3/R2 client initialized - Endpoint: %s, Bucket: %s", sdkEndpoint, bucketName)
 }
 
-// getMachineName 获取机器名，优先使用环境变量，否则使用主机名
+// getMachineName 获取机器名，优先使用 Kubernetes 节点名，然后是环境变量，最后使用主机名
 func getMachineName() string {
+	// 优先使用 Kubernetes 节点名（通过 Downward API 注入）
+	if name := os.Getenv("NODE_NAME"); name != "" {
+		return name
+	}
+	// 其次使用手动设置的机器名
 	if name := os.Getenv("MACHINE_NAME"); name != "" {
 		return name
 	}
+	// 最后使用主机名（在容器中通常是 pod 名，不是宿主机名）
 	hostname, err := os.Hostname()
 	if err != nil {
 		return "unknown"
