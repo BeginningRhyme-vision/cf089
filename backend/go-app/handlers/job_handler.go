@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -735,6 +736,80 @@ type CreateYoutubeJobRequest struct {
 	Tasks                  []string `json:"tasks" form:"-"` // List of URLs
 }
 
+// YouTube URL 格式验证
+var (
+	// YouTube URL 正则表达式
+	youtubeURLPattern = regexp.MustCompile(`(?i)^(https?://)?(www\.)?(youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/|m\.youtube\.com/watch\?v=)([a-zA-Z0-9_-]{11})`)
+	// Video ID 正则表达式（11个字符的字母数字、下划线、连字符）
+	videoIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{11}$`)
+)
+
+// validateYouTubeURL 验证 YouTube URL 格式
+// 返回: (isValid, isVideoID, videoID, errorMessage)
+func validateYouTubeURL(line string) (bool, bool, string, string) {
+	line = strings.TrimSpace(line)
+	if line == "" {
+		return false, false, "", "empty line"
+	}
+
+	// 检查是否是标准 YouTube URL 格式
+	if youtubeURLPattern.MatchString(line) {
+		matches := youtubeURLPattern.FindStringSubmatch(line)
+		if len(matches) >= 5 {
+			videoID := matches[4]
+			return true, false, videoID, ""
+		}
+	}
+
+	// 检查是否只是 video_id（11个字符）
+	if videoIDPattern.MatchString(line) {
+		return false, true, line, fmt.Sprintf("Line contains only video_id '%s', not a valid YouTube URL. Please use format: https://www.youtube.com/watch?v=%s", line, line)
+	}
+
+	// 既不是 URL 也不是 video_id
+	return false, false, "", fmt.Sprintf("Invalid format: '%s'. Expected YouTube URL (e.g., https://www.youtube.com/watch?v=VIDEO_ID) or video_id", line)
+}
+
+// parseAndValidateTasks 解析并验证任务列表，返回有效任务和错误信息
+func parseAndValidateTasks(lines []string, source string) ([]string, []map[string]interface{}) {
+	var validTasks []string
+	var errors []map[string]interface{}
+
+	for lineNum, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		isValid, isVideoID, videoID, errMsg := validateYouTubeURL(line)
+		if isValid {
+			// 标准 URL 格式，直接使用
+			validTasks = append(validTasks, line)
+		} else if isVideoID {
+			// 只是 video_id，转换为标准 URL
+			standardURL := fmt.Sprintf("https://www.youtube.com/watch?v=%s", videoID)
+			validTasks = append(validTasks, standardURL)
+			errors = append(errors, map[string]interface{}{
+				"line_number": lineNum + 1,
+				"content":     line,
+				"message":     errMsg,
+				"fixed":       true,
+				"fixed_url":   standardURL,
+			})
+		} else {
+			// 格式错误
+			errors = append(errors, map[string]interface{}{
+				"line_number": lineNum + 1,
+				"content":     line,
+				"message":     errMsg,
+				"fixed":       false,
+			})
+		}
+	}
+
+	return validTasks, errors
+}
+
 func CreateYoutubeJob(c *gin.Context) {
 	var req CreateYoutubeJobRequest
 
@@ -744,6 +819,26 @@ func CreateYoutubeJob(c *gin.Context) {
 		if err := c.ShouldBindJSON(&req); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
+		}
+		
+		// 验证 JSON 请求中的 tasks
+		if len(req.Tasks) > 0 {
+			validTasks, validationErrors := parseAndValidateTasks(req.Tasks, "JSON request")
+			
+			// 如果有格式错误，返回错误信息
+			if len(validationErrors) > 0 {
+				log.Printf("[CreateYoutubeJob] JSON request validation found %d errors out of %d tasks", len(validationErrors), len(req.Tasks))
+				c.JSON(http.StatusBadRequest, gin.H{
+					"error":            "Tasks contain invalid YouTube URL formats",
+					"validation_errors": validationErrors,
+					"valid_count":      len(validTasks),
+					"error_count":      len(validationErrors),
+					"total_lines":      len(req.Tasks),
+				})
+				return
+			}
+			
+			req.Tasks = validTasks
 		}
 	} else if strings.Contains(contentType, "multipart/form-data") {
 		req.R2Prefix = c.PostForm("r2_prefix")
@@ -755,36 +850,68 @@ func CreateYoutubeJob(c *gin.Context) {
 		// Handle file upload
 		file, err := c.FormFile("file")
 		if err == nil {
+			log.Printf("[CreateYoutubeJob] Processing uploaded file: %s (size: %d bytes)", file.Filename, file.Size)
 			f, err := file.Open()
 			if err != nil {
+				log.Printf("[CreateYoutubeJob] ERROR: Failed to open file: %v", err)
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open file"})
 				return
 			}
 			defer f.Close()
 
+			var fileLines []string
 			scanner := bufio.NewScanner(f)
 			for scanner.Scan() {
-				line := strings.TrimSpace(scanner.Text())
-				if line != "" {
-					req.Tasks = append(req.Tasks, line)
-				}
+				fileLines = append(fileLines, scanner.Text())
 			}
 			if err := scanner.Err(); err != nil {
+				log.Printf("[CreateYoutubeJob] ERROR: Failed to read file: %v", err)
 				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read file: " + err.Error()})
 				return
 			}
+
+			// 验证并解析文件内容
+			validTasks, validationErrors := parseAndValidateTasks(fileLines, "uploaded file")
+			
+			// 如果有格式错误，返回错误信息
+			if len(validationErrors) > 0 {
+				log.Printf("[CreateYoutubeJob] File validation found %d errors out of %d lines", len(validationErrors), len(fileLines))
+				c.JSON(http.StatusBadRequest, gin.H{
+					"error":            "File contains invalid YouTube URL formats",
+					"validation_errors": validationErrors,
+					"valid_count":      len(validTasks),
+					"error_count":      len(validationErrors),
+					"total_lines":      len(fileLines),
+				})
+				return
+			}
+
+			req.Tasks = append(req.Tasks, validTasks...)
+			log.Printf("[CreateYoutubeJob] Successfully parsed %d valid URLs from uploaded file", len(validTasks))
+		} else {
+			log.Printf("[CreateYoutubeJob] No file uploaded (this is OK if using other methods): %v", err)
 		}
 
 		// Handle manual tasks from form field
 		manualTasks := c.PostForm("tasks")
 		if manualTasks != "" {
 			lines := strings.Split(manualTasks, "\n")
-			for _, line := range lines {
-				trimmed := strings.TrimSpace(line)
-				if trimmed != "" {
-					req.Tasks = append(req.Tasks, trimmed)
-				}
+			validTasks, validationErrors := parseAndValidateTasks(lines, "manual input")
+			
+			// 如果有格式错误，返回错误信息
+			if len(validationErrors) > 0 {
+				log.Printf("[CreateYoutubeJob] Manual input validation found %d errors out of %d lines", len(validationErrors), len(lines))
+				c.JSON(http.StatusBadRequest, gin.H{
+					"error":            "Manual input contains invalid YouTube URL formats",
+					"validation_errors": validationErrors,
+					"valid_count":      len(validTasks),
+					"error_count":      len(validationErrors),
+					"total_lines":      len(lines),
+				})
+				return
 			}
+
+			req.Tasks = append(req.Tasks, validTasks...)
 		}
 	} else {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Unsupported Content-Type"})
@@ -805,17 +932,33 @@ func CreateYoutubeJob(c *gin.Context) {
 			return
 		}
 
+		var fileLines []string
 		scanner := bufio.NewScanner(resp.Body)
 		for scanner.Scan() {
-			line := strings.TrimSpace(scanner.Text())
-			if line != "" {
-				req.Tasks = append(req.Tasks, line)
-			}
+			fileLines = append(fileLines, scanner.Text())
 		}
 		if err := scanner.Err(); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to read downloaded file: " + err.Error()})
 			return
 		}
+
+		// 验证并解析文件内容
+		validTasks, validationErrors := parseAndValidateTasks(fileLines, "file URL")
+		
+		// 如果有格式错误，返回错误信息
+		if len(validationErrors) > 0 {
+			log.Printf("[CreateYoutubeJob] File URL validation found %d errors out of %d lines", len(validationErrors), len(fileLines))
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":            "File from URL contains invalid YouTube URL formats",
+				"validation_errors": validationErrors,
+				"valid_count":      len(validTasks),
+				"error_count":      len(validationErrors),
+				"total_lines":      len(fileLines),
+			})
+			return
+		}
+
+		req.Tasks = append(req.Tasks, validTasks...)
 	}
 
 	// 1. Create Job in PG
@@ -841,17 +984,38 @@ func CreateYoutubeJob(c *gin.Context) {
 		return
 	}
 
+	log.Printf("[CreateYoutubeJob] Created job %d with %d tasks", job.ID, len(req.Tasks))
+
 	metrics.JobCreatedTotal.WithLabelValues("youtube").Inc()
 	metrics.ActiveJobsGauge.WithLabelValues("youtube").Inc()
 
-	// 2. Create Tasks in Redis (Async)
+	// 2. Create Tasks in Redis and Database (Async)
 	if len(req.Tasks) > 0 {
+		log.Printf("[CreateYoutubeJob] Starting async task addition for job %d (%d tasks)", job.ID, len(req.Tasks))
 		go func(jobID int64, tasks []string) {
-			_, err := AddTasksToJob(jobID, tasks)
+			// 添加 panic recovery
+			defer func() {
+				if r := recover(); r != nil {
+					log.Printf("[CreateYoutubeJob] PANIC in async task addition for job %d: %v", jobID, r)
+				}
+			}()
+			
+			startTime := time.Now()
+			log.Printf("[CreateYoutubeJob] [Job %d] Starting AddTasksToJob with %d tasks", jobID, len(tasks))
+			
+			count, err := AddTasksToJob(jobID, tasks)
+			duration := time.Since(startTime)
+			
 			if err != nil {
-				fmt.Printf("Error adding tasks to Redis for job %d: %v\n", jobID, err)
+				log.Printf("[CreateYoutubeJob] ERROR: Failed to add tasks to Redis/DB for job %d: %v (took %v)", jobID, err, duration)
+				// 更新 Job 状态为失败（可选）
+				// database.DB.Model(&models.YoutubeJob{}).Where("id = ?", jobID).Update("status", models.StatusFailed)
+			} else {
+				log.Printf("[CreateYoutubeJob] INFO: Successfully added %d tasks to job %d (Redis + DB) in %v", count, jobID, duration)
 			}
 		}(int64(job.ID), req.Tasks)
+	} else {
+		log.Printf("[CreateYoutubeJob] WARNING: Job %d created with 0 tasks", job.ID)
 	}
 
 	c.JSON(http.StatusCreated, job)
@@ -1008,13 +1172,19 @@ func DeleteYoutubeJob(c *gin.Context) {
 	idStr := c.Param("id")
 	id, _ := strconv.Atoi(idStr)
 
-	// Delete from PG
+	// 1. 先删除相关的 task_records（避免外键约束错误）
+	if err := database.DB.Where("job_id = ?", id).Delete(&models.YoutubeTaskRecord{}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete task records: " + err.Error()})
+		return
+	}
+
+	// 2. 删除 Job
 	if err := database.DB.Delete(&models.YoutubeJob{}, id).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Delete from Redis (Async)
+	// 3. Delete from Redis (Async)
 	go cleanupYoutubeJobRedis(context.Background(), uint(id))
 
 	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
@@ -1103,13 +1273,25 @@ func DeletePendingYoutubeJobs(c *gin.Context) {
 		return
 	}
 
-	// Delete from PG
+	// 收集所有 job IDs
+	jobIDs := make([]uint, len(jobs))
+	for i, job := range jobs {
+		jobIDs[i] = job.ID
+	}
+
+	// 1. 先删除相关的 task_records（避免外键约束错误）
+	if err := database.DB.Where("job_id IN ?", jobIDs).Delete(&models.YoutubeTaskRecord{}).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete task records: " + err.Error()})
+		return
+	}
+
+	// 2. 删除 Jobs
 	if err := database.DB.Delete(&models.YoutubeJob{}, "status = ?", models.StatusPending).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Delete from Redis (Async)
+	// 3. Delete from Redis (Async)
 	go func(jobs []models.YoutubeJob) {
 		ctx := context.Background()
 		for _, job := range jobs {

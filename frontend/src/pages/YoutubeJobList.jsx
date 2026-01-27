@@ -27,6 +27,8 @@ const YoutubeJobList = () => {
   });
   const [form] = Form.useForm();
   const navigate = useNavigate();
+  const [submitDisabled, setSubmitDisabled] = useState(false);
+  const [submitDisabledTime, setSubmitDisabledTime] = useState(0);
 
   const fetchJobs = async (page = 1, pageSize = 10) => {
     setLoading(true);
@@ -83,8 +85,25 @@ const YoutubeJobList = () => {
   };
 
   const handleCreate = async () => {
+    // 检查是否在冷却期内
+    if (submitDisabled) {
+      const remainingSeconds = Math.ceil((60000 - (Date.now() - submitDisabledTime)) / 1000);
+      message.warning(`Please wait ${remainingSeconds} seconds before submitting again`);
+      return;
+    }
+
     try {
       const values = await form.validateFields();
+      
+      // 禁用提交按钮，设置1分钟冷却期
+      setSubmitDisabled(true);
+      setSubmitDisabledTime(Date.now());
+      
+      // 设置定时器，1分钟后重新启用
+      setTimeout(() => {
+        setSubmitDisabled(false);
+        setSubmitDisabledTime(0);
+      }, 60000); // 60秒 = 1分钟
       
       // If file is present, use Multipart/Form-Data
       if (fileList.length > 0) {
@@ -95,7 +114,17 @@ const YoutubeJobList = () => {
         if (values.machine_name) {
           formData.append('machine_name', values.machine_name);
         }
-        formData.append('file', fileList[0]);
+        
+        // 获取文件对象（Ant Design Upload 组件的文件对象结构）
+        const file = fileList[0].originFileObj || fileList[0];
+        if (!file) {
+          message.error('File not found. Please select a file again.');
+          setSubmitDisabled(false);
+          setSubmitDisabledTime(0);
+          return;
+        }
+        formData.append('file', file);
+        
         if (values.file_url) {
             formData.append('file_url', values.file_url);
         }
@@ -103,7 +132,13 @@ const YoutubeJobList = () => {
             formData.append('tasks', values.urls);
         }
 
-        await api.post('/youtube-jobs/', formData);
+        console.log('Submitting form with file:', file.name, 'size:', file.size);
+        await api.post('/youtube-jobs/', formData, {
+          headers: {
+            'Content-Type': 'multipart/form-data',
+          },
+          timeout: 300000, // 5分钟超时，因为文件可能很大
+        });
       } else {
         // Use JSON
         let tasks = [];
@@ -116,6 +151,8 @@ const YoutubeJobList = () => {
 
         if (tasks.length === 0 && !values.file_url) {
             message.error('Please enter URLs, provide a File URL, or upload a file');
+            setSubmitDisabled(false);
+            setSubmitDisabledTime(0);
             return;
         }
 
@@ -133,14 +170,53 @@ const YoutubeJobList = () => {
         await api.post('/youtube-jobs/', payload);
       }
 
-      message.success('Job(s) created');
+      message.success('Job(s) created successfully. Tasks are being added to the queue...');
       setIsModalOpen(false);
       form.resetFields();
       setFileList([]);
       fetchJobs(pagination.current, pagination.pageSize);
     } catch (error) {
       console.error(error);
-      message.error('Failed to create job: ' + (error.response?.data?.error || error.message));
+      
+      // 检查是否是验证错误
+      if (error.response?.status === 400 && error.response?.data?.validation_errors) {
+        const validationData = error.response.data;
+        const errors = validationData.validation_errors;
+        
+        // 构建详细的错误消息
+        let errorMsg = `${validationData.error}\n\n`;
+        errorMsg += `Total lines: ${validationData.total_lines}\n`;
+        errorMsg += `Valid: ${validationData.valid_count}, Errors: ${validationData.error_count}\n\n`;
+        errorMsg += 'Validation errors:\n';
+        
+        errors.forEach((err, index) => {
+          errorMsg += `Line ${err.line_number}: ${err.content}\n`;
+          errorMsg += `  → ${err.message}\n`;
+          if (err.fixed) {
+            errorMsg += `  ✓ Auto-fixed to: ${err.fixed_url}\n`;
+          }
+          if (index < errors.length - 1) {
+            errorMsg += '\n';
+          }
+        });
+        
+        // 显示错误对话框
+        Modal.error({
+          title: 'File Format Validation Failed',
+          width: 600,
+          content: (
+            <div style={{ whiteSpace: 'pre-wrap', fontFamily: 'monospace', fontSize: '12px' }}>
+              {errorMsg}
+            </div>
+          ),
+        });
+      } else {
+        message.error('Failed to create job: ' + (error.response?.data?.error || error.message));
+      }
+      
+      // 如果出错，立即恢复按钮状态
+      setSubmitDisabled(false);
+      setSubmitDisabledTime(0);
     }
   };
 
@@ -328,8 +404,16 @@ const YoutubeJobList = () => {
       <Modal 
         title="Create YouTube Job" 
         open={isModalOpen} 
-        onOk={handleCreate} 
-        onCancel={() => { setIsModalOpen(false); form.resetFields(); setFileList([]); }}
+        onOk={handleCreate}
+        okButtonProps={{ disabled: submitDisabled }}
+        okText={submitDisabled ? `Wait ${Math.ceil((60000 - (Date.now() - submitDisabledTime)) / 1000)}s` : 'Create'}
+        onCancel={() => { 
+          setIsModalOpen(false); 
+          form.resetFields(); 
+          setFileList([]);
+          setSubmitDisabled(false);
+          setSubmitDisabledTime(0);
+        }}
       >
         <Form form={form} layout="vertical">
           <Form.Item 

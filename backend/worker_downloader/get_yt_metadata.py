@@ -817,12 +817,44 @@ def process_metadata(task, ydl_opts):
                 
                 # 第二步：尝试获取 URL 并过滤
                 video_candidates = []
+                skipped_no_url = 0
+                skipped_invalid_url = 0
                 for f in all_video_candidates:
                     url = get_format_url(f)
-                    if url and not url.startswith('quic://') and '.m3u8' not in url and url.startswith('https://') and 'googlevideo.com' in url:
-                        # 临时设置 URL 以便后续使用
-                        f['url'] = url
-                        video_candidates.append(f)
+                    if not url:
+                        skipped_no_url += 1
+                        continue
+                    if url.startswith('quic://') or '.m3u8' in url or not url.startswith('https://') or 'googlevideo.com' not in url:
+                        skipped_invalid_url += 1
+                        continue
+                    # 临时设置 URL 以便后续使用
+                    f['url'] = url
+                    video_candidates.append(f)
+                
+                # 调试日志：显示格式统计
+                if video_strategy == 'min_1080p':
+                    print(f"  [DEBUG] Video format analysis for min_1080p strategy:")
+                    print(f"    Total video formats: {len(all_video_candidates)}")
+                    print(f"    Formats with valid URL: {len(video_candidates)}")
+                    print(f"    Formats without URL: {skipped_no_url}")
+                    print(f"    Formats with invalid URL: {skipped_invalid_url}")
+                    if video_candidates:
+                        heights = [f.get('height', 0) for f in video_candidates]
+                        print(f"    Available heights: {sorted(set(heights), reverse=True)}")
+                        min_1080p_count = len([h for h in heights if h >= 1080])
+                        print(f"    Formats >= 1080p: {min_1080p_count}")
+                    else:
+                        print(f"    ⚠ WARNING: No video formats with valid URL found!")
+                        # 如果 video_candidates 为空，尝试打印所有格式的信息用于调试
+                        if all_video_candidates:
+                            print(f"    [DEBUG] All video formats (first 5):")
+                            for f in all_video_candidates[:5]:
+                                fmt_id = f.get('format_id', 'unknown')
+                                height = f.get('height', 'N/A')
+                                width = f.get('width', 'N/A')
+                                url_preview = get_format_url(f)
+                                has_url = 'Yes' if url_preview else 'No'
+                                print(f"      Format {fmt_id}: {width}x{height}, URL: {has_url}")
                 
                 if video_strategy == 'hd_priority':
                     # 优先级策略：1080P > 720P > 1080P+
@@ -862,12 +894,32 @@ def process_metadata(task, ydl_opts):
                     # 1. 检查是否有 >= 1080P 的格式
                     min_1080p_formats = [f for f in video_candidates if f.get('height', 0) >= 1080]
                     if not min_1080p_formats:
-                        raise Exception("No video format >= 1080P available. Skipping download.")
+                        # 详细错误信息，帮助调试
+                        error_msg = "No video format >= 1080P available. Skipping download."
+                        if not video_candidates:
+                            error_msg += " No video formats with valid URL found. This may be due to YouTube SABR streaming or missing cookies."
+                        else:
+                            available_heights = sorted(set([f.get('height', 0) for f in video_candidates]), reverse=True)
+                            max_height = max([f.get('height', 0) for f in video_candidates]) if video_candidates else 0
+                            error_msg += f" Maximum available height: {max_height}p. Available heights: {available_heights}."
+                        
+                        # 检查所有格式（包括没有 URL 的），看看是否有 1080p 格式但被过滤了
+                        all_1080p_formats = [f for f in all_video_candidates if f.get('height', 0) >= 1080]
+                        if all_1080p_formats:
+                            print(f"  [DEBUG] Found {len(all_1080p_formats)} formats >= 1080p in all formats, but none have valid URL:")
+                            for f in all_1080p_formats[:3]:  # 只显示前3个
+                                fmt_id = f.get('format_id', 'unknown')
+                                height = f.get('height', 'N/A')
+                                url_preview = get_format_url(f)
+                                print(f"    Format {fmt_id} ({height}p): URL={'Yes' if url_preview else 'No'}")
+                        
+                        raise Exception(error_msg)
                     
                     # 2. 选择 >= 1080P 的最低画质（最小但满足要求）
                     # 按高度升序排列，选择第一个（最低的 >= 1080P）
                     min_1080p_formats_sorted = sorted(min_1080p_formats, key=lambda f: f.get('height', 0))
                     best_video = min_1080p_formats_sorted[0]
+                    print(f"  [DEBUG] Selected video format: {best_video.get('format_id')}, height: {best_video.get('height')}p, width: {best_video.get('width', 'N/A')}")
                 else:
                     # Default: highest_quality - 选择最高画质
                     if video_candidates:

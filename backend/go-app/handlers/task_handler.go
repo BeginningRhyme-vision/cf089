@@ -20,6 +20,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm/clause"
 )
 
 // Global Buffer Manager
@@ -1496,6 +1497,8 @@ func AddTasksToJob(jobID int64, urls []string) (int, error) {
 	batchSize := 10000
 	totalAdded := 0
 
+	log.Printf("[AddTasksToJob] Starting to process %d URLs for job %d (batch size: %d)", len(urls), jobID, batchSize)
+
 	// 2. Process in batches to reduce memory usage and pipeline size
 	for i := 0; i < len(urls); i += batchSize {
 		end := i + batchSize
@@ -1504,6 +1507,11 @@ func AddTasksToJob(jobID int64, urls []string) (int, error) {
 		}
 
 		batchUrls := urls[i:end]
+		batchNum := i/batchSize + 1
+		totalBatches := (len(urls) + batchSize - 1) / batchSize
+		
+		log.Printf("[AddTasksToJob] Processing batch %d/%d for job %d (%d URLs)", batchNum, totalBatches, jobID, len(batchUrls))
+		
 		var zMembers []redis.Z
 		var taskKeys []string
 		var taskRecords []models.YoutubeTaskRecord // 用于批量插入数据库
@@ -1552,8 +1560,8 @@ func AddTasksToJob(jobID int64, urls []string) (int, error) {
 
 			_, err := pipe.Exec(ctx)
 			if err != nil {
-				log.Printf("ERROR: Failed to execute pipeline for job %d batch %d: %v. %d task keys may have been created but not added to sorted set", 
-					jobID, i/batchSize, err, len(taskKeys))
+				log.Printf("[AddTasksToJob] ERROR: Failed to execute Redis pipeline for job %d batch %d/%d: %v. %d task keys may have been created but not added to sorted set", 
+					jobID, batchNum, totalBatches, err, len(taskKeys))
 				// Try to clean up any task keys that were created but not added to sorted set
 				// This is best-effort cleanup
 				cleanupPipe := database.RDB.Pipeline()
@@ -1564,31 +1572,45 @@ func AddTasksToJob(jobID int64, urls []string) (int, error) {
 				return totalAdded, err
 			}
 			
+			log.Printf("[AddTasksToJob] Successfully added %d tasks to Redis for job %d batch %d/%d", len(zMembers), jobID, batchNum, totalBatches)
+			
 			// 批量插入数据库记录（使用 ON CONFLICT 避免重复）
 			if len(taskRecords) > 0 {
-				// 使用 GORM 的 CreateInBatches 批量插入
-				// 如果记录已存在（通过唯一索引 idx_job_task），则忽略错误
-				// 注意：GORM 的 CreateInBatches 不支持 ON CONFLICT，所以我们需要捕获错误并忽略唯一索引冲突
-				if err := database.DB.CreateInBatches(taskRecords, 1000).Error; err != nil {
-					// 检查是否是唯一索引冲突（记录已存在）
-					if strings.Contains(err.Error(), "duplicate key") || 
-					   strings.Contains(err.Error(), "UNIQUE constraint") ||
-					   strings.Contains(err.Error(), "idx_job_task") {
-						// 记录已存在，这是正常的（可能是重试或并发创建），忽略错误
-						log.Printf("INFO: Some task records for job %d batch %d already exist (this is normal for retries): %v", 
-							jobID, i/batchSize, err)
+				log.Printf("[AddTasksToJob] Starting database insertion for job %d batch %d/%d (%d records)", jobID, batchNum, totalBatches, len(taskRecords))
+				// 使用 GORM 的 CreateInBatches 配合 OnConflict 批量插入
+				// 如果记录已存在（通过唯一索引 idx_job_task），则忽略（DO NOTHING）
+				// 注意：GORM 的 CreateInBatches 可能不完全支持 OnConflict，所以分批处理
+				batchSizeDB := 1000
+				dbBatchesTotal := (len(taskRecords) + batchSizeDB - 1) / batchSizeDB
+				for dbIdx := 0; dbIdx < len(taskRecords); dbIdx += batchSizeDB {
+					dbEnd := dbIdx + batchSizeDB
+					if dbEnd > len(taskRecords) {
+						dbEnd = len(taskRecords)
+					}
+					dbBatch := taskRecords[dbIdx:dbEnd]
+					dbBatchNum := dbIdx/batchSizeDB + 1
+					
+					if err := database.DB.Clauses(clause.OnConflict{
+						DoNothing: true,
+					}).Create(&dbBatch).Error; err != nil {
+						// 记录错误（但 OnConflict DoNothing 通常不会返回错误，除非是其他问题）
+						log.Printf("[AddTasksToJob] WARNING: Failed to insert task records for job %d batch %d/%d (db batch %d/%d): %v", 
+							jobID, batchNum, totalBatches, dbBatchNum, dbBatchesTotal, err)
 					} else {
-						// 其他错误，记录警告但继续
-						log.Printf("WARNING: Failed to batch insert task records for job %d batch %d: %v", 
-							jobID, i/batchSize, err)
+						log.Printf("[AddTasksToJob] Successfully inserted %d task records to DB for job %d batch %d/%d (db batch %d/%d)", 
+							len(dbBatch), jobID, batchNum, totalBatches, dbBatchNum, dbBatchesTotal)
 					}
 				}
+			} else {
+				log.Printf("[AddTasksToJob] WARNING: No task records to insert for job %d batch %d/%d", jobID, batchNum, totalBatches)
 			}
 			
 			totalAdded += len(zMembers)
+			log.Printf("[AddTasksToJob] Completed batch %d/%d for job %d. Total added so far: %d", batchNum, totalBatches, jobID, totalAdded)
 		}
 	}
 
+	log.Printf("[AddTasksToJob] Completed processing all batches for job %d. Total tasks added: %d", jobID, totalAdded)
 	return totalAdded, nil
 }
 
