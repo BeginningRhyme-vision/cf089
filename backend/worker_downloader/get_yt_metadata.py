@@ -707,7 +707,6 @@ def process_metadata(task, ydl_opts):
                     # 策略 D (保底): 如果还没选到，选现存最高的 >= 720
                     if not best_video:
                          best_video = next((f for f in video_candidates if f.get('height', 0) >= 720), None)
-<<<<<<< HEAD
                 elif video_strategy == 'ultra_priority':
                     # 优先级策略：1080P+ > 1080P
                     # 1. 检查是否有 > 1080P 的格式（2K, 4K 等）
@@ -732,16 +731,6 @@ def process_metadata(task, ydl_opts):
                     # 按高度升序排列，选择第一个（最低的 >= 1080P）
                     min_1080p_formats_sorted = sorted(min_1080p_formats, key=lambda f: f.get('height', 0))
                     best_video = min_1080p_formats_sorted[0]
-=======
-                elif video_strategy == 'best_1080p_plus':
-                    # 策略: 仅下载 1080P 及以上
-                    valid_candidates = [f for f in video_candidates if f.get('height', 0) >= 1080]
-                    if not valid_candidates:
-                        raise Exception("Video quality too low (max height < 1080P). Requirement: best_1080p_plus.")
-                    
-                    # 取最好的 (video_candidates 已经是降序，所以第一个就是最好的)
-                    best_video = valid_candidates[0]
->>>>>>> 3a4e26077dfea22e47b35f8536048de1280f829a
                 else:
                     # Default: highest_quality - 选择最高画质
                     if video_candidates:
