@@ -52,5 +52,6 @@ config_back_local_back.yaml
 config_local_db.yaml
 *.md
 *cookie.txt
+*cookies.txt
 check_queue.sh
 debug_queue.py

@@ -135,7 +135,7 @@ func (PipelineJob) TableName() string {
 // WorkerCookieConfig 记录机器名和cookie的绑定关系
 type WorkerCookieConfig struct {
 	ID                uint      `gorm:"primaryKey" json:"id"`
-	MachineName       string    `gorm:"size:255;not null;uniqueIndex" json:"machine_name"` // 机器名，唯一索引
+	MachineName       string    `gorm:"size:255;not null" json:"machine_name"` // 机器名（允许多条记录，用于轮询多个 cookie）
 	CookieContent     string    `gorm:"type:text;not null" json:"cookie_content"`          // 完整的cookie内容（text格式）
 	Enabled           bool      `gorm:"default:true" json:"enabled"`                        // 启用状态
 	ParseRateLimit    float64   `gorm:"default:0" json:"parse_rate_limit"`                 // 解析限流阈值速度（单位：requests/min，每分钟请求数）
