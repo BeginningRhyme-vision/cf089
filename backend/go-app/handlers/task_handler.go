@@ -910,28 +910,40 @@ func AcquireTasks(c *gin.Context) {
 		}
 		
 		for len(tasks) < req.Limit {
-			// Use BLPOP with 1s timeout (minimum supported by Redis client)
-			// This is atomic and prevents multiple workers from getting the same task
-			// BLPOP 可以同时监听多个队列，按顺序尝试
-			log.Printf("[AcquireTasks] Attempting BLPOP from retry queues (worker: %s, current tasks: %d)", req.WorkerID, len(tasks))
-			result, err := database.RDB.BLPop(ctx, 1*time.Second, queueNames...).Result()
-			if err == redis.Nil {
-				// Timeout or all queues empty
-				log.Printf("[AcquireTasks] BLPOP timeout or all queues empty (worker: %s)", req.WorkerID)
-				break
-			}
-			if err != nil {
-				log.Printf("[AcquireTasks] BLPOP error: %v (worker: %s)", err, req.WorkerID)
-				break
-			}
-			if len(result) < 2 {
-				log.Printf("[AcquireTasks] BLPOP returned invalid result: %v (worker: %s)", result, req.WorkerID)
-				break
+			// Use BLPOP with short timeout per queue to avoid CROSSSLOT error in Redis cluster
+			// Try each queue sequentially to ensure compatibility with Redis cluster mode
+			// BLPOP is atomic and prevents multiple workers from getting the same task
+			var idStr string
+			var queueName string
+			var found bool
+			
+			// Try each queue sequentially with short timeout
+			for _, qName := range queueNames {
+				log.Printf("[AcquireTasks] Attempting BLPOP from queue %s (worker: %s, current tasks: %d)", qName, req.WorkerID, len(tasks))
+				result, err := database.RDB.BLPop(ctx, 100*time.Millisecond, qName).Result()
+				if err == redis.Nil {
+					// Timeout or queue empty, try next queue
+					continue
+				}
+				if err != nil {
+					// Check if it's a CROSSSLOT error (shouldn't happen with single queue, but log it)
+					log.Printf("[AcquireTasks] BLPOP error from queue %s: %v (worker: %s)", qName, err, req.WorkerID)
+					continue
+				}
+				if len(result) >= 2 {
+					queueName = result[0] // 队列名
+					idStr = result[1]     // task ID
+					found = true
+					log.Printf("[AcquireTasks] Popped task %s from retry queue %s (worker: %s)", idStr, queueName, req.WorkerID)
+					break
+				}
 			}
 			
-			queueName := result[0] // 队列名
-			idStr := result[1]     // task ID
-			log.Printf("[AcquireTasks] Popped task %s from retry queue %s (worker: %s)", idStr, queueName, req.WorkerID)
+			if !found {
+				// All queues are empty or timed out
+				log.Printf("[AcquireTasks] All retry queues empty or timed out (worker: %s)", req.WorkerID)
+				break
+			}
 			
 			// Check task status after atomic pop
 			taskData, err := database.RDB.Get(ctx, fmt.Sprintf("task:%s", idStr)).Result()
