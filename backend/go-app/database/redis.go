@@ -18,10 +18,11 @@ func InitRedis(cfg *config.Config) error {
 	}
 
 	// 设置超时时间，避免网络问题导致长时间阻塞
+	// 对于大批次写入操作，需要更长的超时时间
 	opt.DialTimeout = 10 * time.Second
-	opt.ReadTimeout = 30 * time.Second  // 增加读取超时时间
-	opt.WriteTimeout = 10 * time.Second
-	opt.PoolTimeout = 10 * time.Second
+	opt.ReadTimeout = 60 * time.Second  // 增加读取超时时间（用于大批次读取）
+	opt.WriteTimeout = 60 * time.Second // 增加写入超时时间（用于大批次写入，如 2000 个任务的 pipeline）
+	opt.PoolTimeout = 30 * time.Second  // 增加连接池超时
 	opt.PoolSize = 100  // 增加连接池大小
 	opt.MinIdleConns = 10  // 最小空闲连接数
 

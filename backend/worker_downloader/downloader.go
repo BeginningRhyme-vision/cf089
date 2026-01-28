@@ -214,7 +214,7 @@ func getDefaultMaxConcurrentWorkers() int {
 			return workers
 		}
 	}
-	return 100 // 默认值（处理多个任务的并发数）
+	return 2000 // 默认值（处理多个任务的并发数）
 }
 
 // getDefaultConcurrentChunksPerFile 获取每个文件内部的并发chunk数量
@@ -225,7 +225,7 @@ func getDefaultConcurrentChunksPerFile() int {
 			return chunks
 		}
 	}
-	return 10 // 默认10个并发chunk（每个文件内部的并发数）
+	return 200 // 默认200个并发chunk（每个文件内部的并发数）
 }
 
 func getDefaultGlobalRequestsPerMinute() int {
@@ -235,7 +235,7 @@ func getDefaultGlobalRequestsPerMinute() int {
 			return rate
 		}
 	}
-	return 200 // 默认每分钟200个请求（全局限制）
+	return 1000 // 默认每分钟1000个请求（全局限制）
 }
 
 func getDefaultTaskBufferSize() int {

@@ -1494,12 +1494,20 @@ func AddTasksToJob(jobID int64, urls []string) (int, error) {
 	}
 
 	now := time.Now()
-	batchSize := 10000
+	// 减小批次大小，避免 Redis pipeline 超时（10000 太大，容易超时）
+	batchSize := 2000
 	totalAdded := 0
 
 	log.Printf("[AddTasksToJob] Starting to process %d URLs for job %d (batch size: %d)", len(urls), jobID, batchSize)
 
-	// 2. Process in batches to reduce memory usage and pipeline size
+	// 2. 先全部写入 Redis（分批处理，但先完成所有 Redis 写入）
+	totalBatches := (len(urls) + batchSize - 1) / batchSize
+	log.Printf("[AddTasksToJob] Will process %d batches for job %d (Redis first, then MySQL)", totalBatches, jobID)
+	
+	// 收集所有需要写入 MySQL 的记录
+	allTaskRecords := make([]models.YoutubeTaskRecord, 0, len(urls))
+	
+	// 第一阶段：全部写入 Redis
 	for i := 0; i < len(urls); i += batchSize {
 		end := i + batchSize
 		if end > len(urls) {
@@ -1508,13 +1516,13 @@ func AddTasksToJob(jobID int64, urls []string) (int, error) {
 
 		batchUrls := urls[i:end]
 		batchNum := i/batchSize + 1
-		totalBatches := (len(urls) + batchSize - 1) / batchSize
 		
-		log.Printf("[AddTasksToJob] Processing batch %d/%d for job %d (%d URLs)", batchNum, totalBatches, jobID, len(batchUrls))
+		log.Printf("[AddTasksToJob] [Redis Phase] Processing batch %d/%d for job %d (%d URLs, range: %d-%d)", 
+			batchNum, totalBatches, jobID, len(batchUrls), i, end-1)
 		
 		var zMembers []redis.Z
 		var taskKeys []string
-		var taskRecords []models.YoutubeTaskRecord // 用于批量插入数据库
+		var batchTaskRecords []models.YoutubeTaskRecord // 收集这批的数据库记录
 		pipe := database.RDB.Pipeline()
 
 		for j, url := range batchUrls {
@@ -1543,7 +1551,7 @@ func AddTasksToJob(jobID int64, urls []string) (int, error) {
 				Member: task.ID,
 			})
 			
-			// 同时创建数据库记录
+			// 收集数据库记录（稍后批量写入）
 			taskRecord := models.YoutubeTaskRecord{
 				ID:        uint(taskID),
 				JobID:     uint(jobID),
@@ -1551,17 +1559,54 @@ func AddTasksToJob(jobID int64, urls []string) (int, error) {
 				CreatedAt: now,
 				UpdatedAt: now,
 			}
-			taskRecords = append(taskRecords, taskRecord)
+			batchTaskRecords = append(batchTaskRecords, taskRecord)
 		}
 
 		if len(zMembers) > 0 {
 			// Optimize: Single ZAdd for the whole batch
 			pipe.ZAdd(ctx, jobKey, zMembers...)
 
-			_, err := pipe.Exec(ctx)
+			// 添加重试机制，处理临时网络问题（如超时）
+			var err error
+			maxRetries := 3
+			for retry := 0; retry < maxRetries; retry++ {
+				_, err = pipe.Exec(ctx)
+				if err == nil {
+					break
+				}
+				
+				// 检查是否是超时错误或其他可重试的错误
+				if retry < maxRetries-1 {
+					waitTime := time.Duration(retry+1) * 2 * time.Second // 递增等待时间：2s, 4s, 6s
+					log.Printf("[AddTasksToJob] WARNING: Redis pipeline failed for job %d batch %d/%d (retry %d/%d): %v. Retrying in %v...", 
+						jobID, batchNum, totalBatches, retry+1, maxRetries, err, waitTime)
+					time.Sleep(waitTime)
+					
+					// 重新创建 pipeline（因为之前的 pipeline 已经执行过了）
+					pipe = database.RDB.Pipeline()
+					// 重新设置所有 task keys（可能已经部分写入，需要确保完整性）
+					for j, url := range batchUrls {
+						taskID := startID + int64(i+j)
+						task := models.YoutubeTask{
+							ID:        taskID,
+							JobID:     jobID,
+							URL:       url,
+							Status:    "PENDING",
+							CreatedAt: now,
+							UpdatedAt: now,
+						}
+						data, _ := json.Marshal(task)
+						pipe.Set(ctx, fmt.Sprintf("task:%d", taskID), data, 0)
+					}
+					pipe.ZAdd(ctx, jobKey, zMembers...)
+				}
+			}
+			
 			if err != nil {
-				log.Printf("[AddTasksToJob] ERROR: Failed to execute Redis pipeline for job %d batch %d/%d: %v. %d task keys may have been created but not added to sorted set", 
-					jobID, batchNum, totalBatches, err, len(taskKeys))
+				log.Printf("[AddTasksToJob] ERROR: Failed to execute Redis pipeline for job %d batch %d/%d after %d retries: %v. %d task keys may have been created but not added to sorted set", 
+					jobID, batchNum, totalBatches, maxRetries, err, len(taskKeys))
+				log.Printf("[AddTasksToJob] ERROR: Stopping Redis phase for job %d. Processed %d/%d batches, added %d tasks so far", 
+					jobID, batchNum-1, totalBatches, totalAdded)
 				// Try to clean up any task keys that were created but not added to sorted set
 				// This is best-effort cleanup
 				cleanupPipe := database.RDB.Pipeline()
@@ -1569,45 +1614,45 @@ func AddTasksToJob(jobID int64, urls []string) (int, error) {
 					cleanupPipe.Del(ctx, key)
 				}
 				cleanupPipe.Exec(ctx)
-				return totalAdded, err
+				return totalAdded, fmt.Errorf("failed at Redis batch %d/%d: %w", batchNum, totalBatches, err)
 			}
 			
 			log.Printf("[AddTasksToJob] Successfully added %d tasks to Redis for job %d batch %d/%d", len(zMembers), jobID, batchNum, totalBatches)
 			
-			// 批量插入数据库记录（使用 ON CONFLICT 避免重复）
-			if len(taskRecords) > 0 {
-				log.Printf("[AddTasksToJob] Starting database insertion for job %d batch %d/%d (%d records)", jobID, batchNum, totalBatches, len(taskRecords))
-				// 使用 GORM 的 CreateInBatches 配合 OnConflict 批量插入
-				// 如果记录已存在（通过唯一索引 idx_job_task），则忽略（DO NOTHING）
-				// 注意：GORM 的 CreateInBatches 可能不完全支持 OnConflict，所以分批处理
-				batchSizeDB := 1000
-				dbBatchesTotal := (len(taskRecords) + batchSizeDB - 1) / batchSizeDB
-				for dbIdx := 0; dbIdx < len(taskRecords); dbIdx += batchSizeDB {
-					dbEnd := dbIdx + batchSizeDB
-					if dbEnd > len(taskRecords) {
-						dbEnd = len(taskRecords)
-					}
-					dbBatch := taskRecords[dbIdx:dbEnd]
-					dbBatchNum := dbIdx/batchSizeDB + 1
-					
-					if err := database.DB.Clauses(clause.OnConflict{
-						DoNothing: true,
-					}).Create(&dbBatch).Error; err != nil {
-						// 记录错误（但 OnConflict DoNothing 通常不会返回错误，除非是其他问题）
-						log.Printf("[AddTasksToJob] WARNING: Failed to insert task records for job %d batch %d/%d (db batch %d/%d): %v", 
-							jobID, batchNum, totalBatches, dbBatchNum, dbBatchesTotal, err)
-					} else {
-						log.Printf("[AddTasksToJob] Successfully inserted %d task records to DB for job %d batch %d/%d (db batch %d/%d)", 
-							len(dbBatch), jobID, batchNum, totalBatches, dbBatchNum, dbBatchesTotal)
-					}
-				}
-			} else {
-				log.Printf("[AddTasksToJob] WARNING: No task records to insert for job %d batch %d/%d", jobID, batchNum, totalBatches)
-			}
-			
+			// 收集这批的数据库记录
+			allTaskRecords = append(allTaskRecords, batchTaskRecords...)
 			totalAdded += len(zMembers)
-			log.Printf("[AddTasksToJob] Completed batch %d/%d for job %d. Total added so far: %d", batchNum, totalBatches, jobID, totalAdded)
+			log.Printf("[AddTasksToJob] [Redis Phase] Completed batch %d/%d for job %d. Total added so far: %d", batchNum, totalBatches, jobID, totalAdded)
 		}
+	}
+	
+	// 第二阶段：批量写入 MySQL（所有 Redis 写入成功后才开始）
+	if len(allTaskRecords) > 0 {
+		log.Printf("[AddTasksToJob] [MySQL Phase] Starting database insertion for job %d (%d records total)", jobID, len(allTaskRecords))
+		batchSizeDB := 1000
+		dbBatchesTotal := (len(allTaskRecords) + batchSizeDB - 1) / batchSizeDB
+		for dbIdx := 0; dbIdx < len(allTaskRecords); dbIdx += batchSizeDB {
+			dbEnd := dbIdx + batchSizeDB
+			if dbEnd > len(allTaskRecords) {
+				dbEnd = len(allTaskRecords)
+			}
+			dbBatch := allTaskRecords[dbIdx:dbEnd]
+			dbBatchNum := dbIdx/batchSizeDB + 1
+			
+			if err := database.DB.Clauses(clause.OnConflict{
+				DoNothing: true,
+			}).Create(&dbBatch).Error; err != nil {
+				// 记录错误（但 OnConflict DoNothing 通常不会返回错误，除非是其他问题）
+				log.Printf("[AddTasksToJob] WARNING: Failed to insert task records for job %d (db batch %d/%d): %v", 
+					jobID, dbBatchNum, dbBatchesTotal, err)
+			} else {
+				log.Printf("[AddTasksToJob] Successfully inserted %d task records to DB for job %d (db batch %d/%d)", 
+					len(dbBatch), jobID, dbBatchNum, dbBatchesTotal)
+			}
+		}
+		log.Printf("[AddTasksToJob] [MySQL Phase] Completed database insertion for job %d (%d records)", jobID, len(allTaskRecords))
+	} else {
+		log.Printf("[AddTasksToJob] WARNING: No task records to insert for job %d", jobID)
 	}
 
 	log.Printf("[AddTasksToJob] Completed processing all batches for job %d. Total tasks added: %d", jobID, totalAdded)
