@@ -68,24 +68,49 @@ const YoutubeJobDetail = () => {
 
   // Polling
   useEffect(() => {
-    const interval = setInterval(() => {
+    let timeoutId;
+    let isMounted = true;
+    
+    const poll = async () => {
+      if (!isMounted) return;
+      
+      try {
         fetchJob();
         
         // Silent poll for tasks
-        api.post('/tasks/fetch', {
-            job_id: parseInt(jobId),
-            limit: pagination.pageSize,
-            offset: (pagination.current - 1) * pagination.pageSize
-        }).then(res => {
-             setRecords(res.data.tasks || []);
-             setPagination(prev => ({
-                ...prev,
-                total: res.data.total || 0
-             }));
-        }).catch(e => console.error(e));
-
-    }, 5000);
-    return () => clearInterval(interval);
+        const res = await api.post('/tasks/fetch', {
+          job_id: parseInt(jobId),
+          limit: pagination.pageSize,
+          offset: (pagination.current - 1) * pagination.pageSize
+        });
+        
+        if (isMounted) {
+          setRecords(res.data.tasks || []);
+          setPagination(prev => ({
+            ...prev,
+            total: res.data.total || 0
+          }));
+        }
+      } catch (e) {
+        console.error(e);
+      }
+      
+      // 每次查询完成后等待 1 秒，然后再进行下一次查询
+      if (isMounted) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        if (isMounted) {
+          timeoutId = setTimeout(poll, 4000); // 总共 5 秒间隔（1秒延迟 + 4秒等待）
+        }
+      }
+    };
+    
+    // 首次调用
+    timeoutId = setTimeout(poll, 0);
+    
+    return () => {
+      isMounted = false;
+      if (timeoutId) clearTimeout(timeoutId);
+    };
   }, [jobId, pagination.current, pagination.pageSize, fetchJob]);
 
   const handleTableChange = (newPagination) => {

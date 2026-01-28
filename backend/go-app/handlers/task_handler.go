@@ -9,7 +9,6 @@ import (
 	"log"
 	"net/http"
 	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -299,8 +298,6 @@ func checkAndRefillBuffers() {
 		return
 	}
 
-	ctx := context.Background()
-
 	for _, job := range jobs {
 		jid := int64(job.ID)
 		ensureBuffer(jid)
@@ -313,24 +310,12 @@ func checkAndRefillBuffers() {
 			continue
 		}
 
-		// Check for stuck state: Pending > 0, Buffer Empty, Not Filling, Offset >= Total
+		// Check for stuck state: Pending > 0, Buffer Empty, Not Filling
+		// Note: Offset reset is now manual via API endpoint, not automatic
 		if job.PendingCount > 0 && len(ch) == 0 {
+			// Buffer is empty but there are pending tasks, trigger refill if not already filling
 			if _, filling := fillingMap.Load(jid); !filling {
-				offsetKey := fmt.Sprintf("job:%d:offset", jid)
-				jobKey := fmt.Sprintf("job:%d:tasks", jid)
-
-				total, _ := database.RDB.ZCard(ctx, jobKey).Result()
-				offsetStr, _ := database.RDB.Get(ctx, offsetKey).Result()
-				var offset int64
-				if offsetStr != "" {
-					fmt.Sscanf(offsetStr, "%d", &offset)
-				}
-
-				if total > 0 && offset >= total {
-					// Reset offset
-					fmt.Printf("Resetting offset for stuck job %d (Total: %d, Offset: %d, Pending: %d)\n", jid, total, offset, job.PendingCount)
-					database.RDB.Set(ctx, offsetKey, 0, 0)
-				}
+				// Offset reset removed - use manual API endpoint instead
 			}
 		}
 
@@ -503,18 +488,18 @@ func BatchUpdate(c *gin.Context) {
 		Updates     []models.YoutubeTask `json:"updates"`
 		MachineName string               `json:"machine_name"` // 可选：处理这些任务的 worker 的机器名
 	}
-	
+
 	var req BatchUpdateRequest
 	var updates []models.YoutubeTask
 	var workerMachineName string
-	
+
 	// 尝试解析请求体
 	bodyBytes, err := io.ReadAll(c.Request.Body)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read request body"})
 		return
 	}
-	
+
 	// 先尝试解析为新的格式（包含 machine_name 的对象）
 	if err := json.Unmarshal(bodyBytes, &req); err == nil && req.Updates != nil && len(req.Updates) > 0 {
 		// 新格式：包含 updates 和 machine_name
@@ -536,7 +521,7 @@ func BatchUpdate(c *gin.Context) {
 
 	log.Printf("[BatchUpdate] Received %d task updates", len(updates))
 	for i, u := range updates {
-		log.Printf("[BatchUpdate] Update %d: task_id=%d, status=%s, video_id='%s', audio_url=%v, video_url=%v, title='%s'", 
+		log.Printf("[BatchUpdate] Update %d: task_id=%d, status=%s, video_id='%s', audio_url=%v, video_url=%v, title='%s'",
 			i+1, u.ID, u.Status, u.VideoID, u.AudioURL != "", u.VideoURL != "", u.Title)
 	}
 
@@ -551,7 +536,7 @@ func BatchUpdate(c *gin.Context) {
 	// 使用带超时的 context 进行 MGet 操作，避免长时间阻塞
 	mgetCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	
+
 	existingJSONs, err := database.RDB.MGet(mgetCtx, keys...).Result()
 	if err != nil {
 		log.Printf("[BatchUpdate] MGet failed: %v (keys count: %d)", err, len(keys))
@@ -585,10 +570,10 @@ func BatchUpdate(c *gin.Context) {
 		oldURL := existing.URL
 		oldTitle := existing.Title
 		oldVideoID := existing.VideoID
-		
-		log.Printf("[BatchUpdate] Processing task %d: old_status=%s, update_status=%s, update_video_id='%s', update_audio_url=%v, update_video_url=%v, update_title='%s'", 
+
+		log.Printf("[BatchUpdate] Processing task %d: old_status=%s, update_status=%s, update_video_id='%s', update_audio_url=%v, update_video_url=%v, update_title='%s'",
 			u.ID, oldStatus, u.Status, u.VideoID, u.AudioURL != "", u.VideoURL != "", u.Title)
-		log.Printf("[BatchUpdate] Task %d before update: url='%s', title='%s', video_id='%s'", 
+		log.Printf("[BatchUpdate] Task %d before update: url='%s', title='%s', video_id='%s'",
 			u.ID, oldURL, oldTitle, oldVideoID)
 
 		// 2. Merge fields (only update if provided/valid)
@@ -650,8 +635,8 @@ func BatchUpdate(c *gin.Context) {
 			log.Printf("[BatchUpdate] WARNING: Task %d VideoID would be lost (old='%s'), preserving it", u.ID, oldVideoID)
 			existing.VideoID = oldVideoID
 		}
-		
-		log.Printf("[BatchUpdate] Task %d after update: url='%s', title='%s', video_id='%s'", 
+
+		log.Printf("[BatchUpdate] Task %d after update: url='%s', title='%s', video_id='%s'",
 			u.ID, existing.URL, existing.Title, existing.VideoID)
 
 		// Track Status Change
@@ -677,7 +662,7 @@ func BatchUpdate(c *gin.Context) {
 
 		taskKey := fmt.Sprintf("task:%d", existing.ID)
 		pipe.Set(ctx, taskKey, data, 0)
-		log.Printf("[BatchUpdate] ✓ Saved task %d: status=%s, video_id='%s', audio_url=%v, video_url=%v", 
+		log.Printf("[BatchUpdate] ✓ Saved task %d: status=%s, video_id='%s', audio_url=%v, video_url=%v",
 			existing.ID, existing.Status, existing.VideoID, existing.AudioURL != "", existing.VideoURL != "")
 
 		// Ensure in Job ZSet (idempotent)
@@ -713,10 +698,10 @@ func BatchUpdate(c *gin.Context) {
 					queueName = fmt.Sprintf("queue:youtube:download_ready:%s", jobMachineName)
 				}
 				pipe.RPush(ctx, queueName, existing.ID)
-				log.Printf("[BatchUpdate] Pushed task %d to download queue: %s (job_id: %d, job_machine: %s, worker_machine: %s)", 
+				log.Printf("[BatchUpdate] Pushed task %d to download queue: %s (job_id: %d, job_machine: %s, worker_machine: %s)",
 					existing.ID, queueName, existing.JobID, jobMachineName, workerMachineName)
 			} else {
-				log.Printf("[BatchUpdate] Task %d status changed to METADATA_FETCHED but has no URLs (audio_url=%v, video_url=%v), skipping queue push", 
+				log.Printf("[BatchUpdate] Task %d status changed to METADATA_FETCHED but has no URLs (audio_url=%v, video_url=%v), skipping queue push",
 					existing.ID, existing.AudioURL != "", existing.VideoURL != "")
 			}
 		}
@@ -740,7 +725,7 @@ func getJobMachineName(jobID int64) string {
 	if cached, ok := jobMachineNameCache.Load(jobID); ok {
 		return cached.(string)
 	}
-	
+
 	// 查询数据库
 	var job models.YoutubeJob
 	if err := database.DB.Select("machine_name").First(&job, jobID).Error; err != nil {
@@ -748,7 +733,7 @@ func getJobMachineName(jobID int64) string {
 		jobMachineNameCache.Store(jobID, "")
 		return ""
 	}
-	
+
 	// 缓存结果
 	jobMachineNameCache.Store(jobID, job.MachineName)
 	return job.MachineName
@@ -792,10 +777,10 @@ func getMetadataQueueName(jobID int64) string {
 
 func AcquireTasks(c *gin.Context) {
 	type AcquireRequest struct {
-		WorkerID      string `json:"worker_id"`
-		MachineName   string `json:"machine_name"` // 可选：worker 的主机名
-		Stage         string `json:"stage"`        // "metadata" (default) or "download"
-		Limit         int    `json:"limit"`
+		WorkerID    string `json:"worker_id"`
+		MachineName string `json:"machine_name"` // 可选：worker 的主机名
+		Stage       string `json:"stage"`        // "metadata" (default) or "download"
+		Limit       int    `json:"limit"`
 	}
 
 	var req AcquireRequest
@@ -844,7 +829,7 @@ func AcquireTasks(c *gin.Context) {
 		for i := 0; i < req.Limit; i++ {
 			var idStr string
 			var err error
-			
+
 			// 尝试从各个队列获取任务
 			for _, queueName := range queueNames {
 				idStr, err = database.RDB.LPop(ctx, queueName).Result()
@@ -858,7 +843,7 @@ func AcquireTasks(c *gin.Context) {
 				}
 				// redis.Nil 表示队列为空，继续尝试下一个队列
 			}
-			
+
 			if err == redis.Nil {
 				// 所有队列都为空
 				break
@@ -908,7 +893,7 @@ func AcquireTasks(c *gin.Context) {
 		} else if req.Stage == "metadata" {
 			log.Printf("[AcquireTasks] Retry queues are empty, worker %s will check job buffers", req.WorkerID)
 		}
-		
+
 		for len(tasks) < req.Limit {
 			// Use BLPOP with short timeout per queue to avoid CROSSSLOT error in Redis cluster
 			// Try each queue sequentially to ensure compatibility with Redis cluster mode
@@ -916,11 +901,12 @@ func AcquireTasks(c *gin.Context) {
 			var idStr string
 			var queueName string
 			var found bool
-			
-			// Try each queue sequentially with short timeout
+
+			// Try each queue sequentially.
+			// Note: go-redis BLPOP minimal supported timeout is 1s (sub-second will be truncated and logged).
 			for _, qName := range queueNames {
 				log.Printf("[AcquireTasks] Attempting BLPOP from queue %s (worker: %s, current tasks: %d)", qName, req.WorkerID, len(tasks))
-				result, err := database.RDB.BLPop(ctx, 100*time.Millisecond, qName).Result()
+				result, err := database.RDB.BLPop(ctx, 1*time.Second, qName).Result()
 				if err == redis.Nil {
 					// Timeout or queue empty, try next queue
 					continue
@@ -938,13 +924,13 @@ func AcquireTasks(c *gin.Context) {
 					break
 				}
 			}
-			
+
 			if !found {
 				// All queues are empty or timed out
 				log.Printf("[AcquireTasks] All retry queues empty or timed out (worker: %s)", req.WorkerID)
 				break
 			}
-			
+
 			// Check task status after atomic pop
 			taskData, err := database.RDB.Get(ctx, fmt.Sprintf("task:%s", idStr)).Result()
 			if err != nil {
@@ -952,7 +938,7 @@ func AcquireTasks(c *gin.Context) {
 				log.Printf("[AcquireTasks] Task %s not found in Redis, skipping", idStr)
 				continue
 			}
-			
+
 			var t models.YoutubeTask
 			if err := json.Unmarshal([]byte(taskData), &t); err != nil {
 				// Try flexible time parser for tasks with non-standard time formats
@@ -966,7 +952,7 @@ func AcquireTasks(c *gin.Context) {
 					continue
 				}
 			}
-			
+
 			// Only return if status is PENDING
 			if t.Status == "PENDING" {
 				// 不再需要检查主机名过滤，因为已经通过队列分离了
@@ -985,7 +971,7 @@ func AcquireTasks(c *gin.Context) {
 				}
 			}
 		}
-		
+
 		if len(tasks) > 0 {
 			log.Printf("[AcquireTasks] Returning %d tasks from retry queue to worker %s", len(tasks), req.WorkerID)
 		}
@@ -1042,7 +1028,7 @@ func AcquireTasks(c *gin.Context) {
 					// For now assume buffer is raw tasks from ZRange.
 					// We might want to check status if we want strict PENDING.
 					// But let's assume Python worker handles idempotency.
-					
+
 					// 检查主机名过滤（job buffers 中的任务需要检查）
 					if req.MachineName != "" {
 						if !shouldProcessTask(t.JobID, req.MachineName) {
@@ -1076,107 +1062,14 @@ func BatchFetch(c *gin.Context) {
 	}
 
 	ctx := context.Background()
-	jobKey := fmt.Sprintf("job:%d:tasks", req.JobID)
 
-	// Get Total Count from sorted set
-	total, err := database.RDB.ZCard(ctx, jobKey).Result()
-	if err != nil {
+	// 从 MySQL 查询总数
+	var total int64
+	if err := database.DB.Model(&models.YoutubeTaskRecord{}).
+		Where("job_id = ?", req.JobID).
+		Count(&total).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get count: " + err.Error()})
 		return
-	}
-
-	// Diagnostic and Auto-fix: Check if there are task keys that are not in the sorted set
-	// This is an expensive operation (SCAN + GET + ZScore for each key), so:
-	// 1. Only run when explicitly requested via query parameter (fix_orphans=true)
-	// 2. Run asynchronously to avoid blocking the API response
-	// 3. Use pipeline for batch operations to improve performance
-	if c.Query("fix_orphans") == "true" {
-		// Run diagnostic asynchronously to avoid blocking API response
-		go func() {
-			diagnosticCtx := context.Background()
-			scanPattern := fmt.Sprintf("task:%d*", req.JobID*1000000)
-			var cursor uint64
-			var orphanedIDs []int64
-			
-			// Process keys in batches using pipeline for better performance
-			const batchSize = 50 // Process in smaller batches to avoid memory issues
-			
-			for {
-				var keys []string
-				keys, cursor, err = database.RDB.Scan(diagnosticCtx, cursor, scanPattern, 1000).Result()
-				if err != nil {
-					break
-				}
-				
-				// Process keys in batches
-				for i := 0; i < len(keys); i += batchSize {
-					end := i + batchSize
-					if end > len(keys) {
-						end = len(keys)
-					}
-					batch := keys[i:end]
-					
-					// Use pipeline for batch operations
-					pipe := database.RDB.Pipeline()
-					var taskIDs []int64
-					var getCmds []*redis.StringCmd
-					var zscoreCmds []*redis.FloatCmd
-					
-					for _, key := range batch {
-						var taskID int64
-						if _, err := fmt.Sscanf(key, "task:%d", &taskID); err == nil {
-							taskIDs = append(taskIDs, taskID)
-							getCmds = append(getCmds, pipe.Get(diagnosticCtx, key))
-							zscoreCmds = append(zscoreCmds, pipe.ZScore(diagnosticCtx, jobKey, fmt.Sprintf("%d", taskID)))
-						}
-					}
-					
-					// Execute batch
-					if len(taskIDs) > 0 {
-						_, err = pipe.Exec(diagnosticCtx)
-						if err == nil {
-							// Process results
-							for j, taskID := range taskIDs {
-								if j < len(getCmds) && j < len(zscoreCmds) {
-									taskData, _ := getCmds[j].Result()
-									score, _ := zscoreCmds[j].Result()
-									
-									if taskData != "" && score == 0 {
-										// Check if task belongs to job
-										var task models.YoutubeTask
-										if json.Unmarshal([]byte(taskData), &task) == nil && task.JobID == req.JobID {
-											orphanedIDs = append(orphanedIDs, taskID)
-										}
-									}
-								}
-							}
-						}
-					}
-				}
-				
-				if cursor == 0 {
-					break
-				}
-			}
-			
-			if len(orphanedIDs) > 0 {
-				log.Printf("WARNING: Found %d orphaned task keys for job %d (not in sorted set). Auto-fixing...", len(orphanedIDs), req.JobID)
-				
-				// Auto-fix: Add orphaned tasks back to sorted set
-				fixPipe := database.RDB.Pipeline()
-				for _, taskID := range orphanedIDs {
-					fixPipe.ZAdd(diagnosticCtx, jobKey, redis.Z{
-						Score:  float64(taskID),
-						Member: taskID,
-					})
-				}
-				if _, err := fixPipe.Exec(diagnosticCtx); err != nil {
-					log.Printf("ERROR: Failed to add orphaned task IDs to sorted set: %v", err)
-				} else {
-					log.Printf("INFO: Successfully added %d orphaned task IDs back to sorted set for job %d", len(orphanedIDs), req.JobID)
-				}
-			}
-		}()
 	}
 
 	if total == 0 {
@@ -1184,170 +1077,47 @@ func BatchFetch(c *gin.Context) {
 		return
 	}
 
-	// Fetch IDs (Pagination)
-	// Using ZRange (0 to -1 is all, so we use start/stop)
-	start := int64(req.Offset)
-	stop := int64(req.Offset + req.Limit - 1)
+	// 从 MySQL 查询任务记录（分页）
+	var taskRecords []models.YoutubeTaskRecord
+	queryCtx, queryCancel := context.WithTimeout(ctx, 30*time.Second)
+	defer queryCancel()
 
-	ids, err := database.RDB.ZRange(ctx, jobKey, start, stop).Result()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch IDs: " + err.Error()})
+	if err := database.DB.WithContext(queryCtx).
+		Where("job_id = ?", req.JobID).
+		Order("id ASC").
+		Offset(req.Offset).
+		Limit(req.Limit).
+		Find(&taskRecords).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch tasks: " + err.Error()})
 		return
 	}
 
-	if len(ids) == 0 {
-		c.JSON(http.StatusOK, gin.H{"tasks": []models.YoutubeTask{}, "total": total})
-		return
-	}
-
-	// Fetch details
-	// Note: ids from Redis ZRange are strings, but task keys are stored as "task:{int64}"
-	// Parse the ID to ensure consistent format matching
-	var keys []string
-	var keyToIdMap = make(map[string]string) // Map from key to original ID string for debugging
-	for _, idStr := range ids {
-		// Parse as int64 to match the format used when creating task keys (task:%d)
-		var taskID int64
-		if _, err := fmt.Sscanf(idStr, "%d", &taskID); err == nil {
-			key := fmt.Sprintf("task:%d", taskID)
-			keys = append(keys, key)
-			keyToIdMap[key] = idStr
-		} else {
-			// Fallback to string format if parsing fails (shouldn't happen normally)
-			key := fmt.Sprintf("task:%s", idStr)
-			keys = append(keys, key)
-			keyToIdMap[key] = idStr
-			log.Printf("WARNING: Failed to parse task ID as int64: %s, using string format", idStr)
-		}
-	}
-
-	// Debug: Check if keys exist before MGet (disabled by default for performance)
-	// Only enable when explicitly requested via query parameter (debug=true)
-	if c.Query("debug") == "true" && len(keys) > 0 && len(keys) <= 100 {
-		missingBeforeMGet := 0
-		// Use pipeline for batch Exists checks
-		existsPipe := database.RDB.Pipeline()
-		existsCmds := make([]*redis.IntCmd, len(keys))
-		for i, key := range keys {
-			existsCmds[i] = existsPipe.Exists(ctx, key)
-		}
-		existsPipe.Exec(ctx)
-		
-		for i, cmd := range existsCmds {
-			exists, _ := cmd.Result()
-			if exists == 0 {
-				missingBeforeMGet++
-				log.Printf("DEBUG: Task key %s (ID: %s) does not exist in Redis", keys[i], keyToIdMap[keys[i]])
-			}
-		}
-		if missingBeforeMGet > 0 {
-			log.Printf("DEBUG: BatchFetch for job %d: %d/%d task keys missing before MGet", req.JobID, missingBeforeMGet, len(keys))
-		}
-	}
-
-	// 使用带超时的 context 进行 MGet 操作，避免长时间阻塞
-	mgetCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	
-	jsonList, err := database.RDB.MGet(mgetCtx, keys...).Result()
-	if err != nil {
-		log.Printf("[BatchFetch] MGet failed for job %d: %v (keys count: %d)", req.JobID, err, len(keys))
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch details: " + err.Error()})
-		return
-	}
-
+	// 将 YoutubeTaskRecord 转换为 YoutubeTask
 	var tasks []models.YoutubeTask
-	missingKeys := []string{}
-	taskIDsWithoutURL := []int64{} // 收集没有 URL 的任务 ID，用于从 PostgreSQL 查询
-	
-	for i, item := range jsonList {
-		if item == nil {
-			// Task key doesn't exist - collect for cleanup
-			originalID := keyToIdMap[keys[i]]
-			missingKeys = append(missingKeys, originalID)
-			log.Printf("WARNING: Task key %s not found in Redis (ID from sorted set: %s)", keys[i], originalID)
-			continue
+	for _, record := range taskRecords {
+		task := models.YoutubeTask{
+			ID:           int64(record.ID),
+			JobID:        int64(record.JobID),
+			URL:          record.URL,
+			Status:       record.Status,
+			WorkerID:     record.WorkerID,
+			Title:        record.Title,
+			VideoID:      record.VideoID,
+			AudioURL:     record.AudioURL,
+			AudioSize:    record.AudioSize,
+			VideoURL:     record.VideoURL,
+			VideoSize:    record.VideoSize,
+			ErrorMessage: record.ErrorMessage,
+			CreatedAt:    record.CreatedAt,
+			UpdatedAt:    record.UpdatedAt,
 		}
-		str, ok := item.(string)
-		if !ok {
-			originalID := keyToIdMap[keys[i]]
-			missingKeys = append(missingKeys, originalID)
-			log.Printf("WARNING: Task key %s has invalid type (expected string, got %T)", keys[i], item)
-			continue
-		}
-
-		var t models.YoutubeTask
-		if err := json.Unmarshal([]byte(str), &t); err == nil {
-			// Successfully parsed with standard unmarshal
-			// 检查是否有 URL，如果没有则记录任务 ID
-			if t.URL == "" {
-				taskIDsWithoutURL = append(taskIDsWithoutURL, t.ID)
-			}
-			tasks = append(tasks, t)
-		} else {
-			// Try to fix time parsing issues by using a custom unmarshaler
-			// Some tasks may have time strings without timezone info
-			originalID := keyToIdMap[keys[i]]
-			log.Printf("DEBUG: Standard unmarshal failed for task %s (ID: %s), error: %v, trying flexible parser", keys[i], originalID, err)
-			if fixedTask, fixErr := unmarshalYoutubeTaskWithFlexibleTime([]byte(str)); fixErr == nil {
-				log.Printf("DEBUG: Flexible parser succeeded for task %s (ID: %s, status: %s)", keys[i], originalID, fixedTask.Status)
-				// 检查是否有 URL，如果没有则记录任务 ID
-				if fixedTask.URL == "" {
-					if taskID, err := strconv.ParseInt(originalID, 10, 64); err == nil {
-						taskIDsWithoutURL = append(taskIDsWithoutURL, taskID)
-					}
-				}
-				tasks = append(tasks, fixedTask)
-			} else {
-				missingKeys = append(missingKeys, originalID)
-				log.Printf("WARNING: Failed to unmarshal task %s (ID: %s): %v (fix attempt also failed: %v)", keys[i], originalID, err, fixErr)
-				// Log a sample of the problematic JSON for debugging
-				if len(str) > 200 {
-					log.Printf("DEBUG: Sample JSON (first 200 chars): %s", str[:200])
-				} else {
-					log.Printf("DEBUG: Full JSON: %s", str)
-				}
-			}
-		}
+		tasks = append(tasks, task)
 	}
 
-	// 如果有些任务没有 URL，记录警告日志
-	if len(taskIDsWithoutURL) > 0 {
-		sampleSize := len(taskIDsWithoutURL)
-		if sampleSize > 10 {
-			sampleSize = 10
-		}
-		log.Printf("WARNING: BatchFetch for job %d: %d tasks missing URL field (sample task IDs: %v)", 
-			req.JobID, len(taskIDsWithoutURL), taskIDsWithoutURL[:sampleSize])
-		// 注意：PostgreSQL 的 youtube_task_records 表也没有存储原始 URL
-		// 这些任务的 URL 可能是在创建时丢失的，或者是在某个更新过程中被清空的
-		// 建议：检查任务创建和更新逻辑，确保 URL 字段始终被保存
-	}
-
-	// Log summary (always log for visibility)
-	if len(missingKeys) > 0 {
-		log.Printf("WARNING: BatchFetch for job %d: requested %d tasks, found %d tasks, missing %d tasks", 
-			req.JobID, len(ids), len(tasks), len(missingKeys))
-		
-		// Remove missing keys from sorted set to keep data consistent
-		go func() {
-			cleanupCtx := context.Background()
-			pipe := database.RDB.Pipeline()
-			for _, id := range missingKeys {
-				pipe.ZRem(cleanupCtx, jobKey, id)
-			}
-			if _, err := pipe.Exec(cleanupCtx); err != nil {
-				log.Printf("ERROR: Failed to cleanup missing task IDs from sorted set: %v", err)
-			} else {
-				log.Printf("INFO: Cleaned up %d missing task IDs from sorted set for job %d", len(missingKeys), req.JobID)
-			}
-		}()
-	} else {
-		// Log success case for visibility (only for non-empty results to avoid spam)
-		if len(tasks) > 0 {
-			log.Printf("INFO: BatchFetch for job %d: successfully fetched %d/%d tasks (offset: %d, limit: %d, total in Redis: %d)", 
-				req.JobID, len(tasks), len(ids), req.Offset, req.Limit, total)
-		}
+	// Log summary
+	if len(tasks) > 0 {
+		log.Printf("INFO: BatchFetch for job %d: successfully fetched %d/%d tasks from MySQL (offset: %d, limit: %d, total: %d)",
+			req.JobID, len(tasks), len(taskRecords), req.Offset, req.Limit, total)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"tasks": tasks, "total": total})
@@ -1417,109 +1187,52 @@ func BatchDelete(c *gin.Context) {
 
 // AddTasksToJob adds new tasks to an existing job in Redis
 func AddTasksToJob(jobID int64, urls []string) (int, error) {
+	log.Printf("[AddTasksToJob] Function called for job %d with %d URLs", jobID, len(urls))
+
 	if len(urls) == 0 {
+		log.Printf("[AddTasksToJob] No URLs provided for job %d, returning", jobID)
 		return 0, nil
 	}
 
 	ctx := context.Background()
 	jobKey := fmt.Sprintf("job:%d:tasks", jobID)
+	// 将新任务也推入 metadata 队列（便于 worker 直接从队列获取，不依赖 buffer 扫描）
+	// 复用 metadata_retry 队列（按 machine_name 分流），对“新任务”和“重试任务”都适用：只要 status=PENDING 就会被处理
+	metadataQueueName := getMetadataQueueName(jobID)
 
+	log.Printf("[AddTasksToJob] Starting ID determination for job %d", jobID)
 	// 1. Determine start ID
-	// Try to get the last ID from ZSet to continue sequence
-	// Also check for orphaned task keys to ensure we don't create duplicates
+	// Try to get the last ID from ZSet to continue sequence (支持向已有 Job 添加任务)
 	lastIDs, err := database.RDB.ZRevRange(ctx, jobKey, 0, 0).Result()
 	var startID int64
 	if err != nil || len(lastIDs) == 0 {
-		// No tasks yet, use default start
+		// No tasks yet, use default start: jobID * 1000000
 		startID = jobID * 1000000
+		log.Printf("[AddTasksToJob] No existing tasks for job %d, using default startID: %d", jobID, startID)
 	} else {
-		// Parse last ID
+		// Parse last ID and continue from next
 		// Redis returns string member
 		fmt.Sscanf(lastIDs[0], "%d", &startID)
 		startID++ // Start from next
-	}
-	
-	// Diagnostic: Check if there are orphaned task keys that should be in sorted set
-	// Scan for task keys with pattern task:{jobID}* to find orphaned tasks
-	scanPattern := fmt.Sprintf("task:%d*", jobID*1000000)
-	var cursor uint64
-	var orphanedCount int
-	var maxOrphanedID int64 = startID - 1
-	
-	for {
-		var keys []string
-		keys, cursor, err = database.RDB.Scan(ctx, cursor, scanPattern, 100).Result()
-		if err != nil {
-			break
-		}
-		
-		for _, key := range keys {
-			var taskID int64
-			if _, err := fmt.Sscanf(key, "task:%d", &taskID); err == nil {
-				// Verify this task belongs to the job
-				taskData, err := database.RDB.Get(ctx, key).Result()
-				if err == nil {
-					var task models.YoutubeTask
-					if json.Unmarshal([]byte(taskData), &task) == nil && task.JobID == jobID {
-						// Check if this task ID is in the sorted set
-						score, err := database.RDB.ZScore(ctx, jobKey, fmt.Sprintf("%d", taskID)).Result()
-						if err == redis.Nil || score == 0 {
-							// Orphaned task - add it back to sorted set
-							orphanedCount++
-							if taskID > maxOrphanedID {
-								maxOrphanedID = taskID
-							}
-							// Use pipeline for better performance when adding multiple orphaned tasks
-							if orphanedCount == 1 {
-								// First orphaned task, create pipeline
-								orphanPipe := database.RDB.Pipeline()
-								orphanPipe.ZAdd(ctx, jobKey, redis.Z{
-									Score:  float64(taskID),
-									Member: taskID,
-								})
-								orphanPipe.Exec(ctx)
-							} else {
-								// Subsequent orphaned tasks, add directly
-								database.RDB.ZAdd(ctx, jobKey, redis.Z{
-									Score:  float64(taskID),
-									Member: taskID,
-								})
-							}
-						}
-					}
-				}
-			}
-		}
-		
-		if cursor == 0 {
-			break
-		}
-	}
-	
-	if orphanedCount > 0 {
-		log.Printf("INFO: AddTasksToJob for job %d: Found and fixed %d orphaned tasks. Max orphaned ID: %d, new startID: %d", 
-			jobID, orphanedCount, maxOrphanedID, startID)
-		// Update startID to be after the max orphaned ID
-		if maxOrphanedID >= startID {
-			startID = maxOrphanedID + 1
-		}
+		log.Printf("[AddTasksToJob] Found existing tasks for job %d, continuing from startID: %d", jobID, startID)
 	}
 
 	now := time.Now()
+	log.Printf("[AddTasksToJob] Starting data insertion for job %d (startID: %d, URLs: %d)", jobID, startID, len(urls))
 	// 减小批次大小，避免 Redis pipeline 超时（10000 太大，容易超时）
 	batchSize := 2000
 	totalAdded := 0
 
 	log.Printf("[AddTasksToJob] Starting to process %d URLs for job %d (batch size: %d)", len(urls), jobID, batchSize)
 
-	// 2. 先全部写入 Redis（分批处理，但先完成所有 Redis 写入）
+	// 1. 先全部写入 MySQL（分批处理，但先完成所有 MySQL 写入）
 	totalBatches := (len(urls) + batchSize - 1) / batchSize
-	log.Printf("[AddTasksToJob] Will process %d batches for job %d (Redis first, then MySQL)", totalBatches, jobID)
-	
+	log.Printf("[AddTasksToJob] Will process %d batches for job %d (MySQL first, then Redis)", totalBatches, jobID)
+
 	// 收集所有需要写入 MySQL 的记录
 	allTaskRecords := make([]models.YoutubeTaskRecord, 0, len(urls))
-	
-	// 第一阶段：全部写入 Redis
+
+	// 第一阶段：全部写入 MySQL
 	for i := 0; i < len(urls); i += batchSize {
 		end := i + batchSize
 		if end > len(urls) {
@@ -1528,45 +1241,21 @@ func AddTasksToJob(jobID int64, urls []string) (int, error) {
 
 		batchUrls := urls[i:end]
 		batchNum := i/batchSize + 1
-		
-		log.Printf("[AddTasksToJob] [Redis Phase] Processing batch %d/%d for job %d (%d URLs, range: %d-%d)", 
+
+		log.Printf("[AddTasksToJob] [MySQL Phase] Processing batch %d/%d for job %d (%d URLs, range: %d-%d)",
 			batchNum, totalBatches, jobID, len(batchUrls), i, end-1)
-		
-		var zMembers []redis.Z
-		var taskKeys []string
+
 		var batchTaskRecords []models.YoutubeTaskRecord // 收集这批的数据库记录
-		pipe := database.RDB.Pipeline()
 
 		for j, url := range batchUrls {
 			taskID := startID + int64(i+j)
-			task := models.YoutubeTask{
-				ID:        taskID,
-				JobID:     jobID,
-				URL:       url,
-				Status:    "PENDING",
-				CreatedAt: now,
-				UpdatedAt: now,
-			}
 
-			data, err := json.Marshal(task)
-			if err != nil {
-				log.Printf("WARNING: Failed to marshal task %d for job %d: %v", taskID, jobID, err)
-				continue
-			}
-
-			taskKey := fmt.Sprintf("task:%d", task.ID)
-			pipe.Set(ctx, taskKey, data, 0)
-			taskKeys = append(taskKeys, taskKey)
-
-			zMembers = append(zMembers, redis.Z{
-				Score:  float64(task.ID),
-				Member: task.ID,
-			})
-			
-			// 收集数据库记录（稍后批量写入）
+			// 收集数据库记录，包含原始 URL
+			// VideoID 会在 metadata worker 处理时提取
 			taskRecord := models.YoutubeTaskRecord{
 				ID:        uint(taskID),
 				JobID:     uint(jobID),
+				URL:       url, // 记录原始的 YouTube URL
 				Status:    "PENDING",
 				CreatedAt: now,
 				UpdatedAt: now,
@@ -1574,95 +1263,180 @@ func AddTasksToJob(jobID int64, urls []string) (int, error) {
 			batchTaskRecords = append(batchTaskRecords, taskRecord)
 		}
 
-		if len(zMembers) > 0 {
-			// Optimize: Single ZAdd for the whole batch
-			pipe.ZAdd(ctx, jobKey, zMembers...)
+		// 批量写入 MySQL
+		if len(batchTaskRecords) > 0 {
+			batchSizeDB := 1000
+			successCount := 0
+			for dbIdx := 0; dbIdx < len(batchTaskRecords); dbIdx += batchSizeDB {
+				dbEnd := dbIdx + batchSizeDB
+				if dbEnd > len(batchTaskRecords) {
+					dbEnd = len(batchTaskRecords)
+				}
+				dbBatch := batchTaskRecords[dbIdx:dbEnd]
 
-			// 添加重试机制，处理临时网络问题（如超时）
-			var err error
-			maxRetries := 3
-			for retry := 0; retry < maxRetries; retry++ {
-				_, err = pipe.Exec(ctx)
-				if err == nil {
-					break
-				}
-				
-				// 检查是否是超时错误或其他可重试的错误
-				if retry < maxRetries-1 {
-					waitTime := time.Duration(retry+1) * 2 * time.Second // 递增等待时间：2s, 4s, 6s
-					log.Printf("[AddTasksToJob] WARNING: Redis pipeline failed for job %d batch %d/%d (retry %d/%d): %v. Retrying in %v...", 
-						jobID, batchNum, totalBatches, retry+1, maxRetries, err, waitTime)
-					time.Sleep(waitTime)
-					
-					// 重新创建 pipeline（因为之前的 pipeline 已经执行过了）
-					pipe = database.RDB.Pipeline()
-					// 重新设置所有 task keys（可能已经部分写入，需要确保完整性）
-					for j, url := range batchUrls {
-						taskID := startID + int64(i+j)
-						task := models.YoutubeTask{
-							ID:        taskID,
-							JobID:     jobID,
-							URL:       url,
-							Status:    "PENDING",
-							CreatedAt: now,
-							UpdatedAt: now,
-						}
-						data, _ := json.Marshal(task)
-						pipe.Set(ctx, fmt.Sprintf("task:%d", taskID), data, 0)
+				log.Printf("[AddTasksToJob] Attempting to insert %d task records to MySQL for job %d batch %d/%d (task IDs: %d-%d)",
+					len(dbBatch), jobID, batchNum, totalBatches, dbBatch[0].ID, dbBatch[len(dbBatch)-1].ID)
+
+				// 使用带超时的 context 进行 MySQL 写入，避免长时间阻塞
+				dbCtx, dbCancel := context.WithTimeout(ctx, 30*time.Second)
+				startTime := time.Now()
+
+				err := database.DB.WithContext(dbCtx).Clauses(clause.OnConflict{
+					DoNothing: true,
+				}).Create(&dbBatch).Error
+
+				duration := time.Since(startTime)
+				dbCancel()
+
+				if err != nil {
+					log.Printf("[AddTasksToJob] ERROR: Failed to insert task records for job %d (batch %d/%d): %v (took %v)",
+						jobID, batchNum, totalBatches, err, duration)
+					// 继续处理下一批，不中断整个流程
+				} else {
+					successCount += len(dbBatch)
+					if duration > 2*time.Second {
+						log.Printf("[AddTasksToJob] WARNING: MySQL insert for job %d batch %d/%d took %v (may be blocking other operations)",
+							jobID, batchNum, totalBatches, duration)
 					}
-					pipe.ZAdd(ctx, jobKey, zMembers...)
+					log.Printf("[AddTasksToJob] Successfully inserted %d task records to MySQL for job %d batch %d/%d (took %v)",
+						len(dbBatch), jobID, batchNum, totalBatches, duration)
 				}
 			}
-			
-			if err != nil {
-				log.Printf("[AddTasksToJob] ERROR: Failed to execute Redis pipeline for job %d batch %d/%d after %d retries: %v. %d task keys may have been created but not added to sorted set", 
-					jobID, batchNum, totalBatches, maxRetries, err, len(taskKeys))
-				log.Printf("[AddTasksToJob] ERROR: Stopping Redis phase for job %d. Processed %d/%d batches, added %d tasks so far", 
-					jobID, batchNum-1, totalBatches, totalAdded)
-				// Try to clean up any task keys that were created but not added to sorted set
-				// This is best-effort cleanup
-				cleanupPipe := database.RDB.Pipeline()
-				for _, key := range taskKeys {
-					cleanupPipe.Del(ctx, key)
-				}
-				cleanupPipe.Exec(ctx)
-				return totalAdded, fmt.Errorf("failed at Redis batch %d/%d: %w", batchNum, totalBatches, err)
-			}
-			
-			log.Printf("[AddTasksToJob] Successfully added %d tasks to Redis for job %d batch %d/%d", len(zMembers), jobID, batchNum, totalBatches)
-			
-			// 收集这批的数据库记录
+
+			// 收集这批的数据库记录（用于后续统计和 Redis 写入）
+			// 即使 MySQL 写入失败，我们仍然会写入 Redis（因为 Redis 是主要的工作队列）
 			allTaskRecords = append(allTaskRecords, batchTaskRecords...)
-			totalAdded += len(zMembers)
-			log.Printf("[AddTasksToJob] [Redis Phase] Completed batch %d/%d for job %d. Total added so far: %d", batchNum, totalBatches, jobID, totalAdded)
+			totalAdded += len(batchTaskRecords)
+			log.Printf("[AddTasksToJob] [MySQL Phase] Completed batch %d/%d for job %d. MySQL inserted: %d/%d, Total added so far: %d",
+				batchNum, totalBatches, jobID, successCount, len(batchTaskRecords), totalAdded)
 		}
 	}
-	
-	// 第二阶段：批量写入 MySQL（所有 Redis 写入成功后才开始）
+
+	log.Printf("[AddTasksToJob] [MySQL Phase] Completed database insertion for job %d (%d records total)", jobID, len(allTaskRecords))
+
+	// 第二阶段：批量写入 Redis（所有 MySQL 写入成功后才开始）
 	if len(allTaskRecords) > 0 {
-		log.Printf("[AddTasksToJob] [MySQL Phase] Starting database insertion for job %d (%d records total)", jobID, len(allTaskRecords))
-		batchSizeDB := 1000
-		dbBatchesTotal := (len(allTaskRecords) + batchSizeDB - 1) / batchSizeDB
-		for dbIdx := 0; dbIdx < len(allTaskRecords); dbIdx += batchSizeDB {
-			dbEnd := dbIdx + batchSizeDB
-			if dbEnd > len(allTaskRecords) {
-				dbEnd = len(allTaskRecords)
+		log.Printf("[AddTasksToJob] [Redis Phase] Starting Redis insertion for job %d (%d records total)", jobID, len(allTaskRecords))
+
+		// 重新遍历 URLs，写入 Redis
+		for i := 0; i < len(urls); i += batchSize {
+			end := i + batchSize
+			if end > len(urls) {
+				end = len(urls)
 			}
-			dbBatch := allTaskRecords[dbIdx:dbEnd]
-			dbBatchNum := dbIdx/batchSizeDB + 1
-			
-			if err := database.DB.Clauses(clause.OnConflict{
-				DoNothing: true,
-			}).Create(&dbBatch).Error; err != nil {
-				// 记录错误（但 OnConflict DoNothing 通常不会返回错误，除非是其他问题）
-				log.Printf("[AddTasksToJob] WARNING: Failed to insert task records for job %d (db batch %d/%d): %v", 
-					jobID, dbBatchNum, dbBatchesTotal, err)
-			} else {
-				log.Printf("[AddTasksToJob] Successfully inserted %d task records to DB for job %d (db batch %d/%d)", 
-					len(dbBatch), jobID, dbBatchNum, dbBatchesTotal)
+
+			batchUrls := urls[i:end]
+			batchNum := i/batchSize + 1
+
+			log.Printf("[AddTasksToJob] [Redis Phase] Processing batch %d/%d for job %d (%d URLs, range: %d-%d)",
+				batchNum, totalBatches, jobID, len(batchUrls), i, end-1)
+
+			var zMembers []redis.Z
+			var taskKeys []string
+			pipe := database.RDB.Pipeline()
+			queueValues := make([]interface{}, 0, len(batchUrls))
+
+			for j, url := range batchUrls {
+				taskID := startID + int64(i+j)
+				task := models.YoutubeTask{
+					ID:        taskID,
+					JobID:     jobID,
+					URL:       url,
+					Status:    "PENDING",
+					CreatedAt: now,
+					UpdatedAt: now,
+				}
+
+				data, err := json.Marshal(task)
+				if err != nil {
+					log.Printf("WARNING: Failed to marshal task %d for job %d: %v", taskID, jobID, err)
+					continue
+				}
+
+				taskKey := fmt.Sprintf("task:%d", task.ID)
+				pipe.Set(ctx, taskKey, data, 0)
+				taskKeys = append(taskKeys, taskKey)
+
+				zMembers = append(zMembers, redis.Z{
+					Score:  float64(task.ID),
+					Member: task.ID,
+				})
+
+				// 推入 metadata 队列（使用 string，保证 BLPOP/LPOP 得到的就是字符串 task id）
+				queueValues = append(queueValues, fmt.Sprintf("%d", task.ID))
+			}
+
+			if len(zMembers) > 0 {
+				// Optimize: Single ZAdd for the whole batch
+				pipe.ZAdd(ctx, jobKey, zMembers...)
+				// 让 metadata worker 能直接从队列获取新任务
+				if len(queueValues) > 0 {
+					pipe.RPush(ctx, metadataQueueName, queueValues...)
+				}
+
+				// 添加重试机制，处理临时网络问题（如超时）
+				var err error
+				maxRetries := 3
+				for retry := 0; retry < maxRetries; retry++ {
+					_, err = pipe.Exec(ctx)
+					if err == nil {
+						break
+					}
+
+					// 检查是否是超时错误或其他可重试的错误
+					if retry < maxRetries-1 {
+						waitTime := time.Duration(retry+1) * 2 * time.Second // 递增等待时间：2s, 4s, 6s
+						log.Printf("[AddTasksToJob] WARNING: Redis pipeline failed for job %d batch %d/%d (retry %d/%d): %v. Retrying in %v...",
+							jobID, batchNum, totalBatches, retry+1, maxRetries, err, waitTime)
+						time.Sleep(waitTime)
+
+						// 重新创建 pipeline（因为之前的 pipeline 已经执行过了）
+						pipe = database.RDB.Pipeline()
+						// 重新设置所有 task keys（可能已经部分写入，需要确保完整性）
+						queueValues = queueValues[:0]
+						for j, url := range batchUrls {
+							taskID := startID + int64(i+j)
+							task := models.YoutubeTask{
+								ID:        taskID,
+								JobID:     jobID,
+								URL:       url,
+								Status:    "PENDING",
+								CreatedAt: now,
+								UpdatedAt: now,
+							}
+							data, _ := json.Marshal(task)
+							pipe.Set(ctx, fmt.Sprintf("task:%d", taskID), data, 0)
+							queueValues = append(queueValues, fmt.Sprintf("%d", taskID))
+						}
+						pipe.ZAdd(ctx, jobKey, zMembers...)
+						if len(queueValues) > 0 {
+							pipe.RPush(ctx, metadataQueueName, queueValues...)
+						}
+					}
+				}
+
+				if err != nil {
+					log.Printf("[AddTasksToJob] ERROR: Failed to execute Redis pipeline for job %d batch %d/%d after %d retries: %v. %d task keys may have been created but not added to sorted set",
+						jobID, batchNum, totalBatches, maxRetries, err, len(taskKeys))
+					log.Printf("[AddTasksToJob] ERROR: Stopping Redis phase for job %d. Processed %d/%d batches, added %d tasks so far",
+						jobID, batchNum-1, totalBatches, totalAdded)
+					// Try to clean up any task keys that were created but not added to sorted set
+					// This is best-effort cleanup
+					cleanupPipe := database.RDB.Pipeline()
+					for _, key := range taskKeys {
+						cleanupPipe.Del(ctx, key)
+					}
+					cleanupPipe.Exec(ctx)
+					return totalAdded, fmt.Errorf("failed at Redis batch %d/%d: %w", batchNum, totalBatches, err)
+				}
+
+				log.Printf("[AddTasksToJob] Successfully added %d tasks to Redis for job %d batch %d/%d", len(zMembers), jobID, batchNum, totalBatches)
+				log.Printf("[AddTasksToJob] [Redis Phase] Completed batch %d/%d for job %d. Total added so far: %d", batchNum, totalBatches, jobID, totalAdded)
 			}
 		}
-		log.Printf("[AddTasksToJob] [MySQL Phase] Completed database insertion for job %d (%d records)", jobID, len(allTaskRecords))
+
+		log.Printf("[AddTasksToJob] [Redis Phase] Completed Redis insertion for job %d (%d records total)", jobID, len(allTaskRecords))
+		log.Printf("[AddTasksToJob] [Redis Phase] Queued new tasks to metadata queue: %s (job %d)", metadataQueueName, jobID)
 	} else {
 		log.Printf("[AddTasksToJob] WARNING: No task records to insert for job %d", jobID)
 	}

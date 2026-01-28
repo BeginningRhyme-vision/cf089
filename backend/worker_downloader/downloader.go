@@ -65,6 +65,9 @@ var (
 	// Global rate limiter for download requests (chunks per minute)
 	globalRateLimiter *RateLimiter
 
+	// Global semaphore to limit concurrent ListParts used for ETag lookup
+	listPartsSem = make(chan struct{}, 3)
+
 	// Metrics
 	TasksProcessed = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "worker_downloader_tasks_processed_total",
@@ -121,7 +124,7 @@ func (rl *RateLimiter) Acquire() {
 		oldestTime := rl.requestTimes[0]
 		waitTime := time.Minute - now.Sub(oldestTime) + 100*time.Millisecond // 加100ms缓冲
 		if waitTime > 0 {
-			log.Printf("[RateLimiter] Rate limit reached (%d/%d requests/min), waiting %.2f seconds", 
+			log.Printf("[RateLimiter] Rate limit reached (%d/%d requests/min), waiting %.2f seconds",
 				currentCount, rl.requestsPerMinute, waitTime.Seconds())
 			rl.mu.Unlock()
 			time.Sleep(waitTime)
@@ -190,11 +193,11 @@ const (
 )
 
 var (
-	ChunkSize                 int64 = getDefaultChunkSize()
-	MaxConcurrentWorkers           = getDefaultMaxConcurrentWorkers()
-	TaskBufferSize                 = getDefaultTaskBufferSize()
-	ConcurrentChunksPerFile         = getDefaultConcurrentChunksPerFile() // 每个文件内部的并发chunk数量
-	GlobalRequestsPerMinute         = getDefaultGlobalRequestsPerMinute() // 全局每分钟请求数限制
+	ChunkSize               int64 = getDefaultChunkSize()
+	MaxConcurrentWorkers          = getDefaultMaxConcurrentWorkers()
+	TaskBufferSize                = getDefaultTaskBufferSize()
+	ConcurrentChunksPerFile       = getDefaultConcurrentChunksPerFile() // 每个文件内部的并发chunk数量
+	GlobalRequestsPerMinute       = getDefaultGlobalRequestsPerMinute() // 全局每分钟请求数限制
 )
 
 func getDefaultChunkSize() int64 {
@@ -204,7 +207,7 @@ func getDefaultChunkSize() int64 {
 			return chunkSize
 		}
 	}
-	return 12 * 1024 * 1024 // 默认 32MB（从6MB增加到32MB以提高速度）
+	return 6 * 1024 * 1024 // 默认 32MB（从6MB增加到32MB以提高速度）
 }
 
 func getDefaultMaxConcurrentWorkers() int {
@@ -214,7 +217,7 @@ func getDefaultMaxConcurrentWorkers() int {
 			return workers
 		}
 	}
-	return 2000 // 默认值（处理多个任务的并发数）
+	return 200 // 默认值（处理多个任务的并发数）
 }
 
 // getDefaultConcurrentChunksPerFile 获取每个文件内部的并发chunk数量
@@ -359,7 +362,7 @@ func main() {
 				// 减少无任务时的日志输出频率，每 50 次轮询输出一次，并显示等待时间
 				if pollCount%50 == 0 {
 					timeSinceLastTask := time.Since(lastTaskTime)
-					log.Printf("[Poll #%d] No tasks available (waiting for %v). Worker is running normally, waiting for new tasks...", 
+					log.Printf("[Poll #%d] No tasks available (waiting for %v). Worker is running normally, waiting for new tasks...",
 						pollCount, timeSinceLastTask.Round(time.Second))
 				}
 				time.Sleep(2 * time.Second)
@@ -400,17 +403,17 @@ func loadConfig() {
 			log.Fatalf("Config file specified in CONFIG_FILE not found: %s", envPath)
 		}
 	} else {
-	// Locate config.yaml (assuming run from backend/worker_downloader)
-	paths := []string{"../../config_back_local.yaml", "../../config.yaml", "../config_back_local.yaml", "../config.yaml", "config_back_local.yaml", "config.yaml"}
-	for _, p := range paths {
+		// Locate config.yaml (assuming run from backend/worker_downloader)
+		paths := []string{"../../config_back_local.yaml", "../../config.yaml", "../config_back_local.yaml", "../config.yaml", "config_back_local.yaml", "config.yaml"}
+		for _, p := range paths {
 			if _, err := os.Stat(p); err == nil {
 				configPath = p
-			break
+				break
+			}
 		}
-	}
 		if configPath == "" {
-		log.Fatal("Could not find config.yaml or config_back_local.yaml")
-	}
+			log.Fatal("Could not find config.yaml or config_back_local.yaml")
+		}
 	}
 
 	data, err := os.ReadFile(configPath)
@@ -560,7 +563,7 @@ func acquireTasks() ([]YoutubeTask, error) {
 		log.Printf("  ✓ Successfully decoded %d tasks", len(tasks))
 		// 记录每个任务的详细信息，用于调试
 		for i, task := range tasks {
-			log.Printf("  Task[%d]: ID=%d, VideoID=%s, AudioURL=%v (size=%d), VideoURL=%v (size=%d)", 
+			log.Printf("  Task[%d]: ID=%d, VideoID=%s, AudioURL=%v (size=%d), VideoURL=%v (size=%d)",
 				i, task.ID, task.VideoID, task.AudioURL != "", task.AudioSize, task.VideoURL != "", task.VideoSize)
 		}
 	} else {
@@ -715,7 +718,7 @@ func processTask(t YoutubeTask) {
 	var wg sync.WaitGroup
 
 	// 记录任务信息，用于调试
-	log.Printf("Task %d: AudioURL=%v (size=%d), VideoURL=%v (size=%d)", 
+	log.Printf("Task %d: AudioURL=%v (size=%d), VideoURL=%v (size=%d)",
 		t.ID, t.AudioURL != "", t.AudioSize, t.VideoURL != "", t.VideoSize)
 
 	if t.AudioURL != "" {
@@ -723,6 +726,9 @@ func processTask(t YoutubeTask) {
 		go func() {
 			defer wg.Done()
 			ext := jobInfo.AudioExtension
+			if ext == "" {
+				ext = "m4a"
+			}
 
 			var key string
 			customKey := generateFilename(jobInfo.FilenameTemplate, jobInfo.R2Prefix, t.VideoID, t.Title, ext)
@@ -749,6 +755,9 @@ func processTask(t YoutubeTask) {
 		go func() {
 			defer wg.Done()
 			ext := jobInfo.VideoExtension
+			if ext == "" {
+				ext = "mp4"
+			}
 
 			var key string
 			customKey := generateFilename(jobInfo.FilenameTemplate, jobInfo.R2Prefix, t.VideoID, t.Title, ext)
@@ -795,13 +804,13 @@ func getContentTypeFromURL(sourceURL string) string {
 	if err != nil {
 		return ""
 	}
-	
+
 	// 检查 URL 查询参数中的 mime 参数
 	mime := parsedURL.Query().Get("mime")
 	if mime != "" {
 		return mime
 	}
-	
+
 	return ""
 }
 
@@ -812,7 +821,7 @@ func getContentTypeFromKey(key string) string {
 		// 没有扩展名或扩展名为空，返回默认值
 		return "application/octet-stream"
 	}
-	
+
 	ext := strings.ToLower(key[lastDot+1:])
 	contentTypes := map[string]string{
 		"mp4":  "video/mp4",
@@ -841,7 +850,7 @@ func getContentType(sourceURL, key string) string {
 	if contentType := getContentTypeFromURL(sourceURL); contentType != "" {
 		return contentType
 	}
-	
+
 	// 2. 从文件扩展名获取
 	return getContentTypeFromKey(key)
 }
@@ -870,7 +879,7 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 	// 3. Upload Parts
 	numParts := int(math.Ceil(float64(size) / float64(ChunkSize)))
 	log.Printf("Starting multipart upload: key=%s, size=%d, chunkSize=%d, numParts=%d", key, size, ChunkSize, numParts)
-	
+
 	var completedParts []types.CompletedPart
 	var partsMu sync.Mutex
 	var wg sync.WaitGroup
@@ -887,7 +896,7 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 		}
 		partNum := int32(i + 1)
 		partSize := end - start + 1
-		
+
 		// Validate part size
 		if partSize <= 0 {
 			return fmt.Errorf("invalid part size for part %d: start=%d, end=%d, size=%d", partNum, start, end, partSize)
@@ -899,7 +908,7 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 		wg.Add(1)
 		go func(pNum int32, s, e int64) {
 			defer wg.Done()
-			
+
 			// 1. 先获取文件内部的并发限制（每个文件的并发chunk数）
 			sem <- struct{}{}
 			defer func() { <-sem }()
@@ -910,16 +919,18 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 				return
 			default:
 			}
-			
-			// 2. 获取全局速率限制许可（每分钟200个请求）
-			// 这确保所有文件的chunk上传请求总数不超过每分钟200个
-			globalRateLimiter.Acquire()
-			
+
+			// 2. 获取全局速率限制许可（限制总的 chunk 上传请求频率）
+			// 注意：单元测试可能不会初始化 globalRateLimiter，因此需要 nil 保护
+			if globalRateLimiter != nil {
+				globalRateLimiter.Acquire()
+			}
+
 			// Log chunk details for debugging
 			chunkSize := e - s + 1
-			log.Printf("[CHUNK DEBUG] Part %d: start=%d, end=%d, size=%d (expected total=%d, chunkSize=%d)", 
+			log.Printf("[CHUNK DEBUG] Part %d: start=%d, end=%d, size=%d (expected total=%d, chunkSize=%d)",
 				pNum, s, e, chunkSize, size, ChunkSize)
-			
+
 			etag, err := uploadChunkExternal(sourceURL, key, uploadID, pNum, s, e)
 			if err != nil {
 				log.Printf("[CHUNK ERROR] Part %d failed: %v", pNum, err)
@@ -930,7 +941,7 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 				return
 			}
 
-			log.Printf("[CHUNK SUCCESS] Part %d completed: etag=%s, range=bytes %d-%d/%d", 
+			log.Printf("[CHUNK SUCCESS] Part %d completed: etag=%s, range=bytes %d-%d/%d",
 				pNum, etag, s, e, size)
 
 			partsMu.Lock()
@@ -982,7 +993,7 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 		if *part.PartNumber != expectedPartNum {
 			return fmt.Errorf("part number mismatch: expected %d, got %d at index %d", expectedPartNum, *part.PartNumber, i)
 		}
-		
+
 		// Calculate expected range for this part
 		partStart := int64(partIdx) * ChunkSize
 		partEnd := partStart + ChunkSize - 1
@@ -990,7 +1001,7 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 			partEnd = size - 1
 		}
 		expectedSize := partEnd - partStart + 1
-		log.Printf("[UPLOAD VERIFY] Part %d: expected range bytes %d-%d (size=%d), etag=%s", 
+		log.Printf("[UPLOAD VERIFY] Part %d: expected range bytes %d-%d (size=%d), etag=%s",
 			*part.PartNumber, partStart, partEnd, expectedSize, *part.ETag)
 	}
 
@@ -1008,10 +1019,10 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 			totalPartsSize += partSize
 		}
 	}
-	
+
 	log.Printf("[UPLOAD VERIFY] Total calculated size: %d bytes, expected: %d bytes", totalPartsSize, size)
 	if totalPartsSize != size {
-		return fmt.Errorf("total parts size mismatch: expected %d bytes, calculated %d bytes (difference: %d)", 
+		return fmt.Errorf("total parts size mismatch: expected %d bytes, calculated %d bytes (difference: %d)",
 			size, totalPartsSize, totalPartsSize-size)
 	}
 
@@ -1033,16 +1044,16 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 		return fmt.Errorf("failed to complete multipart upload: %w", err)
 	}
 	log.Printf("Successfully uploaded: %s (expected size: %d bytes, content-type: %s)", key, size, contentType)
-	
+
 	// For MP4/M4A files, warn about potential moov block corruption
 	// The moov block is typically at byte 32 and is in the first chunk
-	if (strings.HasSuffix(strings.ToLower(key), ".mp4") || strings.HasSuffix(strings.ToLower(key), ".m4a")) && 
+	if (strings.HasSuffix(strings.ToLower(key), ".mp4") || strings.HasSuffix(strings.ToLower(key), ".m4a")) &&
 		ChunkSize > 32768 {
 		log.Printf("[MP4 WARNING] MP4 file uploaded. Moov block (typically at byte 32) is in first chunk.")
 		log.Printf("[MP4 WARNING] If playback shows incorrect duration, verify download service correctly handles Range requests.")
 		log.Printf("[MP4 WARNING] Repair command: ffmpeg -i %s -c copy -movflags +faststart fixed.mp4", key)
 	}
-	
+
 	return nil
 }
 
@@ -1112,11 +1123,22 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 		PartNumber: aws.Int32(partNum),
 		UploadId:   aws.String(uploadID),
 	}, func(opts *s3.PresignOptions) {
-		// Set expiration time (default is 15 minutes, we'll use 1 hour for safety)
-		opts.Expires = time.Duration(1 * time.Hour)
+		// Set expiration time (AWS SigV4 presign commonly supports up to 7 days; we use 1 day here)
+		opts.Expires = 24 * time.Hour
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to generate presigned URL for part %d: %w", partNum, err)
+	}
+
+	// If source is a private R2 object URL (no X-Amz-*), presign it (GET) so upload worker can fetch it via plain fetch().
+	// This matches “方式 A”：调用方传入带 X-Amz-* 的预签名 GET URL，避免 Worker fetch 私有对象 401/403。
+	if maybeNeedsPresignedGet(srcURL) {
+		if presignedSrc, perr := presignR2GetObjectURL(ctx, srcURL); perr == nil && presignedSrc != "" {
+			log.Printf("[PRESIGNED SRC] Part %d: using presigned GET source URL (len=%d)", partNum, len(presignedSrc))
+			srcURL = presignedSrc
+		} else if perr != nil {
+			log.Printf("[PRESIGNED SRC] Part %d: failed to presign source URL, using original srcURL: %v", partNum, perr)
+		}
 	}
 
 	// Get the presigned URL
@@ -1128,7 +1150,7 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 			signedHeaders[k] = vals[0]
 		}
 	}
-	
+
 	// Log presigned URL details for debugging
 	log.Printf("[PRESIGNED URL] Part %d: URL length=%d, signedHeaders count=%d", partNum, len(presignedURL), len(signedHeaders))
 	if len(signedHeaders) > 0 {
@@ -1145,9 +1167,9 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 		"partNumber": partNum,
 		"uploadId":   uploadID,
 		// 明确指定 HTTP 方法（UploadPart 必须使用 PUT）
-		"method":     "PUT",
+		"method": "PUT",
 	}
-	
+
 	// Validate chunk size before sending
 	if chunkSize <= 0 {
 		return "", fmt.Errorf("invalid chunk size for part %d: start=%d, end=%d, size=%d", partNum, start, end, chunkSize)
@@ -1155,20 +1177,20 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 	if chunkSize > ChunkSize {
 		return "", fmt.Errorf("chunk size exceeds limit for part %d: size=%d, limit=%d", partNum, chunkSize, ChunkSize)
 	}
-	
+
 	// Critical: Validate Range calculation for download service
 	// The download service should construct: Range: bytes=start-end
 	// Where end = start + size - 1 (NOT start + size)
 	expectedRangeEnd := start + chunkSize - 1
 	if expectedRangeEnd != end {
-		return "", fmt.Errorf("range calculation error for part %d: expected end=%d, calculated end=%d (start=%d, size=%d)", 
+		return "", fmt.Errorf("range calculation error for part %d: expected end=%d, calculated end=%d (start=%d, size=%d)",
 			partNum, end, expectedRangeEnd, start, chunkSize)
 	}
-	
+
 	// Warn if this is the first chunk and it contains moov block (typically at byte 32)
 	// MP4 moov block is usually in the first few KB, so if ChunkSize > 32KB, moov is in first chunk
 	if partNum == 1 && start == 0 && ChunkSize > 32768 {
-		log.Printf("[CRITICAL] Part 1 contains MP4 moov block (typically at byte 32). Ensure download service correctly handles Range: bytes=%d-%d", 
+		log.Printf("[CRITICAL] Part 1 contains MP4 moov block (typically at byte 32). Ensure download service correctly handles Range: bytes=%d-%d",
 			start, end)
 	}
 
@@ -1200,7 +1222,7 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 		// 读取响应体（只能读取一次）
 		bodyBytes, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		
+
 		etag := ""
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 			// 首先尝试从响应头获取 ETag
@@ -1209,7 +1231,7 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 				etag = strings.Trim(etagHeader, `"`)
 				log.Printf("[CHUNK RESPONSE] Part %d: got ETag from response header: %s", partNum, etag)
 			}
-			
+
 			// 如果响应头没有，尝试从响应体获取
 			if etag == "" && len(bodyBytes) > 0 {
 				var resMap map[string]interface{}
@@ -1223,16 +1245,32 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 						etag = val
 					}
 					// Log response details for debugging
-					log.Printf("[CHUNK RESPONSE] Part %d response: status=%d, etag=%s, body=%+v", 
+					log.Printf("[CHUNK RESPONSE] Part %d response: status=%d, etag=%s, body=%+v",
 						partNum, resp.StatusCode, etag, resMap)
 				} else {
-					log.Printf("[CHUNK WARNING] Part %d: failed to decode response body: %v (body: %s)", 
+					log.Printf("[CHUNK WARNING] Part %d: failed to decode response body: %v (body: %s)",
 						partNum, err, string(bodyBytes))
 					// 即使解析失败，也尝试从响应头获取
 					if etagHeader := resp.Header.Get("ETag"); etagHeader != "" {
 						etag = strings.Trim(etagHeader, `"`)
 						log.Printf("[CHUNK RESPONSE] Part %d: got ETag from response header after decode failure: %s", partNum, etag)
 					}
+				}
+			}
+			// 2xx 但没有拿到 etag：
+			// upload-part 服务可能没有返回 etag（只返回 message），但 multipart 完成必须要每个 part 的 ETag。
+			// 兼容方案：从 R2 直接 ListParts 查询该 part 的 ETag（基于 uploadId + partNumber）。
+			if etag == "" {
+				lookupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+				etag2, lerr := fetchPartETag(lookupCtx, bucketName, key, uploadID, partNum)
+				cancel()
+				if lerr == nil && etag2 != "" {
+					etag = etag2
+					log.Printf("[CHUNK RESPONSE] Part %d: recovered ETag via ListParts: %s", partNum, etag)
+				} else {
+					// 带上 body，便于定位 upload service 是否“成功但未上传”或“成功但未返回 etag”
+					lastErr = fmt.Errorf("2xx but missing etag (status=%d) and ListParts lookup failed: %v. body=%s", resp.StatusCode, lerr, string(bodyBytes))
+					log.Printf("[CHUNK WARNING] Part %d retry %d: %v", partNum, i+1, lastErr)
 				}
 			}
 		} else {
@@ -1257,6 +1295,132 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 		return "", fmt.Errorf("failed to upload chunk %d: %v", partNum, lastErr)
 	}
 	return "", fmt.Errorf("failed to upload chunk %d,Can't get Etag", partNum)
+}
+
+// fetchPartETag queries R2/S3 multipart state to find the ETag for a specific uploaded part.
+func fetchPartETag(ctx context.Context, bucket, key, uploadID string, partNum int32) (string, error) {
+	// Some upload services may return 200 before the part is actually committed in R2.
+	// 为避免对 R2 造成过高压力，这里做一个“温和”的短轮询：
+	// - 全局并发上限：3（listPartsSem）
+	// - 每个 part 最多 3 次尝试，总等待时间约 <= 3 秒
+	start := time.Now()
+	maxAttempts := 3
+	var lastErr error
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// 全局并发控制
+		select {
+		case listPartsSem <- struct{}{}:
+		case <-ctx.Done():
+			return "", fmt.Errorf("part %d not found in ListParts (attempts=%d): %w", partNum, attempt-1, ctx.Err())
+		}
+
+		found := false
+		etag := ""
+
+		// 单次 ListParts，只要找到对应 part 就返回
+		p := s3.NewListPartsPaginator(s3Client, &s3.ListPartsInput{
+			Bucket:   aws.String(bucket),
+			Key:      aws.String(key),
+			UploadId: aws.String(uploadID),
+		})
+		for p.HasMorePages() {
+			out, err := p.NextPage(ctx)
+			if err != nil {
+				lastErr = err
+				break
+			}
+			for _, part := range out.Parts {
+				if part.PartNumber != nil && *part.PartNumber == partNum {
+					if part.ETag != nil && *part.ETag != "" {
+						etag = strings.Trim(*part.ETag, `"`)
+						found = true
+					} else {
+						lastErr = fmt.Errorf("part %d found but ETag empty", partNum)
+					}
+					break
+				}
+			}
+			if found || lastErr != nil {
+				break
+			}
+		}
+
+		<-listPartsSem // 释放并发令牌
+
+		if found && etag != "" {
+			return etag, nil
+		}
+
+		// 如果已经超时或到达最大重试次数，返回最后一次错误
+		if time.Since(start) > 3*time.Second || attempt == maxAttempts {
+			if lastErr != nil {
+				return "", fmt.Errorf("part %d not found in ListParts after %d attempts: %w", partNum, attempt, lastErr)
+			}
+			return "", fmt.Errorf("part %d not found in ListParts after %d attempts", partNum, attempt)
+		}
+
+		// 简单退避：100ms, 300ms, 600ms
+		sleep := 100 * time.Millisecond
+		if attempt == 2 {
+			sleep = 300 * time.Millisecond
+		} else if attempt >= 3 {
+			sleep = 600 * time.Millisecond
+		}
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("part %d not found in ListParts (attempts=%d): %w", partNum, attempt, ctx.Err())
+		case <-time.After(sleep):
+		}
+	}
+
+	return "", fmt.Errorf("part %d not found in ListParts", partNum)
+}
+
+// maybeNeedsPresignedGet returns true if srcURL looks like an R2 object URL without presigned query params.
+func maybeNeedsPresignedGet(srcURL string) bool {
+	u, err := url.Parse(srcURL)
+	if err != nil {
+		return false
+	}
+	// Already presigned?
+	q := u.Query()
+	if q.Has("X-Amz-Signature") || q.Has("X-Amz-Credential") || q.Has("X-Amz-Algorithm") {
+		return false
+	}
+	host := strings.ToLower(u.Host)
+	// Heuristic: R2 object URLs are on *.r2.cloudflarestorage.com
+	return strings.Contains(host, "r2.cloudflarestorage.com")
+}
+
+// presignR2GetObjectURL derives (bucket,key) from an R2 path-style object URL and generates a presigned GET URL.
+// Expected srcURL form: https://<account>.r2.cloudflarestorage.com/<bucket>/<key...>
+func presignR2GetObjectURL(ctx context.Context, srcURL string) (string, error) {
+	u, err := url.Parse(srcURL)
+	if err != nil {
+		return "", err
+	}
+	path := strings.TrimPrefix(u.Path, "/")
+	if path == "" {
+		return "", fmt.Errorf("empty path in srcURL")
+	}
+	parts := strings.SplitN(path, "/", 2)
+	if len(parts) < 2 {
+		return "", fmt.Errorf("cannot derive bucket/key from srcURL path: %s", u.Path)
+	}
+	bkt := parts[0]
+	objKey := parts[1]
+
+	req, err := s3PresignClient.PresignGetObject(ctx, &s3.GetObjectInput{
+		Bucket: aws.String(bkt),
+		Key:    aws.String(objKey),
+	}, func(opts *s3.PresignOptions) {
+		opts.Expires = 24 * time.Hour
+	})
+	if err != nil {
+		return "", err
+	}
+	return req.URL, nil
 }
 
 func reportError(id int64, msg string) {
@@ -1299,23 +1463,23 @@ func updateTask(req UpdateTaskRequest) {
 		log.Printf("Failed to marshal task update request: %v", err)
 		return
 	}
-	
+
 	resp, err := internalClient.Post(apiBaseURL+"/tasks/update", "application/json", bytes.NewBuffer(body))
 	if err != nil {
 		log.Printf("Failed to update task %d status to %s: %v", req.ID, req.Status, err)
 		return
 	}
 	defer resp.Body.Close()
-	
+
 	// Read response body for debugging
 	respBody, _ := io.ReadAll(resp.Body)
-	
+
 	if resp.StatusCode != http.StatusOK {
-		log.Printf("Failed to update task %d status to %s: HTTP %d, response: %s", 
+		log.Printf("Failed to update task %d status to %s: HTTP %d, response: %s",
 			req.ID, req.Status, resp.StatusCode, string(respBody))
 		return
 	}
-	
+
 	log.Printf("Successfully updated task %d status to %s", req.ID, req.Status)
 }
 
@@ -1329,7 +1493,7 @@ func updateTaskRecordInDB(t YoutubeTask, status, errorMessage string) {
 		"error_message": errorMessage,
 		"worker_id":     workerID,
 	}
-	
+
 	// 如果任务有其他信息，也一并更新
 	if t.Title != "" {
 		taskRecord["title"] = t.Title
@@ -1349,13 +1513,13 @@ func updateTaskRecordInDB(t YoutubeTask, status, errorMessage string) {
 	if t.VideoSize > 0 {
 		taskRecord["video_size"] = t.VideoSize
 	}
-	
+
 	body, err := json.Marshal(taskRecord)
 	if err != nil {
 		log.Printf("Failed to marshal task record for DB update (task %d): %v", t.ID, err)
 		return
 	}
-	
+
 	// 调用后端 API 更新数据库记录
 	resp, err := internalClient.Post(apiBaseURL+"/youtube-tasks/update", "application/json", bytes.NewBuffer(body))
 	if err != nil {
@@ -1363,14 +1527,14 @@ func updateTaskRecordInDB(t YoutubeTask, status, errorMessage string) {
 		return
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
 		respBody, _ := io.ReadAll(resp.Body)
-		log.Printf("Failed to update task record in DB (task %d): HTTP %d, response: %s", 
+		log.Printf("Failed to update task record in DB (task %d): HTTP %d, response: %s",
 			t.ID, resp.StatusCode, string(respBody))
 		return
 	}
-	
+
 	log.Printf("Successfully updated task record in DB (task %d, status: %s)", t.ID, status)
 }
 

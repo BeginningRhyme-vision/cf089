@@ -1534,6 +1534,53 @@ func RetryNonCompletedYoutubeTasks(c *gin.Context) {
 	})
 }
 
+// ResetYoutubeJobOffset 手动重置 YouTube Job 的 offset，用于解决 stuck job 问题
+func ResetYoutubeJobOffset(c *gin.Context) {
+	id := c.Param("id")
+	jobID, err := strconv.Atoi(id)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid job ID"})
+		return
+	}
+
+	// 验证 Job 是否存在
+	var job models.YoutubeJob
+	if err := database.DB.First(&job, jobID).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Job not found"})
+		return
+	}
+
+	ctx := context.Background()
+	offsetKey := fmt.Sprintf("job:%d:offset", jobID)
+	jobKey := fmt.Sprintf("job:%d:tasks", jobID)
+
+	// 获取当前 offset 和 total
+	total, _ := database.RDB.ZCard(ctx, jobKey).Result()
+	offsetStr, _ := database.RDB.Get(ctx, offsetKey).Result()
+	var offset int64
+	if offsetStr != "" {
+		fmt.Sscanf(offsetStr, "%d", &offset)
+	}
+
+	// 重置 offset 为 0
+	if err := database.RDB.Set(ctx, offsetKey, 0, 0).Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset offset: " + err.Error()})
+		return
+	}
+
+	log.Printf("[ResetYoutubeJobOffset] Manually reset offset for job %d (Total: %d, Old Offset: %d, Pending: %d)", 
+		jobID, total, offset, job.PendingCount)
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":     "Offset reset successfully",
+		"job_id":      jobID,
+		"total":       total,
+		"old_offset":  offset,
+		"new_offset":  0,
+		"pending":     job.PendingCount,
+	})
+}
+
 // --- Ffmpeg Jobs ---
 
 type CreateFfmpegJobRequest struct {

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { Table, Button, Modal, Form, Input, Select, Tag, message, Space, Upload, Popconfirm } from 'antd';
-import { ReloadOutlined, PlusOutlined, EyeOutlined, UploadOutlined, DeleteOutlined } from '@ant-design/icons';
+import { ReloadOutlined, PlusOutlined, EyeOutlined, UploadOutlined, DeleteOutlined, UndoOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import api from '../api';
 
@@ -241,6 +241,16 @@ const YoutubeJobList = () => {
     }
   };
 
+  const handleResetOffset = async (jobId) => {
+    try {
+      const res = await api.post(`/youtube-jobs/${jobId}/reset-offset`);
+      message.success(`Offset reset successfully. Old offset: ${res.data.old_offset}, New offset: ${res.data.new_offset}`);
+      fetchJobs(pagination.current, pagination.pageSize);
+    } catch (error) {
+      message.error('Failed to reset offset: ' + (error.response?.data?.error || error.message));
+    }
+  };
+
   const uploadProps = {
     beforeUpload: (file) => {
       setFileList([file]);
@@ -342,7 +352,7 @@ const YoutubeJobList = () => {
     { 
       title: 'Action',
       key: 'action',
-      width: 200,
+      width: 280,
       render: (_, record) => (
         <Space>
           <Button 
@@ -352,6 +362,20 @@ const YoutubeJobList = () => {
           >
             Details
           </Button>
+          <Popconfirm 
+            title="Reset offset to 0? This will restart task fetching from the beginning."  
+            onConfirm={() => handleResetOffset(record.id)} 
+            okText="Yes" 
+            cancelText="No"
+          >
+            <Button 
+              icon={<UndoOutlined />} 
+              size="small"
+              type="default"
+            >
+              Reset Offset
+            </Button>
+          </Popconfirm>
           <Popconfirm 
             title="Are you sure delete this job?"  
             onConfirm={() => handleDeleteJob(record.id)} 

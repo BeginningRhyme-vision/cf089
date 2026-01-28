@@ -154,6 +154,7 @@ type YoutubeTaskRecord struct {
 	JobID         uint       `gorm:"uniqueIndex:idx_job_task;not null" json:"job_id"`                     // 关联的 YouTube Job ID，与 ID 组成唯一索引
 	Status        string     `gorm:"type:varchar(50);default:'PENDING'" json:"status"`                   // PENDING, RUNNING, METADATA_FETCHED, COMPLETED, FAILED
 	WorkerID      string     `gorm:"size:255" json:"worker_id"`                                          // 处理该任务的 worker ID
+	URL           string     `gorm:"type:text" json:"url"`                                               // 原始的 YouTube URL
 	Title         string     `gorm:"type:text" json:"title"`                                             // 视频标题
 	VideoID       string     `gorm:"size:255;index" json:"video_id"`                                      // YouTube 视频 ID
 	AudioURL      string     `gorm:"type:text" json:"audio_url"`                                         // 音频下载 URL
