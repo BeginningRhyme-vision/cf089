@@ -217,7 +217,8 @@ func getDefaultMaxConcurrentWorkers() int {
 			return workers
 		}
 	}
-	return 200 // 默认值（处理多个任务的并发数）
+	// 默认并发 worker 数，从 200 降到 20（降速 10 倍）
+	return 20
 }
 
 // getDefaultConcurrentChunksPerFile 获取每个文件内部的并发chunk数量
@@ -228,7 +229,8 @@ func getDefaultConcurrentChunksPerFile() int {
 			return chunks
 		}
 	}
-	return 200 // 默认200个并发chunk（每个文件内部的并发数）
+	// 默认每个文件内部并发 chunk 数，从 200 降到 20（降速 10 倍）
+	return 5
 }
 
 func getDefaultGlobalRequestsPerMinute() int {
@@ -238,7 +240,8 @@ func getDefaultGlobalRequestsPerMinute() int {
 			return rate
 		}
 	}
-	return 1000 // 默认每分钟1000个请求（全局限制）
+	// 默认全局每分钟请求数，从 1000 降到 100（降速约 10 倍）
+	return 100
 }
 
 func getDefaultTaskBufferSize() int {
@@ -339,7 +342,12 @@ func main() {
 		for {
 			pollCount++
 			// Backpressure: if channel is mostly full, wait a bit
-			if len(taskChan) >= (TaskBufferSize)/9 {
+			// 当 channel 使用率达到 80% 时才等待（避免整数除法问题）
+			threshold := int(float64(TaskBufferSize) * 0.8)
+			if threshold == 0 {
+				threshold = 1 // 至少为 1，避免总是等待
+			}
+			if len(taskChan) >= threshold {
 				if pollCount%50 == 0 { // Log every 50 iterations to avoid spam
 					log.Printf("Task channel nearly full (%d/%d), waiting...", len(taskChan), TaskBufferSize)
 				}
@@ -1208,101 +1216,102 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 	requestLogJSON, _ := json.MarshalIndent(requestLog, "", "  ")
 	log.Printf("[REQUEST DEBUG] Chunk %d - Request details:\n%s", partNum, string(requestLogJSON))
 
-	// Retry logic
-	var lastErr error
-	for i := 0; i < 12; i++ {
-		resp, err := externalClient.Post(cfg.Storage.DownloadServiceURL, "application/json", bytes.NewBuffer(body))
-		if err != nil {
-			lastErr = err
-			log.Printf("[CHUNK RETRY] Part %d retry %d error: %v", partNum, i+1, err)
-			time.Sleep(1 * time.Second)
-			continue
+	// 只尝试一次上传，不重试
+	resp, err := externalClient.Post(cfg.Storage.DownloadServiceURL, "application/json", bytes.NewBuffer(body))
+	if err != nil {
+		return "", fmt.Errorf("failed to upload chunk %d: HTTP request failed: %v", partNum, err)
+	}
+
+	// 读取响应体（只能读取一次）
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	etag := ""
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		// 首先尝试从响应头获取 ETag
+		if etagHeader := resp.Header.Get("ETag"); etagHeader != "" {
+			// 移除引号（如果存在）
+			etag = strings.Trim(etagHeader, `"`)
+			log.Printf("[CHUNK RESPONSE] Part %d: got ETag from response header: %s", partNum, etag)
 		}
 
-		// 读取响应体（只能读取一次）
-		bodyBytes, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-
-		etag := ""
-		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			// 首先尝试从响应头获取 ETag
-			if etagHeader := resp.Header.Get("ETag"); etagHeader != "" {
-				// 移除引号（如果存在）
-				etag = strings.Trim(etagHeader, `"`)
-				log.Printf("[CHUNK RESPONSE] Part %d: got ETag from response header: %s", partNum, etag)
-			}
-
-			// 如果响应头没有，尝试从响应体获取
-			if etag == "" && len(bodyBytes) > 0 {
-				var resMap map[string]interface{}
-				if err := json.Unmarshal(bodyBytes, &resMap); err == nil {
-					// 尝试多种可能的字段名（不区分大小写）
-					if val, ok := resMap["etag"].(string); ok && val != "" {
-						etag = val
-					} else if val, ok := resMap["ETag"].(string); ok && val != "" {
-						etag = val
-					} else if val, ok := resMap["Etag"].(string); ok && val != "" {
-						etag = val
-					}
-					// Log response details for debugging
-					log.Printf("[CHUNK RESPONSE] Part %d response: status=%d, etag=%s, body=%+v",
-						partNum, resp.StatusCode, etag, resMap)
-				} else {
-					log.Printf("[CHUNK WARNING] Part %d: failed to decode response body: %v (body: %s)",
-						partNum, err, string(bodyBytes))
-					// 即使解析失败，也尝试从响应头获取
-					if etagHeader := resp.Header.Get("ETag"); etagHeader != "" {
-						etag = strings.Trim(etagHeader, `"`)
-						log.Printf("[CHUNK RESPONSE] Part %d: got ETag from response header after decode failure: %s", partNum, etag)
-					}
+		// 如果响应头没有，尝试从响应体获取
+		if etag == "" && len(bodyBytes) > 0 {
+			var resMap map[string]interface{}
+			if err := json.Unmarshal(bodyBytes, &resMap); err == nil {
+				// 尝试多种可能的字段名（不区分大小写）
+				if val, ok := resMap["etag"].(string); ok && val != "" {
+					etag = val
+				} else if val, ok := resMap["ETag"].(string); ok && val != "" {
+					etag = val
+				} else if val, ok := resMap["Etag"].(string); ok && val != "" {
+					etag = val
 				}
-			}
-			// 2xx 但没有拿到 etag：
-			// upload-part 服务可能没有返回 etag（只返回 message），但 multipart 完成必须要每个 part 的 ETag。
-			// 兼容方案：从 R2 直接 ListParts 查询该 part 的 ETag（基于 uploadId + partNumber）。
-			if etag == "" {
-				lookupCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-				etag2, lerr := fetchPartETag(lookupCtx, bucketName, key, uploadID, partNum)
-				cancel()
-				if lerr == nil && etag2 != "" {
-					etag = etag2
-					log.Printf("[CHUNK RESPONSE] Part %d: recovered ETag via ListParts: %s", partNum, etag)
-				} else {
-					// 带上 body，便于定位 upload service 是否“成功但未上传”或“成功但未返回 etag”
-					lastErr = fmt.Errorf("2xx but missing etag (status=%d) and ListParts lookup failed: %v. body=%s", resp.StatusCode, lerr, string(bodyBytes))
-					log.Printf("[CHUNK WARNING] Part %d retry %d: %v", partNum, i+1, lastErr)
-				}
-			}
-		} else {
-			// 记录详细的错误信息，特别是 403 错误
-			log.Printf("[CHUNK ERROR] Part %d retry %d: HTTP status %d", partNum, i+1, resp.StatusCode)
-			if len(bodyBytes) > 0 {
-				log.Printf("[CHUNK ERROR] Part %d response body: %s", partNum, string(bodyBytes))
-			}
-			if resp.StatusCode == 403 {
-				lastErr = fmt.Errorf("403 Forbidden: presigned URL authentication failed - check if upload service uses PUT method and correct headers. Response: %s", string(bodyBytes))
+				// Log response details for debugging
+				log.Printf("[CHUNK RESPONSE] Part %d response: status=%d, etag=%s, body=%+v",
+					partNum, resp.StatusCode, etag, resMap)
 			} else {
-				lastErr = fmt.Errorf("HTTP status %d: %s", resp.StatusCode, string(bodyBytes))
+				log.Printf("[CHUNK WARNING] Part %d: failed to decode response body: %v (body: %s)",
+					partNum, err, string(bodyBytes))
+				// 即使解析失败，也尝试从响应头获取
+				if etagHeader := resp.Header.Get("ETag"); etagHeader != "" {
+					etag = strings.Trim(etagHeader, `"`)
+					log.Printf("[CHUNK RESPONSE] Part %d: got ETag from response header after decode failure: %s", partNum, etag)
+				}
 			}
 		}
+		
+		// 如果 2xx 但没有 ETag，等待后使用 ListParts
+		if etag == "" {
+			log.Printf("[CHUNK WAIT] Part %d: 2xx response but missing ETag (status=%d), will use ListParts to retrieve ETag", partNum, resp.StatusCode)
+			
+			// 先等待至少1秒，避免立即查询
+			log.Printf("[CHUNK WAIT] Part %d: waiting 1s before ListParts attempt", partNum)
+			time.Sleep(1 * time.Second)
 
+			// 等待30秒，给上传服务时间将 part 提交到 R2
+			log.Printf("[CHUNK WAIT] Part %d: waiting 30s for upload service to commit part to R2", partNum)
+			time.Sleep(30 * time.Second)
+
+			// 增大 ListParts 超时时间到 60 秒
+			lookupCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			etag2, lerr := fetchPartETag(lookupCtx, bucketName, key, uploadID, partNum)
+			cancel()
+			if lerr == nil && etag2 != "" {
+				log.Printf("[CHUNK RESPONSE] Part %d: recovered ETag via ListParts: %s", partNum, etag2)
+				return etag2, nil
+			} else {
+				// 带上 body，便于定位 upload service 是否"成功但未上传"或"成功但未返回 etag"
+				return "", fmt.Errorf("2xx but missing etag (status=%d) and ListParts lookup failed: %v. body=%s", resp.StatusCode, lerr, string(bodyBytes))
+			}
+		}
+		
+		// 如果成功获取到 ETag，直接返回
 		if etag != "" {
 			return etag, nil
 		}
-		time.Sleep(1 * time.Second)
+	} else {
+		// 非 2xx 响应，直接返回错误
+		log.Printf("[CHUNK ERROR] Part %d: HTTP status %d", partNum, resp.StatusCode)
+		if len(bodyBytes) > 0 {
+			log.Printf("[CHUNK ERROR] Part %d response body: %s", partNum, string(bodyBytes))
+		}
+		if resp.StatusCode == 403 {
+			return "", fmt.Errorf("403 Forbidden: presigned URL authentication failed - check if upload service uses PUT method and correct headers. Response: %s", string(bodyBytes))
+		} else {
+			return "", fmt.Errorf("HTTP status %d: %s", resp.StatusCode, string(bodyBytes))
+		}
 	}
-	if lastErr != nil {
-		return "", fmt.Errorf("failed to upload chunk %d: %v", partNum, lastErr)
-	}
+	
 	return "", fmt.Errorf("failed to upload chunk %d,Can't get Etag", partNum)
 }
 
 // fetchPartETag queries R2/S3 multipart state to find the ETag for a specific uploaded part.
 func fetchPartETag(ctx context.Context, bucket, key, uploadID string, partNum int32) (string, error) {
 	// Some upload services may return 200 before the part is actually committed in R2.
-	// 为避免对 R2 造成过高压力，这里做一个“温和”的短轮询：
+	// 为避免对 R2 造成过高压力，这里做一个"温和"的短轮询：
 	// - 全局并发上限：3（listPartsSem）
-	// - 每个 part 最多 3 次尝试，总等待时间约 <= 3 秒
+	// - 每个 part 最多 3 次尝试，退避时间从1秒起步（1s, 2s, 3s），总等待时间约 <= 10 秒
 	start := time.Now()
 	maxAttempts := 3
 	var lastErr error
@@ -1353,19 +1362,19 @@ func fetchPartETag(ctx context.Context, bucket, key, uploadID string, partNum in
 		}
 
 		// 如果已经超时或到达最大重试次数，返回最后一次错误
-		if time.Since(start) > 3*time.Second || attempt == maxAttempts {
+		if time.Since(start) > 10*time.Second || attempt == maxAttempts {
 			if lastErr != nil {
 				return "", fmt.Errorf("part %d not found in ListParts after %d attempts: %w", partNum, attempt, lastErr)
 			}
 			return "", fmt.Errorf("part %d not found in ListParts after %d attempts", partNum, attempt)
 		}
 
-		// 简单退避：100ms, 300ms, 600ms
-		sleep := 100 * time.Millisecond
+		// 退避时间从1秒起步：1s, 2s, 3s
+		sleep := 1 * time.Second
 		if attempt == 2 {
-			sleep = 300 * time.Millisecond
+			sleep = 2 * time.Second
 		} else if attempt >= 3 {
-			sleep = 600 * time.Millisecond
+			sleep = 3 * time.Second
 		}
 		select {
 		case <-ctx.Done():

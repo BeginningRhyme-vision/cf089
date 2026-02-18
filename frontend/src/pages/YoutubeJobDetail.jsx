@@ -17,6 +17,7 @@ const YoutubeJobDetail = () => {
   const [job, setJob] = useState(null);
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [queueStats, setQueueStats] = useState(null);
   const [pagination, setPagination] = useState({ 
     current: 1, 
     pageSize: 100,  // 增加默认每页显示数量
@@ -34,6 +35,18 @@ const YoutubeJobDetail = () => {
       console.error('Failed to load job info');
     }
   }, [jobId]);
+
+  const fetchQueueStats = useCallback(async () => {
+    try {
+      const res = await api.get('/youtube-jobs/queue-stats');
+      console.log('Queue stats response:', res.data);
+      setQueueStats(res.data);
+    } catch (error) {
+      console.error('Failed to load queue stats:', error);
+      // 即使失败也设置一个空对象，以便显示错误提示
+      setQueueStats({ error: true, stats: [] });
+    }
+  }, []);
 
   const fetchRecords = useCallback(async (page = 1, pageSize = 100) => {
     setLoading(true);
@@ -64,7 +77,8 @@ const YoutubeJobDetail = () => {
   useEffect(() => {
     fetchJob();
     fetchRecords(1, pagination.pageSize);
-  }, [fetchJob, fetchRecords]);
+    fetchQueueStats();
+  }, [fetchJob, fetchRecords, fetchQueueStats]);
 
   // Polling
   useEffect(() => {
@@ -76,20 +90,21 @@ const YoutubeJobDetail = () => {
       
       try {
         fetchJob();
+        fetchQueueStats();
         
         // Silent poll for tasks
         const res = await api.post('/tasks/fetch', {
-          job_id: parseInt(jobId),
-          limit: pagination.pageSize,
-          offset: (pagination.current - 1) * pagination.pageSize
+            job_id: parseInt(jobId),
+            limit: pagination.pageSize,
+            offset: (pagination.current - 1) * pagination.pageSize
         });
         
         if (isMounted) {
-          setRecords(res.data.tasks || []);
-          setPagination(prev => ({
-            ...prev,
-            total: res.data.total || 0
-          }));
+             setRecords(res.data.tasks || []);
+             setPagination(prev => ({
+                ...prev,
+                total: res.data.total || 0
+             }));
         }
       } catch (e) {
         console.error(e);
@@ -169,6 +184,136 @@ const YoutubeJobDetail = () => {
         <Breadcrumb.Item>Job #{jobId}</Breadcrumb.Item>
       </Breadcrumb>
 
+      {/* Redis 队列统计展示 */}
+      <Card 
+        title={`Redis 队列统计 ${queueStats && queueStats.total_queues ? `(${queueStats.total_queues} 个队列, ${queueStats.total_machines || 0} 台机器)` : ''}`}
+        style={{ marginBottom: 24 }}
+        size="small"
+        extra={
+          <Button 
+            size="small" 
+            icon={<ReloadOutlined />} 
+            onClick={fetchQueueStats}
+          >
+            刷新
+          </Button>
+        }
+      >
+        {!queueStats ? (
+          <div style={{ textAlign: 'center', color: '#999', padding: '20px' }}>
+            加载中...
+          </div>
+        ) : queueStats.error ? (
+          <div style={{ textAlign: 'center', color: '#ff4d4f', padding: '20px' }}>
+            加载队列统计失败，请检查后端接口
+          </div>
+        ) : queueStats.stats && queueStats.stats.length > 0 ? (
+          <div>
+            {queueStats.stats
+              .sort((a, b) => (a.job_id || 0) - (b.job_id || 0)) // 按 job_id 排序
+              .map((stat) => {
+                // 对下载队列按队列名称排序
+                const sortedDownloadQueues = [...(stat.download_queues || [])].sort((a, b) => {
+                  const nameA = a.queue_name || '';
+                  const nameB = b.queue_name || '';
+                  return nameA.localeCompare(nameB);
+                });
+                
+                // 对元数据队列按队列名称排序
+                const sortedMetadataQueues = [...(stat.metadata_queues || [])].sort((a, b) => {
+                  const nameA = a.queue_name || '';
+                  const nameB = b.queue_name || '';
+                  return nameA.localeCompare(nameB);
+                });
+                
+                return (
+                  <Card 
+                    key={stat.job_id} 
+                    size="small" 
+                    style={{ marginBottom: 16 }}
+                    title={
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ fontSize: '16px', fontWeight: 'bold' }}>
+                          Job #{stat.job_id}
+                        </span>
+                        <span style={{ fontSize: '14px', color: '#fa8c16', fontWeight: 'bold' }}>
+                          总计: {stat.total || 0}
+                        </span>
+                      </div>
+                    }
+                  >
+                    <Row gutter={[16, 16]}>
+                      {/* 下载队列 */}
+                      <Col xs={24} md={12}>
+                        <div style={{ marginBottom: 12 }}>
+                          <div style={{ fontSize: '14px', fontWeight: 'bold', marginBottom: 8, color: '#1890ff' }}>
+                            下载队列 (总计: {stat.download_ready || 0})
+                          </div>
+                          {sortedDownloadQueues.length > 0 ? (
+                            <div style={{ paddingLeft: 8 }}>
+                              {sortedDownloadQueues.map((queue, idx) => (
+                                <div key={idx} style={{ marginBottom: 4, fontSize: '12px', color: '#666' }}>
+                                  <span style={{ fontFamily: 'monospace', color: '#1890ff' }}>
+                                    {queue.queue_name}
+                                  </span>
+                                  <span style={{ marginLeft: 8, fontWeight: 'bold' }}>
+                                    {queue.count || 0} 个任务
+                                  </span>
+                                  {queue.machine_name && (
+                                    <Tag size="small" style={{ marginLeft: 8 }}>
+                                      {queue.machine_name}
+                                    </Tag>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div style={{ paddingLeft: 8, color: '#999', fontSize: '12px' }}>无数据</div>
+                          )}
+                        </div>
+                      </Col>
+                      
+                      {/* 元数据队列 */}
+                      <Col xs={24} md={12}>
+                        <div style={{ marginBottom: 12 }}>
+                          <div style={{ fontSize: '14px', fontWeight: 'bold', marginBottom: 8, color: '#52c41a' }}>
+                            元数据队列 (总计: {stat.metadata_retry || 0})
+                          </div>
+                          {sortedMetadataQueues.length > 0 ? (
+                            <div style={{ paddingLeft: 8 }}>
+                              {sortedMetadataQueues.map((queue, idx) => (
+                                <div key={idx} style={{ marginBottom: 4, fontSize: '12px', color: '#666' }}>
+                                  <span style={{ fontFamily: 'monospace', color: '#52c41a' }}>
+                                    {queue.queue_name}
+                                  </span>
+                                  <span style={{ marginLeft: 8, fontWeight: 'bold' }}>
+                                    {queue.count || 0} 个任务
+                                  </span>
+                                  {queue.machine_name && (
+                                    <Tag size="small" style={{ marginLeft: 8 }}>
+                                      {queue.machine_name}
+                                    </Tag>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div style={{ paddingLeft: 8, color: '#999', fontSize: '12px' }}>无数据</div>
+                          )}
+                        </div>
+                      </Col>
+                    </Row>
+                  </Card>
+                );
+              })}
+          </div>
+        ) : (
+          <div style={{ textAlign: 'center', color: '#999', padding: '20px' }}>
+            暂无队列数据
+          </div>
+        )}
+      </Card>
+
       <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
         <h2>
           Job Details: <span style={modalDetailStyle}>{job?.r2_prefix}</span>
@@ -179,7 +324,7 @@ const YoutubeJobDetail = () => {
           {job && (job.failed_count > 0 || job.pending_count > 0 || job.running_count > 0) && (
             <Button onClick={handleRetry} style={{ marginRight: 8 }} danger>Retry Non-Completed</Button>
           )}
-          <Button icon={<ReloadOutlined />} onClick={() => { fetchJob(); fetchRecords(pagination.current, pagination.pageSize); }}>Refresh</Button>
+          <Button icon={<ReloadOutlined />} onClick={() => { fetchJob(); fetchRecords(pagination.current, pagination.pageSize); fetchQueueStats(); }}>Refresh</Button>
         </div>
       </div>
 

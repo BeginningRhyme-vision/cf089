@@ -1172,22 +1172,23 @@ func DeleteYoutubeJob(c *gin.Context) {
 	idStr := c.Param("id")
 	id, _ := strconv.Atoi(idStr)
 
-	// 1. 先删除相关的 task_records（避免外键约束错误）
-	if err := database.DB.Where("job_id = ?", id).Delete(&models.YoutubeTaskRecord{}).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete task records: " + err.Error()})
+	// 1. 检查 Job 是否存在
+	var job models.YoutubeJob
+	if err := database.DB.First(&job, id).Error; err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Job not found"})
 		return
 	}
 
-	// 2. 删除 Job
-	if err := database.DB.Delete(&models.YoutubeJob{}, id).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-		return
-	}
-
-	// 3. Delete from Redis (Async)
+	// 2. 只清空 Redis 中的数据（不清空 PostgreSQL）
 	go cleanupYoutubeJobRedis(context.Background(), uint(id))
 
-	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
+	// 3. 将 PostgreSQL 中 job 的状态改为 COMPLETED（不清空 task_records）
+	if err := database.DB.Model(&models.YoutubeJob{}).Where("id = ?", id).Update("status", models.StatusCompleted).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update job status: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "completed", "message": "Redis data cleared and job status set to COMPLETED"})
 }
 
 type AddTasksRequest struct {
@@ -1750,10 +1751,153 @@ func DeleteFfmpegJob(c *gin.Context) {
 			pipe.Exec(ctx)
 		}
 
-		database.RDB.Del(ctx, jobKey)
-		database.RDB.Del(ctx, fmt.Sprintf("ff:job:%d:lock", jid))
-		database.RDB.Del(ctx, fmt.Sprintf("ff:job:%d:offset", jid))
-	}(uint(id))
+	database.RDB.Del(ctx, jobKey)
+	database.RDB.Del(ctx, fmt.Sprintf("ff:job:%d:lock", jid))
+	database.RDB.Del(ctx, fmt.Sprintf("ff:job:%d:offset", jid))
+}(uint(id))
 
 	c.JSON(http.StatusOK, gin.H{"status": "deleted"})
+}
+
+// GetYoutubeQueueStats 获取 Redis 队列统计信息，按 job ID 分类聚合
+func GetYoutubeQueueStats(c *gin.Context) {
+	ctx := context.Background()
+	
+	// 1. 从数据库获取所有机器名
+	var configs []models.WorkerCookieConfig
+	if err := database.DB.Select("machine_name").Where("enabled = ?", true).Find(&configs).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch machine names: " + err.Error()})
+		return
+	}
+	
+	machineNames := make([]string, 0, len(configs))
+	machineSet := make(map[string]bool)
+	for _, config := range configs {
+		if config.MachineName != "" && !machineSet[config.MachineName] {
+			machineNames = append(machineNames, config.MachineName)
+			machineSet[config.MachineName] = true
+		}
+	}
+	
+	// 2. 构建所有需要查询的队列列表
+	queueNames := []string{
+		"queue:youtube:download_ready:all",
+		"queue:youtube:metadata_retry:all",
+	}
+	
+	for _, machineName := range machineNames {
+		queueNames = append(queueNames, 
+			fmt.Sprintf("queue:youtube:download_ready:%s", machineName),
+			fmt.Sprintf("queue:youtube:metadata_retry:%s", machineName),
+		)
+	}
+	
+	// 3. 统计每个队列中的任务，按 job ID（前3个数字）分类聚合，并记录队列名称
+	// 任务 ID 格式：jobID * 1000000 + sequence，例如 job 13 的任务 ID 是 13000001
+	// jobID -> queueType -> []queueInfo (包含队列名和数量)
+	jobStats := make(map[int]map[string][]map[string]interface{})
+	
+	for _, queueName := range queueNames {
+		length, err := database.RDB.LLen(ctx, queueName).Result()
+		if err != nil {
+			log.Printf("[GetYoutubeQueueStats] Failed to get length for queue %s: %v", queueName, err)
+			continue
+		}
+		
+		if length == 0 {
+			continue
+		}
+		
+		// 获取队列中的所有任务 ID
+		taskIDs, err := database.RDB.LRange(ctx, queueName, 0, -1).Result()
+		if err != nil {
+			log.Printf("[GetYoutubeQueueStats] Failed to get tasks from queue %s: %v", queueName, err)
+			continue
+		}
+		
+		// 确定队列类型
+		var queueType string
+		if strings.Contains(queueName, "download_ready") {
+			queueType = "download_ready"
+		} else if strings.Contains(queueName, "metadata_retry") {
+			queueType = "metadata_retry"
+		} else {
+			continue
+		}
+		
+		// 提取机器名（如果有）
+		machineName := ""
+		if strings.HasSuffix(queueName, ":all") {
+			machineName = "all"
+		} else {
+			parts := strings.Split(queueName, ":")
+			if len(parts) >= 4 {
+				machineName = parts[3]
+			}
+		}
+		
+		// 按 job ID 分类统计，并记录队列信息
+		jobTaskCount := make(map[int]int)
+		for _, taskIDStr := range taskIDs {
+			taskID, err := strconv.ParseInt(taskIDStr, 10, 64)
+			if err != nil {
+				continue
+			}
+			
+			// 提取 job ID：任务 ID 的前3个数字（例如 13000001 -> 13）
+			jobID := int(taskID / 1000000)
+			jobTaskCount[jobID]++
+		}
+		
+		// 为每个 job 记录队列信息
+		for jobID, count := range jobTaskCount {
+			if jobStats[jobID] == nil {
+				jobStats[jobID] = make(map[string][]map[string]interface{})
+			}
+			if jobStats[jobID][queueType] == nil {
+				jobStats[jobID][queueType] = make([]map[string]interface{}, 0)
+			}
+			jobStats[jobID][queueType] = append(jobStats[jobID][queueType], map[string]interface{}{
+				"queue_name": queueName,
+				"machine_name": machineName,
+				"count": count,
+			})
+		}
+	}
+	
+	// 4. 构建返回结果
+	result := make([]map[string]interface{}, 0)
+	for jobID, stats := range jobStats {
+		downloadQueues := stats["download_ready"]
+		metadataQueues := stats["metadata_retry"]
+		
+		downloadTotal := 0
+		metadataTotal := 0
+		for _, q := range downloadQueues {
+			if count, ok := q["count"].(int); ok {
+				downloadTotal += count
+			}
+		}
+		for _, q := range metadataQueues {
+			if count, ok := q["count"].(int); ok {
+				metadataTotal += count
+			}
+		}
+		
+		result = append(result, map[string]interface{}{
+			"job_id":          jobID,
+			"download_ready":  downloadTotal,
+			"download_queues": downloadQueues,
+			"metadata_retry":   metadataTotal,
+			"metadata_queues": metadataQueues,
+			"total":           downloadTotal + metadataTotal,
+		})
+	}
+	
+	// 确保总是返回正确的数据结构，即使没有数据
+	c.JSON(http.StatusOK, gin.H{
+		"stats":         result,
+		"total_queues":  len(queueNames),
+		"total_machines": len(machineNames),
+	})
 }

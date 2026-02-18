@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Table, Button, Modal, Form, Input, Select, Tag, message, Space, Upload, Popconfirm } from 'antd';
+import { Table, Button, Modal, Form, Input, Select, Tag, message, Space, Upload, Popconfirm, Card, Row, Col } from 'antd';
 import { ReloadOutlined, PlusOutlined, EyeOutlined, UploadOutlined, DeleteOutlined, UndoOutlined } from '@ant-design/icons';
 import { useNavigate } from 'react-router-dom';
 import api from '../api';
@@ -29,6 +29,7 @@ const YoutubeJobList = () => {
   const navigate = useNavigate();
   const [submitDisabled, setSubmitDisabled] = useState(false);
   const [submitDisabledTime, setSubmitDisabledTime] = useState(0);
+  const [queueStats, setQueueStats] = useState(null);
 
   const fetchJobs = async (page = 1, pageSize = 10) => {
     setLoading(true);
@@ -59,9 +60,21 @@ const YoutubeJobList = () => {
     }
   };
 
+  const fetchQueueStats = async () => {
+    try {
+      const res = await api.get('/youtube-jobs/queue-stats');
+      console.log('Queue stats response:', res.data);
+      setQueueStats(res.data);
+    } catch (error) {
+      console.error('Failed to load queue stats:', error);
+      setQueueStats({ error: true, stats: [] });
+    }
+  };
+
   useEffect(() => {
     fetchJobs(pagination.current, pagination.pageSize);
     fetchMachineNames();
+    fetchQueueStats();
   }, [pagination.current, pagination.pageSize]);
 
   const handleTableChange = (page, pageSize) => {
@@ -211,7 +224,7 @@ const YoutubeJobList = () => {
           ),
         });
       } else {
-        message.error('Failed to create job: ' + (error.response?.data?.error || error.message));
+      message.error('Failed to create job: ' + (error.response?.data?.error || error.message));
       }
       
       // 如果出错，立即恢复按钮状态
@@ -391,6 +404,136 @@ const YoutubeJobList = () => {
 
   return (
     <div>
+      {/* Redis 队列统计展示 */}
+      <Card 
+        title={`Redis 队列统计 ${queueStats && queueStats.total_queues ? `(${queueStats.total_queues} 个队列, ${queueStats.total_machines || 0} 台机器)` : ''}`}
+        style={{ marginBottom: 24 }}
+        size="small"
+        extra={
+          <Button 
+            size="small" 
+            icon={<ReloadOutlined />} 
+            onClick={fetchQueueStats}
+          >
+            刷新
+          </Button>
+        }
+      >
+        {!queueStats ? (
+          <div style={{ textAlign: 'center', color: '#999', padding: '20px' }}>
+            加载中...
+          </div>
+        ) : queueStats.error ? (
+          <div style={{ textAlign: 'center', color: '#ff4d4f', padding: '20px' }}>
+            加载队列统计失败，请检查后端接口
+          </div>
+        ) : queueStats.stats && queueStats.stats.length > 0 ? (
+          <div>
+            {queueStats.stats
+              .sort((a, b) => (a.job_id || 0) - (b.job_id || 0)) // 按 job_id 排序
+              .map((stat) => {
+                // 对下载队列按队列名称排序
+                const sortedDownloadQueues = [...(stat.download_queues || [])].sort((a, b) => {
+                  const nameA = a.queue_name || '';
+                  const nameB = b.queue_name || '';
+                  return nameA.localeCompare(nameB);
+                });
+                
+                // 对元数据队列按队列名称排序
+                const sortedMetadataQueues = [...(stat.metadata_queues || [])].sort((a, b) => {
+                  const nameA = a.queue_name || '';
+                  const nameB = b.queue_name || '';
+                  return nameA.localeCompare(nameB);
+                });
+                
+                return (
+                  <Card 
+                    key={stat.job_id} 
+                    size="small" 
+                    style={{ marginBottom: 16 }}
+                    title={
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <span style={{ fontSize: '16px', fontWeight: 'bold' }}>
+                          Job #{stat.job_id}
+                        </span>
+                        <span style={{ fontSize: '14px', color: '#fa8c16', fontWeight: 'bold' }}>
+                          总计: {stat.total || 0}
+                        </span>
+                      </div>
+                    }
+                  >
+                    <Row gutter={[16, 16]}>
+                      {/* 下载队列 */}
+                      <Col xs={24} md={12}>
+                        <div style={{ marginBottom: 12 }}>
+                          <div style={{ fontSize: '14px', fontWeight: 'bold', marginBottom: 8, color: '#1890ff' }}>
+                            下载队列 (总计: {stat.download_ready || 0})
+                          </div>
+                          {sortedDownloadQueues.length > 0 ? (
+                            <div style={{ paddingLeft: 8 }}>
+                              {sortedDownloadQueues.map((queue, idx) => (
+                                <div key={idx} style={{ marginBottom: 4, fontSize: '12px', color: '#666' }}>
+                                  <span style={{ fontFamily: 'monospace', color: '#1890ff' }}>
+                                    {queue.queue_name}
+                                  </span>
+                                  <span style={{ marginLeft: 8, fontWeight: 'bold' }}>
+                                    {queue.count || 0} 个任务
+                                  </span>
+                                  {queue.machine_name && (
+                                    <Tag size="small" style={{ marginLeft: 8 }}>
+                                      {queue.machine_name}
+                                    </Tag>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div style={{ paddingLeft: 8, color: '#999', fontSize: '12px' }}>无数据</div>
+                          )}
+                        </div>
+                      </Col>
+                      
+                      {/* 元数据队列 */}
+                      <Col xs={24} md={12}>
+                        <div style={{ marginBottom: 12 }}>
+                          <div style={{ fontSize: '14px', fontWeight: 'bold', marginBottom: 8, color: '#52c41a' }}>
+                            元数据队列 (总计: {stat.metadata_retry || 0})
+                          </div>
+                          {sortedMetadataQueues.length > 0 ? (
+                            <div style={{ paddingLeft: 8 }}>
+                              {sortedMetadataQueues.map((queue, idx) => (
+                                <div key={idx} style={{ marginBottom: 4, fontSize: '12px', color: '#666' }}>
+                                  <span style={{ fontFamily: 'monospace', color: '#52c41a' }}>
+                                    {queue.queue_name}
+                                  </span>
+                                  <span style={{ marginLeft: 8, fontWeight: 'bold' }}>
+                                    {queue.count || 0} 个任务
+                                  </span>
+                                  {queue.machine_name && (
+                                    <Tag size="small" style={{ marginLeft: 8 }}>
+                                      {queue.machine_name}
+                                    </Tag>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          ) : (
+                            <div style={{ paddingLeft: 8, color: '#999', fontSize: '12px' }}>无数据</div>
+                          )}
+                        </div>
+                      </Col>
+                    </Row>
+                  </Card>
+                );
+              })}
+          </div>
+        ) : (
+          <div style={{ textAlign: 'center', color: '#999', padding: '20px' }}>
+            暂无队列数据
+          </div>
+        )}
+      </Card>
+
       <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between' }}>
         <Space>
           <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); setIsModalOpen(true); setFileList([]); }}>
@@ -405,7 +548,7 @@ const YoutubeJobList = () => {
             <Button danger>Delete Pending</Button>
           </Popconfirm>
         </Space>
-        <Button icon={<ReloadOutlined />} onClick={() => fetchJobs(pagination.current, pagination.pageSize)}>Refresh</Button>
+        <Button icon={<ReloadOutlined />} onClick={() => { fetchJobs(pagination.current, pagination.pageSize); fetchQueueStats(); }}>Refresh</Button>
       </div>
       
       <Table 
@@ -428,7 +571,7 @@ const YoutubeJobList = () => {
       <Modal 
         title="Create YouTube Job" 
         open={isModalOpen} 
-        onOk={handleCreate}
+        onOk={handleCreate} 
         okButtonProps={{ disabled: submitDisabled }}
         okText={submitDisabled ? `Wait ${Math.ceil((60000 - (Date.now() - submitDisabledTime)) / 1000)}s` : 'Create'}
         onCancel={() => { 
