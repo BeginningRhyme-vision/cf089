@@ -12,6 +12,7 @@ FROM ubuntu:24.04 AS builder
 # We only need ca-certificates and standard tools, no C/C++ compiler needed for CGO_ENABLED=0
 RUN apt-get update && apt-get install -y \
     ca-certificates \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Go toolchain
@@ -38,6 +39,7 @@ FROM ubuntu:24.04
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \
+    wget \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app

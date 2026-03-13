@@ -1583,7 +1583,7 @@ func AddTransferTasksToJob(jobID int64, inputs []TransferTaskInput) (int, error)
 
 func checkAndRefillTxBuffers() {
 	var jobs []models.TransferJob
-	if err := database.DB.Where("status IN ?", []models.JobStatus{models.StatusRunning}).Find(&jobs).Error; err != nil {
+	if err := database.DB.Where("status IN ?", []models.JobStatus{models.StatusPending, models.StatusRunning, models.StatusCompleted}).Find(&jobs).Error; err != nil {
 		return
 	}
 

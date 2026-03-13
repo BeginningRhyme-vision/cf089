@@ -138,8 +138,6 @@ services:
       - ./config/config.yaml:/app/config.yaml
     depends_on:
       - backend-api
-    profiles:
-      - optional
     networks:
       - unbound
 
