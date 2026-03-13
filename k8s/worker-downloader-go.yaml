@@ -23,7 +23,7 @@ spec:
       - name: unbound-registry-secret
       containers:
       - name: worker-downloader-go
-        image: image.unboundfuture.ai/unbound-worker-downloader:latest
+        image: 209.222.101.19:5000/unbound-worker-downloader:latest
         imagePullPolicy: Always
         command: ["downloader"]
         env:

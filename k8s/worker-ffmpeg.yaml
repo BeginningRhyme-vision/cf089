@@ -19,7 +19,7 @@ spec:
       - name: unbound-registry-secret
       containers:
       - name: ffmpeg-scanner
-        image: image.unboundfuture.ai/unbound-worker-ffmpeg:latest
+        image: 209.222.101.19:5000/unbound-worker-ffmpeg:latest
         imagePullPolicy: Always
         command: ["ffmpeg_scanner"]
         env:
@@ -56,7 +56,7 @@ spec:
       - name: unbound-registry-secret
       containers:
       - name: ffmpeg-worker
-        image: image.unboundfuture.ai/unbound-worker-ffmpeg:latest
+        image: 209.222.101.19:5000/unbound-worker-ffmpeg:latest
         imagePullPolicy: Always
         command: ["ffmpeg_worker"]
         env:

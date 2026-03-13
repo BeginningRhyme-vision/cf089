@@ -23,7 +23,7 @@ spec:
       - name: unbound-registry-secret
       containers:
       - name: worker-transfer-agent
-        image: image.unboundfuture.ai/unbound-worker-transfer:latest
+        image: 209.222.101.19:5000/unbound-worker-transfer:latest
         imagePullPolicy: Always
         command: ["transfer"]
         env:

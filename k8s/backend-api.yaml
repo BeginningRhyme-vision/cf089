@@ -23,7 +23,7 @@ spec:
       - name: unbound-registry-secret
       containers:
       - name: backend-api
-        image: image.unboundfuture.ai/unbound-backend:latest
+        image: 209.222.101.19:5000/unbound-backend:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 8080

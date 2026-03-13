@@ -57,7 +57,7 @@ spec:
       - name: unbound-registry-secret
       containers:
       - name: frontend
-        image: image.unboundfuture.ai/unbound-frontend:latest
+        image: 209.222.101.19:5000/unbound-frontend:latest
         imagePullPolicy: Always
         ports:
         - containerPort: 80

@@ -17,7 +17,7 @@ spec:
     spec:
       containers:
       - name: proxy-tester
-        image: image.unboundfuture.ai/unbound-proxy-tester:latest
+        image: 209.222.101.19:5000/unbound-proxy-tester:latest
         imagePullPolicy: Always
         env:
         - name: PROXY_LIST
