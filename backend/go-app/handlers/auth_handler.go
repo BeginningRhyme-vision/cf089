@@ -193,6 +193,22 @@ func DebugLogin(c *gin.Context) {
 		return
 	}
 
+	// 1. 获取用户提交的密码/凭证
+	var req struct {
+		Password string `json:"password"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+
+	// 2. 简单的硬编码鉴权
+	if req.Password != "jaime123" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid password"})
+		return
+	}
+
+	// 3. 构造或获取用户
 	// Hardcoded user for debug
 	user := models.User{
 		FeishuOpenID: "debug_jaime123",
