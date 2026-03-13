@@ -95,6 +95,9 @@ services:
   # 需要时用: docker compose --profile optional up
   worker-downloader-go:
     image: 209.222.101.19:5000/unbound-worker-downloader:latest
+    build:
+      context: ./backend
+      dockerfile: worker_downloader/Dockerfile
     command: ["downloader"]
     environment:
       - BACKEND_API_URL=http://backend-api:8080/api
@@ -110,6 +113,8 @@ services:
 
   worker-transfer-agent:
     image: 209.222.101.19:5000/unbound-worker-transfer:latest
+    build:
+      context: ./backend/worker_transfer
     command: ["transfer"]
     environment:
       - BACKEND_API_URL=http://backend-api:8080/api
