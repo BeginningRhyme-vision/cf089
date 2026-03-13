@@ -186,6 +186,51 @@ func FeishuCallback(c *gin.Context) {
 	c.Redirect(http.StatusFound, "/auth/finish?access_token="+tokenString+"&user="+userStr)
 }
 
+func DebugLogin(c *gin.Context) {
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load config"})
+		return
+	}
+
+	// Hardcoded user for debug
+	user := models.User{
+		FeishuOpenID: "debug_jaime123",
+		Name:         "jaime123",
+		Email:        "jaime123@debug.local",
+		AvatarURL:    "https://ui-avatars.com/api/?name=jaime123",
+	}
+
+	// Upsert user
+	var existingUser models.User
+	result := database.DB.Where("feishu_open_id = ?", user.FeishuOpenID).First(&existingUser)
+	if result.Error == gorm.ErrRecordNotFound {
+		if err := database.DB.Create(&user).Error; err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
+			return
+		}
+	} else {
+		user = existingUser
+	}
+
+	// Generate JWT
+	tokenString, err := generateJWT(user, cfg)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"access_token": tokenString,
+		"user": gin.H{
+			"id":     user.ID,
+			"name":   user.Name,
+			"avatar": user.AvatarURL,
+			"email":  user.Email,
+		},
+	})
+}
+
 func generateJWT(user models.User, cfg *config.Config) (string, error) {
 	claims := jwt.MapClaims{
 		"sub": user.ID,

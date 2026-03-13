@@ -1,0 +1,25 @@
+version: '3.8'
+
+services:
+  ffmpeg-scanner:
+    image: 209.222.101.19:5000/unbound-worker-ffmpeg:latest
+    command: ["ffmpeg_scanner"]
+    environment:
+      # 请修改为后端 API 的实际 IP 地址 (例如 http://209.222.101.19:8080/api)
+      - BACKEND_API_URL=http://YOUR_BACKEND_IP:8080/api
+      # 请修改为 Redis 的实际 IP 地址 (例如 redis://209.222.101.19:6379/0)
+      - REDIS_URL=redis://YOUR_REDIS_IP:6379/0
+    restart: always
+
+  ffmpeg-worker:
+    image: 209.222.101.19:5000/unbound-worker-ffmpeg:latest
+    command: ["ffmpeg_worker"]
+    environment:
+      # 请修改为后端 API 的实际 IP 地址
+      - BACKEND_API_URL=http://YOUR_BACKEND_IP:8080/api
+      # 请修改为 Redis 的实际 IP 地址
+      - REDIS_URL=redis://YOUR_REDIS_IP:6379/0
+      - MAX_THREADS=32
+    # FFmpeg 需要较大的共享内存
+    shm_size: "40gb"
+    restart: always

@@ -1,4 +1,15 @@
 services:
+  redis:
+    image: redis:7-alpine
+    command: redis-server --requirepass redis_password
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - unbound
+    restart: always
+
   backend-api:
     image: 209.222.101.19:5000/unbound-backend:latest
     build:
@@ -57,30 +68,6 @@ services:
     networks:
       - unbound
 
-  ffmpeg-scanner:
-    image: 209.222.101.19:5000/unbound-worker-ffmpeg:latest
-    build:
-      context: ./backend/worker_ffmpeg
-    command: ["ffmpeg_scanner"]
-    environment:
-      - BACKEND_API_URL=http://backend-api:8080/api
-      - REDIS_URL=redis://10.16.0.125:6379/0
-    networks:
-      - unbound
-
-  ffmpeg-worker:
-    image: 209.222.101.19:5000/unbound-worker-ffmpeg:latest
-    build:
-      context: ./backend/worker_ffmpeg
-    command: ["ffmpeg_worker"]
-    environment:
-      - BACKEND_API_URL=http://backend-api:8080/api
-      - REDIS_URL=redis://10.16.0.125:6379/0
-      - MAX_THREADS=32
-    shm_size: "40gb"
-    networks:
-      - unbound
-
   proxy-tester:
     image: 209.222.101.19:5000/unbound-proxy-tester:latest
     build:
@@ -130,3 +117,6 @@ services:
 networks:
   unbound:
     driver: bridge
+
+volumes:
+  redis_data:
