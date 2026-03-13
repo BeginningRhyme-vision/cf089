@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: unbound-proxy-tester
+  namespace: unbound-future
+  labels:
+    app: unbound-proxy-tester
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: unbound-proxy-tester
+  template:
+    metadata:
+      labels:
+        app: unbound-proxy-tester
+    spec:
+      containers:
+      - name: proxy-tester
+        image: image.unboundfuture.ai/unbound-proxy-tester:latest
+        imagePullPolicy: Always
+        env:
+        - name: PROXY_LIST
+          valueFrom:
+            configMapKeyRef:
+              name: unbound-backend-config
+              key: PROXY_LIST
+        volumeMounts:
+        - name: config-volume
+          mountPath: /root/config.yaml
+          subPath: config.yaml
+        resources:
+          limits:
+            memory: "128Mi"
+            cpu: "200m"
+          requests:
+            memory: "64Mi"
+            cpu: "50m"
+      volumes:
+      - name: config-volume
+        configMap:
+          name: unbound-backend-config
+      imagePullSecrets:
+      - name: unbound-registry-secret

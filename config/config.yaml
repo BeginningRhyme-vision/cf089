@@ -1,0 +1,36 @@
+app:
+  name: "Unbound Future Admin"
+  env: "development"
+  host: "0.0.0.0"
+  port: 8000
+
+redis:
+  # k8s 原来是 10.0.2.2，docker-compose 环境请改成实际地址
+  url: "redis://10.0.2.2:6379/0"
+
+database:
+  # k8s 原来是 10.0.2.3，docker-compose 环境请改成实际地址
+  url: "postgresql://unbound_future:Unbound_future618@10.0.2.3:5432/unbound_future_db"
+
+feishu:
+  app_id: "cli_a9b405c22b389cc5"
+  app_secret: "JZ9xqEBUVOwre5zttlXgKfLxhm4D1AMO"
+  redirect_uri: "http://admin.unboundfuture.ai/auth/callback"
+
+security:
+  jwt_secret: "unbound_future_admin"
+  jwt_algorithm: "HS256"
+  access_token_expire_minutes: 1200
+
+worker:
+  max_threads: 1024
+  proxy_url: "http://furion2025-zone-adam:furion2025@u2f5k4z8f3k6-na.ipidea.online:2345"
+
+storage:
+  transfer_service_url: "http://worker.unboundfuture.ai/initiate-copy"
+  download_service_url: "http://worker.unboundfuture.ai/upload-part"
+  src:
+    endpoint: "https://6d18700b4bd3fff2b330035c35b0bbeb.r2.cloudflarestorage.com/tmp-transfer2"
+    access_key: "6e17dce5e6699ec405f7ec07deecf321"
+    secret_key: "4916026eb627351979f06b898b4f8f67137caba46c39bab83934eb29a97f92ad"
+    region: "auto"

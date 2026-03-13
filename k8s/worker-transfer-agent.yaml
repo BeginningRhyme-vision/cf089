@@ -1,0 +1,55 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: worker-transfer-agent
+  namespace: unbound-future
+  labels:
+    app: worker-transfer-agent
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: worker-transfer-agent
+  template:
+    metadata:
+      labels:
+        app: worker-transfer-agent
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9094"
+        prometheus.io/path: "/metrics"
+    spec:
+      imagePullSecrets:
+      - name: unbound-registry-secret
+      containers:
+      - name: worker-transfer-agent
+        image: image.unboundfuture.ai/unbound-worker-transfer:latest
+        imagePullPolicy: Always
+        command: ["transfer"]
+        env:
+        - name: BACKEND_API_URL
+          value: "http://backend-api:8080/api"
+        ports:
+        - containerPort: 9094
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config.yaml
+          subPath: config.yaml
+      volumes:
+      - name: config-volume
+        configMap:
+          name: unbound-backend-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: worker-transfer-agent
+  namespace: unbound-future
+spec:
+  selector:
+    app: worker-transfer-agent
+  ports:
+  - protocol: TCP
+    port: 9094
+    targetPort: 9094
+  type: ClusterIP
