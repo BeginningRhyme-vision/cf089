@@ -23,7 +23,7 @@ build-frontend:
 	docker build -t $(IMAGE_FRONTEND) frontend
 
 build-downloader:
-	docker build -t $(IMAGE_DOWNLOADER) backend/worker_downloader
+	docker build -t $(IMAGE_DOWNLOADER) -f backend/worker_downloader/Dockerfile backend
 
 build-transfer:
 	docker build -t $(IMAGE_TRANSFER) backend/worker_transfer
