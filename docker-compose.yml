@@ -1,6 +1,8 @@
 services:
   backend-api:
     image: 209.222.101.19:5000/unbound-backend:latest
+    build:
+      context: ./backend/go-app
     ports:
       - "8080:8080"
     volumes:
@@ -14,6 +16,8 @@ services:
 
   frontend:
     image: 209.222.101.19:5000/unbound-frontend:latest
+    build:
+      context: ./frontend
     ports:
       - "80:80"
       - "3000:80"
@@ -26,6 +30,9 @@ services:
 
   worker-downloader-py:
     image: 209.222.101.19:5000/unbound-worker-downloader:latest
+    build:
+      context: ./backend
+      dockerfile: worker_downloader/Dockerfile
     command: ["python", "get_yt_metadata.py"]
     environment:
       - BACKEND_API_URL=http://backend-api:8080/api
@@ -38,6 +45,8 @@ services:
 
   worker-transfer-scanner:
     image: 209.222.101.19:5000/unbound-worker-transfer:latest
+    build:
+      context: ./backend/worker_transfer
     command: ["scanner"]
     environment:
       - BACKEND_API_URL=http://backend-api:8080/api
@@ -50,6 +59,8 @@ services:
 
   ffmpeg-scanner:
     image: 209.222.101.19:5000/unbound-worker-ffmpeg:latest
+    build:
+      context: ./backend/worker_ffmpeg
     command: ["ffmpeg_scanner"]
     environment:
       - BACKEND_API_URL=http://backend-api:8080/api
@@ -59,6 +70,8 @@ services:
 
   ffmpeg-worker:
     image: 209.222.101.19:5000/unbound-worker-ffmpeg:latest
+    build:
+      context: ./backend/worker_ffmpeg
     command: ["ffmpeg_worker"]
     environment:
       - BACKEND_API_URL=http://backend-api:8080/api
@@ -70,6 +83,9 @@ services:
 
   proxy-tester:
     image: 209.222.101.19:5000/unbound-proxy-tester:latest
+    build:
+      context: .
+      dockerfile: backend/proxy_tester/Dockerfile
     volumes:
       - ./config/config.yaml:/root/config.yaml
     networks:
