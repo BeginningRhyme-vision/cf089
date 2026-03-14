@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -82,8 +83,10 @@ var (
 	apiBaseURL string
 	jobCache   sync.Map // JobID -> cachedJob
 	httpClient *http.Client
+	transferClient *http.Client
 	workerCount int
 	taskBufferSize int
+	partConcurrency int
 	
 	defaultPartSize int64 = 16 * 1024 * 1024
 	s3Clients  sync.Map // Endpoint -> *s3.Client (Cache for Destinations)
@@ -113,6 +116,7 @@ const (
 	WorkerID                 = "go-transfer-1"
 	DefaultConcurrentWorkers = 64
 	DefaultTaskBufferSize    = 128
+	DefaultPartConcurrency   = 16
 )
 
 func main() {
@@ -130,6 +134,7 @@ func main() {
 	}
 	workerCount = getEnvInt("TRANSFER_MAX_WORKERS", DefaultConcurrentWorkers)
 	taskBufferSize = getEnvInt("TRANSFER_TASK_BUFFER", DefaultTaskBufferSize)
+	partConcurrency = getEnvInt("TRANSFER_PART_CONCURRENCY", DefaultPartConcurrency)
 	httpClient = &http.Client{
 		Timeout: 20 * time.Second,
 		Transport: &http.Transport{
@@ -138,6 +143,18 @@ func main() {
 			IdleConnTimeout:     90 * time.Second,
 			DialContext: (&net.Dialer{
 				Timeout:   5 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+		},
+	}
+	transferClient = &http.Client{
+		Timeout: 60 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        512,
+			MaxIdleConnsPerHost: 512,
+			IdleConnTimeout:     120 * time.Second,
+			DialContext: (&net.Dialer{
+				Timeout:   8 * time.Second,
 				KeepAlive: 30 * time.Second,
 			}).DialContext,
 		},
@@ -415,7 +432,7 @@ func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string,
 	var wg sync.WaitGroup
 	errAbort := make(chan error, 1)
 	
-	sem := make(chan struct{}, 1024)
+	sem := make(chan struct{}, partConcurrency)
 	
 	for i := 0; i < numParts; i++ {
 		start := int64(i) * partSize
@@ -488,24 +505,35 @@ func callTransferService(srcUrl, dstUrl string, size, offset int64, uploadID str
 	body, _ := json.Marshal(payload)
 	
 	// Retry
-	for i:=0; i<3; i++ {
-		resp, err := httpClient.Post(cfg.Storage.TransferServiceURL, "application/json", bytes.NewBuffer(body))
+	var lastErr error
+	for i:=0; i<5; i++ {
+		resp, err := transferClient.Post(cfg.Storage.TransferServiceURL, "application/json", bytes.NewBuffer(body))
 		if err != nil {
-			time.Sleep(1*time.Second)
+			lastErr = err
+			time.Sleep(time.Duration(i+1) * time.Second)
 			continue
 		}
-		defer resp.Body.Close()
+		respBody, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
 		
 		if resp.StatusCode == 200 {
 			var res map[string]interface{}
-			json.NewDecoder(resp.Body).Decode(&res)
+			if err := json.Unmarshal(respBody, &res); err != nil {
+				lastErr = fmt.Errorf("decode response failed: %w", err)
+				time.Sleep(time.Duration(i+1) * time.Second)
+				continue
+			}
 			if etag, ok := res["etag"].(string); ok {
 				return etag, nil
 			}
+			lastErr = fmt.Errorf("etag missing in response")
+			time.Sleep(time.Duration(i+1) * time.Second)
+			continue
 		}
-		time.Sleep(1*time.Second)
+		lastErr = fmt.Errorf("status %d body %s", resp.StatusCode, string(respBody))
+		time.Sleep(time.Duration(i+1) * time.Second)
 	}
-	return "", fmt.Errorf("service call failed")
+	return "", fmt.Errorf("service call failed: %v", lastErr)
 }
 
 func getBucketFromEndpoint(endpoint string) string {

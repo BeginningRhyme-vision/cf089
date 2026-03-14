@@ -76,6 +76,7 @@ services:
     command: ["python", "get_yt_metadata.py"]
     environment:
       - BACKEND_API_URL=http://backend-api:8080/api
+      - MACHINE_NAME=yt-node-1
     volumes:
       - ./config/config.yaml:/app/config.yaml
     depends_on:
@@ -107,8 +108,6 @@ services:
     networks:
       - unbound
 
-  # --- 以下服务在 k8s 中 replicas=0（默认不启动）---
-  # 需要时用: docker compose --profile optional up
   worker-downloader-go:
     image: 209.222.101.19:5000/unbound-worker-downloader:latest
     build:
@@ -118,12 +117,11 @@ services:
     environment:
       - BACKEND_API_URL=http://backend-api:8080/api
       - WORKER_ID=worker-downloader-go-1
+      - MACHINE_NAME=yt-node-1
     volumes:
       - ./config/config.yaml:/app/config.yaml
     depends_on:
       - backend-api
-    profiles:
-      - optional
     networks:
       - unbound
 
@@ -134,8 +132,9 @@ services:
     command: ["transfer"]
     environment:
       - BACKEND_API_URL=http://backend-api:8080/api
-      - TRANSFER_MAX_WORKERS=64
-      - TRANSFER_TASK_BUFFER=128
+      - TRANSFER_MAX_WORKERS=16
+      - TRANSFER_TASK_BUFFER=64
+      - TRANSFER_PART_CONCURRENCY=8
     volumes:
       - ./config/config.yaml:/app/config.yaml
     depends_on:
