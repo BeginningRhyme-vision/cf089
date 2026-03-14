@@ -6,9 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -79,6 +81,9 @@ var (
 	cfg        *Config
 	apiBaseURL string
 	jobCache   sync.Map // JobID -> cachedJob
+	httpClient *http.Client
+	workerCount int
+	taskBufferSize int
 	
 	defaultPartSize int64 = 16 * 1024 * 1024
 	s3Clients  sync.Map // Endpoint -> *s3.Client (Cache for Destinations)
@@ -105,9 +110,9 @@ var (
 )
 
 const (
-	WorkerID             = "go-transfer-1"
-	MaxConcurrentWorkers = 500
-	TaskBufferSize       = 500
+	WorkerID                 = "go-transfer-1"
+	DefaultConcurrentWorkers = 64
+	DefaultTaskBufferSize    = 128
 )
 
 func main() {
@@ -123,19 +128,33 @@ func main() {
 	if apiBaseURL == "" {
 		apiBaseURL = "http://localhost:8080/api"
 	}
+	workerCount = getEnvInt("TRANSFER_MAX_WORKERS", DefaultConcurrentWorkers)
+	taskBufferSize = getEnvInt("TRANSFER_TASK_BUFFER", DefaultTaskBufferSize)
+	httpClient = &http.Client{
+		Timeout: 20 * time.Second,
+		Transport: &http.Transport{
+			MaxIdleConns:        256,
+			MaxIdleConnsPerHost: 256,
+			IdleConnTimeout:     90 * time.Second,
+			DialContext: (&net.Dialer{
+				Timeout:   5 * time.Second,
+				KeepAlive: 30 * time.Second,
+			}).DialContext,
+		},
+	}
 
 	initSourceClient()
 	initStatsFlusher()
 
 	log.Println("Transfer Worker Started")
 
-	taskChan := make(chan TransferTask, TaskBufferSize)
+	taskChan := make(chan TransferTask, taskBufferSize)
 
 	// Start Fetcher
 	go func() {
 		for {
 			// Backpressure: if channel is mostly full, wait a bit
-			if len(taskChan) >= TaskBufferSize-20 {
+			if len(taskChan) >= taskBufferSize-20 {
 				time.Sleep(100 * time.Millisecond)
 				continue
 			}
@@ -161,7 +180,7 @@ func main() {
 
 	// Start Workers
 	var wg sync.WaitGroup
-	for i := 0; i < MaxConcurrentWorkers; i++ {
+	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -236,7 +255,7 @@ func sendJobStatsUpdate(jobID int64, incSuccess, incFailed int) {
 	req, _ := http.NewRequest("PATCH", fmt.Sprintf("%s/jobs/%d/status", apiBaseURL, jobID), bytes.NewBuffer(data))
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		log.Printf("Failed to update job stats for job %d: %v", jobID, err)
 		return
@@ -470,7 +489,7 @@ func callTransferService(srcUrl, dstUrl string, size, offset int64, uploadID str
 	
 	// Retry
 	for i:=0; i<3; i++ {
-		resp, err := http.Post(cfg.Storage.TransferServiceURL, "application/json", bytes.NewBuffer(body))
+		resp, err := httpClient.Post(cfg.Storage.TransferServiceURL, "application/json", bytes.NewBuffer(body))
 		if err != nil {
 			time.Sleep(1*time.Second)
 			continue
@@ -609,11 +628,11 @@ func createS3Client(endpoint, ak, sk string) (*s3.Client, error) {
 func acquireTasks() ([]TransferTask, error) {
 	payload := map[string]interface{}{
 		"worker_id": WorkerID,
-		"limit":     TaskBufferSize,
+		"limit":     taskBufferSize,
 	}
 	data, _ := json.Marshal(payload)
 
-	resp, err := http.Post(apiBaseURL+"/transfer-tasks/acquire", "application/json", bytes.NewBuffer(data))
+	resp, err := httpClient.Post(apiBaseURL+"/transfer-tasks/acquire", "application/json", bytes.NewBuffer(data))
 	if err != nil {
 		return nil, err
 	}
@@ -639,7 +658,7 @@ func getJobInfo(jobID int64) (*JobInfo, error) {
 		}
 	}
 
-	resp, err := http.Get(fmt.Sprintf("%s/jobs/%d", apiBaseURL, jobID))
+	resp, err := httpClient.Get(fmt.Sprintf("%s/jobs/%d", apiBaseURL, jobID))
 	if err != nil {
 		return nil, err
 	}
@@ -685,7 +704,7 @@ func updateTaskStatus(t TransferTask, status string, msg string) {
 	payload := []TransferTask{t}
 	data, _ := json.Marshal(payload)
 
-	resp, err := http.Post(apiBaseURL+"/transfer-tasks/update", "application/json", bytes.NewBuffer(data))
+	resp, err := httpClient.Post(apiBaseURL+"/transfer-tasks/update", "application/json", bytes.NewBuffer(data))
 	if err != nil {
 		log.Printf("Failed to update status for task %d: %v", t.ID, err)
 		return
@@ -705,4 +724,16 @@ func calculatePartSize(size int64) int64 {
 		partSize = minPartSize
 	}
 	return partSize
+}
+
+func getEnvInt(key string, defaultValue int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return defaultValue
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return defaultValue
+	}
+	return n
 }

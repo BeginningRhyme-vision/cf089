@@ -29,6 +29,10 @@ spec:
         env:
         - name: BACKEND_API_URL
           value: "http://backend-api:8080/api"
+        - name: TRANSFER_MAX_WORKERS
+          value: "64"
+        - name: TRANSFER_TASK_BUFFER
+          value: "128"
         ports:
         - containerPort: 9094
         volumeMounts:
