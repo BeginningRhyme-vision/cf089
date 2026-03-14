@@ -1301,14 +1301,14 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 
 	var (
 		resp      *http.Response
-		err       error
+		reqErr    error
 		bodyBytes []byte
 	)
 	for attempt := 1; attempt <= 3; attempt++ {
-		resp, err = externalClient.Post(cfg.Storage.DownloadServiceURL, "application/json", bytes.NewBuffer(body))
-		if err != nil {
+		resp, reqErr = externalClient.Post(cfg.Storage.DownloadServiceURL, "application/json", bytes.NewBuffer(body))
+		if reqErr != nil {
 			if attempt == 3 {
-				return "", fmt.Errorf("failed to upload chunk %d: HTTP request failed after %d attempts: %v", partNum, attempt, err)
+				return "", fmt.Errorf("failed to upload chunk %d: HTTP request failed after %d attempts: %v", partNum, attempt, reqErr)
 			}
 			time.Sleep(time.Duration(attempt) * time.Second)
 			continue
