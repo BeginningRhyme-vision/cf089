@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -28,16 +29,18 @@ import (
 )
 
 const (
-	TaskQueue      = "queue:ffmpeg:pending"
-	FailedQueue    = "queue:ffmpeg:failed"
-	DedupPrefix    = "queue:ffmpeg:dedup:"
-	MaxRetries     = 3
-	PermFailureKey = "ffmpeg:task:perm_failure" // A Redis set to track permanent failures
+	MaxRetries = 3
 )
 
 var (
 	apiBaseURL string
 	rdb        *redis.Client
+	taskQueue  string
+	failedQueue string
+	dedupPrefix string
+	permFailureKey string
+	requirePrivateEndpoint bool
+	internalEndpointKeywords []string
 
 	PagesScanned = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "ffmpeg_scanner_pages_scanned_total",
@@ -64,7 +67,7 @@ func startRetryManager() {
 	log.Println("Starting FFmpeg Retry Manager")
 	for {
 		// BLPop from the failed queue
-		res, err := rdb.BLPop(context.Background(), 10*time.Second, FailedQueue).Result()
+		res, err := rdb.BLPop(context.Background(), 10*time.Second, failedQueue).Result()
 		if err != nil {
 			if err != redis.Nil {
 				log.Printf("RetryManager: Redis error: %v", err)
@@ -86,7 +89,7 @@ func startRetryManager() {
 			reportResultPatch(task.JobID, false) // This increments failed_count on the job
 
 			// Add to a permanent failure set in Redis to prevent re-processing if scanner finds it again (though it shouldn't)
-			rdb.SAdd(context.Background(), PermFailureKey, task.ID)
+			rdb.SAdd(context.Background(), permFailureKey, task.ID)
 			TasksPermanentlyFailed.Inc()
 			continue
 		}
@@ -102,10 +105,10 @@ func startRetryManager() {
 		}
 
 		// Push back to the main pending queue
-		if err := rdb.RPush(context.Background(), TaskQueue, requeueData).Err(); err != nil {
+		if err := rdb.RPush(context.Background(), taskQueue, requeueData).Err(); err != nil {
 			log.Printf("RetryManager: Failed to requeue task %d: %v", task.ID, err)
 			// If requeue fails, push it back to the failed queue to try again later
-			rdb.LPush(context.Background(), FailedQueue, res[1])
+			rdb.LPush(context.Background(), failedQueue, res[1])
 			time.Sleep(1 * time.Second)
 		} else {
 			TasksRetried.Inc()
@@ -124,6 +127,7 @@ func main() {
 	if apiBaseURL == "" {
 		apiBaseURL = "http://localhost:8080/api"
 	}
+	initQueueConfig()
 
 	initRedis()
 
@@ -160,6 +164,32 @@ func main() {
 
 		time.Sleep(5 * time.Second)
 	}
+}
+
+func initQueueConfig() {
+	queuePrefix := strings.TrimSpace(os.Getenv("FFMPEG_QUEUE_PREFIX"))
+	if queuePrefix == "" {
+		queuePrefix = "ffmpeg"
+	}
+	queuePrefix = strings.Trim(queuePrefix, ":")
+	taskQueue = fmt.Sprintf("queue:%s:pending", queuePrefix)
+	failedQueue = fmt.Sprintf("queue:%s:failed", queuePrefix)
+	dedupPrefix = fmt.Sprintf("queue:%s:dedup:", queuePrefix)
+	permFailureKey = fmt.Sprintf("%s:task:perm_failure", queuePrefix)
+	log.Printf("FFmpeg queue config initialized: prefix=%s task=%s failed=%s", queuePrefix, taskQueue, failedQueue)
+	requirePrivateEndpoint = strings.EqualFold(strings.TrimSpace(os.Getenv("FFMPEG_REQUIRE_PRIVATE_ENDPOINT")), "true")
+	rawKeywords := strings.TrimSpace(os.Getenv("FFMPEG_INTERNAL_ENDPOINT_KEYWORDS"))
+	if rawKeywords == "" {
+		rawKeywords = "internal,intranet,private,privatelink,vpc,aliyuncs,ivolces,tos-s3"
+	}
+	internalEndpointKeywords = nil
+	for _, k := range strings.Split(rawKeywords, ",") {
+		k = strings.ToLower(strings.TrimSpace(k))
+		if k != "" {
+			internalEndpointKeywords = append(internalEndpointKeywords, k)
+		}
+	}
+	log.Printf("FFmpeg endpoint guard: require_private=%v keywords=%v", requirePrivateEndpoint, internalEndpointKeywords)
 }
 
 func reportResultPatch(jobID int64, success bool) {
@@ -220,19 +250,44 @@ func getPendingJobs() ([]common.FfmpegJob, error) {
 		log.Println("Start filter jobs")
 		for _, job := range jobs {
 			log.Println("Job's endpoint is", job.Metadata.Endpoint)
-			if strings.Contains(job.Metadata.Endpoint, os.Getenv("ZONE")) && strings.Contains(job.Metadata.Endpoint, os.Getenv("PROVIDER")) {
+			if strings.Contains(job.Metadata.Endpoint, os.Getenv("ZONE")) &&
+				strings.Contains(job.Metadata.Endpoint, os.Getenv("PROVIDER")) &&
+				isAllowedEndpoint(job.Metadata.Endpoint) {
 				filteredJobs = append(filteredJobs, job)
 			} else {
 				totalCount := 0
 				time := time.Now()
-				updateJobStatus(job.ID, "PENDING", &time, "Zone And Provider does not match", &totalCount)
-				log.Println("Job's endpoint is not in the provider, skip")
+				updateJobStatus(job.ID, "PENDING", &time, "Endpoint check failed: zone/provider/private-endpoint policy mismatch", &totalCount)
+				log.Println("Job endpoint check failed, skip")
 			}
 		}
 		return filteredJobs, nil
 	}
 	log.Println("No jobs found,Waiting......")
 	return filteredJobs, nil
+}
+
+func isAllowedEndpoint(endpoint string) bool {
+	if !requirePrivateEndpoint {
+		return true
+	}
+	u, err := url.Parse(strings.TrimSpace(endpoint))
+	if err != nil || u.Hostname() == "" {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "localhost" {
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsPrivate() || ip.IsLoopback()
+	}
+	for _, k := range internalEndpointKeywords {
+		if strings.Contains(host, k) {
+			return true
+		}
+	}
+	return false
 }
 
 func updateJobStatus(jobID int64, status string, lastScanTime *time.Time, msg string, totalCount *int) error {
@@ -370,7 +425,7 @@ func processJob(job common.FfmpegJob) {
 			// Actually SMISMEMBER is what we want if available, or just loop.
 			// go-redis v9 has SMIsMember.
 
-			res, err := rdb.SMIsMember(context.Background(), PermFailureKey, checkPermFailureIDs...).Result()
+			res, err := rdb.SMIsMember(context.Background(), permFailureKey, checkPermFailureIDs...).Result()
 			if err != nil {
 				log.Printf("Failed to check for permanent failures: %v", err)
 				// Assume none failed on error to be safe, or skip?
@@ -383,7 +438,7 @@ func processJob(job common.FfmpegJob) {
 
 		// Dedup
 		pipe := rdb.Pipeline()
-		dedupKey := fmt.Sprintf("%s%d", DedupPrefix, job.ID)
+		dedupKey := fmt.Sprintf("%s%d", dedupPrefix, job.ID)
 		var dedupCandidates []struct {
 			id     string
 			pair   *FilePair
@@ -453,7 +508,7 @@ func processJob(job common.FfmpegJob) {
 
 			var errPush error
 			for i := 0; i < 3; i++ {
-				errPush = rdb.RPush(context.Background(), TaskQueue, interfaceBatch...).Err()
+				errPush = rdb.RPush(context.Background(), taskQueue, interfaceBatch...).Err()
 				if errPush == nil {
 					break
 				}
@@ -559,7 +614,7 @@ func generateTaskID(s string) int64 {
 }
 
 func cleanUpDedup(jobID int64) {
-	key := fmt.Sprintf("%s%d", DedupPrefix, jobID)
+	key := fmt.Sprintf("%s%d", dedupPrefix, jobID)
 	if err := rdb.Del(context.Background(), key).Err(); err != nil {
 		log.Printf("Failed to cleanup dedup key %s: %v", key, err)
 	} else {

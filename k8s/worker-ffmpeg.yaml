@@ -30,6 +30,16 @@ spec:
             configMapKeyRef:
               name: unbound-backend-config
               key: REDIS_URL
+        - name: PROVIDER
+          value: "aliyun"
+        - name: ZONE
+          value: "cn-hangzhou"
+        - name: FFMPEG_QUEUE_PREFIX
+          value: "ffmpeg-aliyun"
+        - name: FFMPEG_REQUIRE_PRIVATE_ENDPOINT
+          value: "true"
+        - name: FFMPEG_INTERNAL_ENDPOINT_KEYWORDS
+          value: "internal,intranet,private,privatelink,vpc,aliyuncs,ivolces,tos-s3"
         resources:
           requests:
             cpu: "100m"
@@ -69,6 +79,8 @@ spec:
               key: REDIS_URL
         - name: MAX_THREADS
           value: "32"
+        - name: FFMPEG_QUEUE_PREFIX
+          value: "ffmpeg-aliyun"
         resources:
           requests:
             memory: "40Gi"

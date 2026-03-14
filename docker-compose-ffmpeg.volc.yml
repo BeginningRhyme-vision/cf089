@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  ffmpeg-scanner:
+    image: 209.222.101.19:5000/unbound-worker-ffmpeg:latest
+    command: ["ffmpeg_scanner"]
+    environment:
+      - BACKEND_API_URL=${BACKEND_API_URL:-http://YOUR_BACKEND_IP:8080/api}
+      - REDIS_URL=${REDIS_URL:-redis://:redis_password@YOUR_REDIS_IP:6379/0}
+      - PROVIDER=ivolces
+      - ZONE=cn-shanghai
+      - FFMPEG_QUEUE_PREFIX=ffmpeg-volc
+      - FFMPEG_REQUIRE_PRIVATE_ENDPOINT=true
+      - FFMPEG_INTERNAL_ENDPOINT_KEYWORDS=internal,intranet,private,privatelink,vpc,aliyuncs,ivolces,tos-s3
+    restart: always
+
+  ffmpeg-worker:
+    image: 209.222.101.19:5000/unbound-worker-ffmpeg:latest
+    command: ["ffmpeg_worker"]
+    environment:
+      - BACKEND_API_URL=${BACKEND_API_URL:-http://YOUR_BACKEND_IP:8080/api}
+      - REDIS_URL=${REDIS_URL:-redis://:redis_password@YOUR_REDIS_IP:6379/0}
+      - MAX_THREADS=${MAX_THREADS:-32}
+      - FFMPEG_QUEUE_PREFIX=ffmpeg-volc
+    shm_size: "40gb"
+    restart: always

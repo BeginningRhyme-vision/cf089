@@ -33,8 +33,6 @@ import (
 
 const (
 	DefaultTempDir = "/dev/shm"
-	TaskQueue      = "queue:ffmpeg:pending"
-	FailedQueue    = "queue:ffmpeg:failed"
 )
 
 var (
@@ -45,6 +43,8 @@ var (
 	rdb            *redis.Client
 	jobCache       sync.Map // JobID -> *common.FfmpegJob
 	jobCacheExpiry sync.Map // JobID -> time.Time
+	taskQueue      string
+	failedQueue    string
 
 	reservedSpace int64
 	reservedMux   sync.Mutex
@@ -78,7 +78,7 @@ func handleTaskFailure(t common.FfmpegTask, reason string) {
 		return
 	}
 
-	if err := rdb.RPush(context.Background(), FailedQueue, failedTaskData).Err(); err != nil {
+	if err := rdb.RPush(context.Background(), failedQueue, failedTaskData).Err(); err != nil {
 		log.Printf("CRITICAL: Failed to push task %d to failed queue: %v", t.ID, err)
 		// If we can't push to redis, we also have to drop it.
 		reportResultPatch(t.JobID, false)
@@ -98,6 +98,7 @@ func main() {
 	if apiBaseURL == "" {
 		apiBaseURL = "http://localhost:8080/api"
 	}
+	initQueueConfig()
 
 	initRedis()
 
@@ -128,7 +129,7 @@ func main() {
 
 	for {
 		// BLPOP from Redis
-		res, err := rdb.BLPop(context.Background(), 5*time.Second, TaskQueue).Result()
+		res, err := rdb.BLPop(context.Background(), 5*time.Second, taskQueue).Result()
 		if err != nil {
 			if err != redis.Nil {
 				log.Printf("Redis error: %v", err)
@@ -199,6 +200,17 @@ func initRedis() {
 		log.Fatalf("Invalid Redis URL: %v", err)
 	}
 	rdb = redis.NewClient(opt)
+}
+
+func initQueueConfig() {
+	queuePrefix := strings.TrimSpace(os.Getenv("FFMPEG_QUEUE_PREFIX"))
+	if queuePrefix == "" {
+		queuePrefix = "ffmpeg"
+	}
+	queuePrefix = strings.Trim(queuePrefix, ":")
+	taskQueue = fmt.Sprintf("queue:%s:pending", queuePrefix)
+	failedQueue = fmt.Sprintf("queue:%s:failed", queuePrefix)
+	log.Printf("FFmpeg queue config initialized: prefix=%s task=%s failed=%s", queuePrefix, taskQueue, failedQueue)
 }
 
 func getJobInfo(jobID int64) (*common.FfmpegJob, error) {
