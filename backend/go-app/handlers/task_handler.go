@@ -800,6 +800,7 @@ func AcquireTasks(c *gin.Context) {
 
 	ctx := context.Background()
 	tasks := []models.YoutubeTask{}
+	seenTaskIDs := map[string]struct{}{}
 
 	if req.Stage == "download" {
 		// 根据 worker 的 MachineName 确定从哪个队列获取任务
@@ -852,6 +853,11 @@ func AcquireTasks(c *gin.Context) {
 				// 其他错误，跳过
 				continue
 			}
+			if _, exists := seenTaskIDs[idStr]; exists {
+				log.Printf("[AcquireTasks] Skip duplicate task id %s in this batch (worker: %s, stage: %s)", idStr, req.WorkerID, req.Stage)
+				continue
+			}
+			seenTaskIDs[idStr] = struct{}{}
 
 			// Fetch task details
 			taskData, err := database.RDB.Get(ctx, fmt.Sprintf("task:%s", idStr)).Result()
@@ -930,6 +936,11 @@ func AcquireTasks(c *gin.Context) {
 				log.Printf("[AcquireTasks] All retry queues empty or timed out (worker: %s)", req.WorkerID)
 				break
 			}
+			if _, exists := seenTaskIDs[idStr]; exists {
+				log.Printf("[AcquireTasks] Skip duplicate task id %s in this batch (worker: %s, stage: %s)", idStr, req.WorkerID, req.Stage)
+				continue
+			}
+			seenTaskIDs[idStr] = struct{}{}
 			
 			// Check task status after atomic pop
 			taskData, err := database.RDB.Get(ctx, fmt.Sprintf("task:%s", idStr)).Result()
