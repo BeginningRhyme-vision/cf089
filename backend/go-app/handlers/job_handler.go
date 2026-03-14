@@ -379,8 +379,10 @@ func RetryYoutubeTasksLogic(jobID int, initialStatus models.JobStatus) {
 
 					data, _ := json.Marshal(task)
 					pipe.Set(ctx, keys[i], data, 0)
-					// Push back to download queue (根据 Job 的 MachineName 推入对应的队列)
 					queueName := getDownloadQueueName(task.JobID)
+					if strings.TrimSpace(task.AudioURL) == "" && strings.TrimSpace(task.VideoURL) == "" {
+						queueName = getMetadataQueueName(task.JobID)
+					}
 					pipe.RPush(ctx, queueName, task.ID)
 
 					hasUpdates = true
@@ -739,10 +741,16 @@ type CreateYoutubeJobRequest struct {
 // YouTube URL 格式验证
 var (
 	// YouTube URL 正则表达式
-	youtubeURLPattern = regexp.MustCompile(`(?i)^(https?://)?(www\.)?(youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/|m\.youtube\.com/watch\?v=)([a-zA-Z0-9_-]{11})`)
+	youtubeURLPattern = regexp.MustCompile(`(?i)^(https?://)?(www\.)?(youtube\.com/watch\?v=|youtu\.be/|youtube\.com/embed/|m\.youtube\.com/watch\?v=)([a-zA-Z0-9_-]{11})([?&][^\s]*)?$`)
 	// Video ID 正则表达式（11个字符的字母数字、下划线、连字符）
 	videoIDPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{11}$`)
 )
+
+func splitTaskCandidates(line string) []string {
+	return strings.FieldsFunc(line, func(r rune) bool {
+		return r == '\n' || r == '\r' || r == '\t' || r == ' ' || r == ',' || r == ';' || r == '|'
+	})
+}
 
 // validateYouTubeURL 验证 YouTube URL 格式
 // 返回: (isValid, isVideoID, videoID, errorMessage)
@@ -776,34 +784,34 @@ func parseAndValidateTasks(lines []string, source string) ([]string, []map[strin
 	var errors []map[string]interface{}
 
 	for lineNum, line := range lines {
-		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
-		}
+		candidates := splitTaskCandidates(line)
+		for _, candidate := range candidates {
+			candidate = strings.TrimSpace(candidate)
+			if candidate == "" {
+				continue
+			}
 
-		isValid, isVideoID, videoID, errMsg := validateYouTubeURL(line)
-		if isValid {
-			// 标准 URL 格式，直接使用
-			validTasks = append(validTasks, line)
-		} else if isVideoID {
-			// 只是 video_id，转换为标准 URL
-			standardURL := fmt.Sprintf("https://www.youtube.com/watch?v=%s", videoID)
-			validTasks = append(validTasks, standardURL)
-			errors = append(errors, map[string]interface{}{
-				"line_number": lineNum + 1,
-				"content":     line,
-				"message":     errMsg,
-				"fixed":       true,
-				"fixed_url":   standardURL,
-			})
-		} else {
-			// 格式错误
-			errors = append(errors, map[string]interface{}{
-				"line_number": lineNum + 1,
-				"content":     line,
-				"message":     errMsg,
-				"fixed":       false,
-			})
+			isValid, isVideoID, videoID, errMsg := validateYouTubeURL(candidate)
+			if isValid {
+				validTasks = append(validTasks, candidate)
+			} else if isVideoID {
+				standardURL := fmt.Sprintf("https://www.youtube.com/watch?v=%s", videoID)
+				validTasks = append(validTasks, standardURL)
+				errors = append(errors, map[string]interface{}{
+					"line_number": lineNum + 1,
+					"content":     candidate,
+					"message":     errMsg,
+					"fixed":       true,
+					"fixed_url":   standardURL,
+				})
+			} else {
+				errors = append(errors, map[string]interface{}{
+					"line_number": lineNum + 1,
+					"content":     candidate,
+					"message":     errMsg,
+					"fixed":       false,
+				})
+			}
 		}
 	}
 

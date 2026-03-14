@@ -29,6 +29,14 @@ const YoutubeJobList = () => {
   const navigate = useNavigate();
   const [submitDisabled, setSubmitDisabled] = useState(false);
   const [submitDisabledTime, setSubmitDisabledTime] = useState(0);
+
+  const parseTaskInput = (raw) => {
+    if (!raw) return [];
+    return raw
+      .split(/[\n\r\t ,;|]+/)
+      .map((v) => v.trim())
+      .filter((v) => v.length > 0);
+  };
   const [queueStats, setQueueStats] = useState(null);
 
   const fetchJobs = async (page = 1, pageSize = 10) => {
@@ -158,7 +166,7 @@ const YoutubeJobList = () => {
         
         // Parse URLs from text area
         if (values.urls) {
-            const textUrls = values.urls.split('\n').map(u => u.trim()).filter(u => u.length > 0);
+            const textUrls = parseTaskInput(values.urls);
             tasks = [...tasks, ...textUrls];
         }
 

@@ -728,6 +728,10 @@ func processTask(t YoutubeTask) {
 	// 记录任务信息，用于调试
 	log.Printf("Task %d: AudioURL=%v (size=%d), VideoURL=%v (size=%d)",
 		t.ID, t.AudioURL != "", t.AudioSize, t.VideoURL != "", t.VideoSize)
+	if t.AudioURL == "" && t.VideoURL == "" {
+		reportErrorWithTask(t, "both audio_url and video_url are empty, task is not downloadable")
+		return
+	}
 
 	if t.AudioURL != "" {
 		wg.Add(1)
