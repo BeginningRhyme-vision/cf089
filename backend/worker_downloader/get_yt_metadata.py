@@ -495,25 +495,27 @@ def get_r2_client():
         print(f"  ⚠ 创建 R2 客户端失败: {e}")
         return None, None
 
-def check_r2_object_exists(key):
-    """检查 R2 中是否存在指定的对象"""
+def head_r2_object(key):
+    """获取 R2 对象信息，返回 (exists, size)"""
     try:
         s3_client, bucket_name = get_r2_client()
         if not s3_client or not bucket_name:
-            return False
+            return False, 0
         
-        # 使用 HeadObject 检查对象是否存在
-        s3_client.head_object(Bucket=bucket_name, Key=key)
-        return True
+        resp = s3_client.head_object(Bucket=bucket_name, Key=key)
+        size = int(resp.get('ContentLength', 0) or 0)
+        return True, size
     except ClientError as e:
         error_code = e.response.get('Error', {}).get('Code', '')
         if error_code == '404':
-            return False
-        # 其他错误（如权限问题）也返回 False，但不打印（避免日志过多）
-        return False
-    except Exception as e:
-        # 静默处理错误，避免日志过多
-        return False
+            return False, 0
+        return False, 0
+    except Exception:
+        return False, 0
+
+def check_r2_object_exists(key):
+    exists, _ = head_r2_object(key)
+    return exists
 
 def build_r2_key(r2_prefix, video_id, download_mode, file_type, job_info):
     """
@@ -747,24 +749,26 @@ def process_metadata(task, ydl_opts):
     if video_id_for_check and r2_prefix:
         print(f"  Checking R2 for existing objects (video_id: {video_id_for_check}, prefix: {r2_prefix})...")
         all_exist = True
+        audio_size = 0
+        video_size = 0
         
         # 根据 download_mode 检查需要的文件
         if download_mode in ['both', 'audio']:
             audio_key = build_r2_key(r2_prefix, video_id_for_check, download_mode, 'audio', job_info)
-            audio_exists = check_r2_object_exists(audio_key)
-            if audio_exists:
-                print(f"  ✓ Audio 文件已存在: {audio_key}")
+            audio_exists, audio_size = head_r2_object(audio_key)
+            if audio_exists and audio_size > 0:
+                print(f"  ✓ Audio 文件已存在: {audio_key} (size={audio_size})")
             else:
-                print(f"  - Audio 文件不存在: {audio_key}")
+                print(f"  - Audio 文件不存在或大小为0: {audio_key} (size={audio_size})")
                 all_exist = False
         
         if download_mode in ['both', 'video']:
             video_key = build_r2_key(r2_prefix, video_id_for_check, download_mode, 'video', job_info)
-            video_exists = check_r2_object_exists(video_key)
-            if video_exists:
-                print(f"  ✓ Video 文件已存在: {video_key}")
+            video_exists, video_size = head_r2_object(video_key)
+            if video_exists and video_size > 0:
+                print(f"  ✓ Video 文件已存在: {video_key} (size={video_size})")
             else:
-                print(f"  - Video 文件不存在: {video_key}")
+                print(f"  - Video 文件不存在或大小为0: {video_key} (size={video_size})")
                 all_exist = False
         
         # 如果所有需要的文件都已存在，直接返回 COMPLETED 状态（不调用限流器）
@@ -776,6 +780,9 @@ def process_metadata(task, ydl_opts):
                 "status": "COMPLETED",  # 直接标记为完成
                 "worker_id": WORKER_ID,
                 "video_id": video_id_for_check,
+                "audio_size": audio_size,
+                "video_size": video_size,
+                "error_message": "Skipped download: target objects already exist in R2",
                 "updated_at": format_time_go_compatible(),
                 "completed_at": format_time_go_compatible()
             }

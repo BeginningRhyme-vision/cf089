@@ -752,6 +752,13 @@ func splitTaskCandidates(line string) []string {
 	})
 }
 
+func sanitizeTaskCandidate(candidate string) string {
+	candidate = strings.TrimSpace(candidate)
+	candidate = strings.Trim(candidate, "`\"'")
+	candidate = strings.TrimSpace(candidate)
+	return candidate
+}
+
 // validateYouTubeURL 验证 YouTube URL 格式
 // 返回: (isValid, isVideoID, videoID, errorMessage)
 func validateYouTubeURL(line string) (bool, bool, string, string) {
@@ -786,7 +793,7 @@ func parseAndValidateTasks(lines []string, source string) ([]string, []map[strin
 	for lineNum, line := range lines {
 		candidates := splitTaskCandidates(line)
 		for _, candidate := range candidates {
-			candidate = strings.TrimSpace(candidate)
+			candidate = sanitizeTaskCandidate(candidate)
 			if candidate == "" {
 				continue
 			}
