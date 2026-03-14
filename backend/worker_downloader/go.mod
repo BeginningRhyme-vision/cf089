@@ -1,18 +1,14 @@
 module worker-downloader
 
-go 1.25.5
+go 1.24
 
 require (
 	github.com/aws/aws-sdk-go-v2 v1.32.0
 	github.com/aws/aws-sdk-go-v2/config v1.27.0
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.0
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.65.0
-	github.com/prometheus/client_golang v1.23.2
-	github.com/unbound-future-admin/backend/pkg/proxypool v0.0.0
 	gopkg.in/yaml.v3 v3.0.1
 )
-
-replace github.com/unbound-future-admin/backend/pkg/proxypool => ../pkg/proxypool
 
 require (
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.6.6 // indirect
@@ -31,8 +27,8 @@ require (
 	github.com/aws/smithy-go v1.22.0 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
-	github.com/kr/text v0.2.0 // indirect
 	github.com/munnerz/goautoneg v0.0.0-20191010083416-a7dc8b61c822 // indirect
+	github.com/prometheus/client_golang v1.23.2 // indirect
 	github.com/prometheus/client_model v0.6.2 // indirect
 	github.com/prometheus/common v0.66.1 // indirect
 	github.com/prometheus/procfs v0.16.1 // indirect

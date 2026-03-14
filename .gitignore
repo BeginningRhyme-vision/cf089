@@ -1,5 +1,7 @@
 .vscode/
 frontend/node_modules/
+#config
+*config.yaml
 
 # Python
 __pycache__/
@@ -37,3 +39,19 @@ frontend.pid
 # Logs
 *.log
 nohup.out
+
+
+# frontend 
+frontend/vite.config.js
+frontend/package-lock.json
+config_back.yaml
+script/*
+*_test.go
+config_back_local.yaml
+config_back_local_back.yaml
+config_local_db.yaml
+*.md
+*cookie.txt
+*cookies.txt
+check_queue.sh
+debug_queue.py

@@ -186,67 +186,6 @@ func FeishuCallback(c *gin.Context) {
 	c.Redirect(http.StatusFound, "/auth/finish?access_token="+tokenString+"&user="+userStr)
 }
 
-func DebugLogin(c *gin.Context) {
-	cfg, err := config.LoadConfig()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load config"})
-		return
-	}
-
-	// 1. 获取用户提交的密码/凭证
-	var req struct {
-		Password string `json:"password"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
-		return
-	}
-
-	// 2. 简单的硬编码鉴权
-	if req.Password != "jaime123" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid password"})
-		return
-	}
-
-	// 3. 构造或获取用户
-	// Hardcoded user for debug
-	user := models.User{
-		FeishuOpenID: "debug_jaime123",
-		Name:         "jaime123",
-		Email:        "jaime123@debug.local",
-		AvatarURL:    "https://ui-avatars.com/api/?name=jaime123",
-	}
-
-	// Upsert user
-	var existingUser models.User
-	result := database.DB.Where("feishu_open_id = ?", user.FeishuOpenID).First(&existingUser)
-	if result.Error == gorm.ErrRecordNotFound {
-		if err := database.DB.Create(&user).Error; err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create user"})
-			return
-		}
-	} else {
-		user = existingUser
-	}
-
-	// Generate JWT
-	tokenString, err := generateJWT(user, cfg)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
-		return
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"access_token": tokenString,
-		"user": gin.H{
-			"id":     user.ID,
-			"name":   user.Name,
-			"avatar": user.AvatarURL,
-			"email":  user.Email,
-		},
-	})
-}
-
 func generateJWT(user models.User, cfg *config.Config) (string, error) {
 	claims := jwt.MapClaims{
 		"sub": user.ID,

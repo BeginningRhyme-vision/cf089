@@ -1,9 +1,17 @@
 import React, { useEffect, useState } from 'react';
 import { Table, Button, Modal, Form, Input, Select, Checkbox, Tag, message, Space, Popconfirm, Descriptions } from 'antd';
-import { PlayCircleOutlined, PauseCircleOutlined, StopOutlined, ReloadOutlined, PlusOutlined, DeleteOutlined, EyeOutlined, SyncOutlined } from '@ant-design/icons';
+import { PlayCircleOutlined, PauseCircleOutlined, StopOutlined, ReloadOutlined, PlusOutlined, DeleteOutlined, EyeOutlined } from '@ant-design/icons';
 import api from '../api';
 
 const { Option } = Select;
+
+const cellStyle = {
+  maxWidth: 180,
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  display: 'inline-block' 
+};
 
 const JobList = () => {
   const [jobs, setJobs] = useState([]);
@@ -12,17 +20,37 @@ const JobList = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [detailVisible, setDetailVisible] = useState(false);
   const [selectedJob, setSelectedJob] = useState(null);
+  const [pagination, setPagination] = useState({
+    current: 1,
+    pageSize: 10,
+    total: 0
+  });
   const [form] = Form.useForm();
 
-  const fetchJobs = async (background = false) => {
-    if (!background) setLoading(true);
+  const fetchJobs = async (page = 1, pageSize = 10) => {
+    setLoading(true);
     try {
-      const res = await api.get('/jobs/');
+      const res = await api.get(`/jobs/?page=${page}&limit=${pageSize}`);
       setJobs(res.data);
+      
+      if (res.headers && res.headers['x-total-count']) {
+        setPagination(prev => ({
+          ...prev,
+          current: page,
+          pageSize: pageSize,
+          total: parseInt(res.headers['x-total-count'])
+        }));
+      } else {
+        setPagination(prev => ({
+          ...prev,
+          current: page,
+          pageSize: pageSize
+        }));
+      }
     } catch (error) {
-      if (!background) message.error('Failed to load jobs');
+      message.error('Failed to load jobs');
     } finally {
-      if (!background) setLoading(false);
+      setLoading(false);
     }
   };
 
@@ -36,15 +64,9 @@ const JobList = () => {
   };
 
   useEffect(() => {
-    fetchJobs();
+    fetchJobs(pagination.current, pagination.pageSize);
     fetchMetadata();
-    
-    const interval = setInterval(() => {
-      fetchJobs(true);
-    }, 5000);
-
-    return () => clearInterval(interval);
-  }, []);
+  }, [pagination.current, pagination.pageSize]);
 
   const handleCreate = async () => {
     try {
@@ -57,7 +79,7 @@ const JobList = () => {
       await api.post('/jobs/', payload);
       message.success('Job created');
       setIsModalOpen(false);
-      fetchJobs();
+      fetchJobs(pagination.current, pagination.pageSize);
     } catch (error) {
       console.error(error);
     }
@@ -67,21 +89,9 @@ const JobList = () => {
     try {
       await api.post(`/jobs/${jobId}/${action}`);
       message.success(`Job ${action}ed`);
-      fetchJobs();
+      fetchJobs(pagination.current, pagination.pageSize);
     } catch (error) {
       message.error(`Failed to ${action} job`);
-    }
-  };
-
-  const handleReconcile = async (jobId) => {
-    try {
-      await api.post('/tasks/reconcile', {
-        job_id: jobId,
-        type: 'transfer'
-      });
-      message.success('Reconciliation started');
-    } catch (error) {
-      message.error('Failed to start reconciliation');
     }
   };
 
@@ -89,7 +99,7 @@ const JobList = () => {
     try {
       await api.delete(`/jobs/${jobId}`);
       message.success('Job deleted');
-      fetchJobs();
+      fetchJobs(pagination.current, pagination.pageSize);
     } catch (error) {
       message.error('Failed to delete job');
     }
@@ -106,9 +116,27 @@ const JobList = () => {
 
   const columns = [
     { title: 'ID', dataIndex: 'job_id', key: 'job_id', width: 60 },
-    { title: 'Metadata ID', dataIndex: 'metadata_id', key: 'metadata_id', width: 100 },
-    { title: 'Source', dataIndex: 'src_dir', key: 'src_dir' },
-    { title: 'Dest', dataIndex: 'dst_dir', key: 'dst_dir' },
+    { title: 'Metadata ID', dataIndex: 'metadata_id', key: 'metadata_id', width: 100, responsive: ['md'] },
+    { 
+      title: 'Source', 
+      dataIndex: 'src_dir', 
+      key: 'src_dir',
+      render: (text) => (
+        <div style={cellStyle} title={text}>
+          {text}
+        </div>
+      ) 
+    },
+    { 
+      title: 'Dest', 
+      dataIndex: 'dst_dir', 
+      key: 'dst_dir',
+      render: (text) => (
+        <div style={cellStyle} title={text}>
+          {text}
+        </div>
+      )
+    },
     { 
       title: 'Status', 
       dataIndex: 'status', 
@@ -155,10 +183,25 @@ const JobList = () => {
         <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); setIsModalOpen(true); }}>
           New Transfer Job
         </Button>
-        <Button icon={<ReloadOutlined />} onClick={() => fetchJobs(false)}>Refresh</Button>
+        <Button icon={<ReloadOutlined />} onClick={() => fetchJobs(pagination.current, pagination.pageSize)}>Refresh</Button>
       </div>
       
-      <Table columns={columns} dataSource={jobs} rowKey="job_id" loading={loading} />
+      <Table 
+        columns={columns} 
+        dataSource={jobs} 
+        rowKey="job_id" 
+        loading={loading}
+        scroll={{ x: 'max-content' }}
+        pagination={{
+          current: pagination.current,
+          pageSize: pagination.pageSize,
+          total: pagination.total,
+          onChange: (page, pageSize) => setPagination(prev => ({ ...prev, current: page, pageSize })),
+          showSizeChanger: true,
+          showQuickJumper: true,
+          showTotal: (total) => `Total ${total} jobs`
+        }}
+      />
 
       <Modal 
         title="Create Transfer Job" 
@@ -218,9 +261,6 @@ const JobList = () => {
         onCancel={() => setDetailVisible(false)}
         footer={[
           <Button key="close" onClick={() => setDetailVisible(false)}>Close</Button>,
-          selectedJob && (
-            <Button key="reconcile" icon={<SyncOutlined />} onClick={() => handleReconcile(selectedJob.job_id)}>Reconcile Stats</Button>
-          ),
           selectedJob && selectedJob.failed_count > 0 && (
             <Button key="retry" icon={<ReloadOutlined />} onClick={() => handleAction(selectedJob.job_id, 'retry')}>Retry Failed</Button>
           )
@@ -228,33 +268,61 @@ const JobList = () => {
         width={700}
       >
         {selectedJob && (
-          <Descriptions column={1} bordered>
-            <Descriptions.Item label="Job ID">{selectedJob.job_id}</Descriptions.Item>
-            <Descriptions.Item label="Client/Metadata ID">{selectedJob.metadata_id}</Descriptions.Item>
-            <Descriptions.Item label="Source">{selectedJob.src_dir}</Descriptions.Item>
-            <Descriptions.Item label="Destination">{selectedJob.dst_dir}</Descriptions.Item>
-            <Descriptions.Item label="Include">{selectedJob.include || '-'}</Descriptions.Item>
-            <Descriptions.Item label="Exclude">{selectedJob.exclude || '-'}</Descriptions.Item>
-            <Descriptions.Item label="Delete Source">{selectedJob.delete_source ? 'Yes' : 'No'}</Descriptions.Item>
-            <Descriptions.Item label="Incremental">{selectedJob.is_incremental ? 'Yes' : 'No'}</Descriptions.Item>
-            {selectedJob.is_incremental && (
-              <Descriptions.Item label="Periodic Interval">{selectedJob.periodic_interval} s</Descriptions.Item>
-            )}
-            <Descriptions.Item label="Status">
-              <Tag color={statusColors[selectedJob.status]}>{selectedJob.status}</Tag>
-            </Descriptions.Item>
-            <Descriptions.Item label="Total Count">{selectedJob.total_count}</Descriptions.Item>
-            <Descriptions.Item label="Pending Count">{selectedJob.pending_count}</Descriptions.Item>
-            <Descriptions.Item label="Running Count">{selectedJob.running_count}</Descriptions.Item>
-            <Descriptions.Item label="Success Count">{selectedJob.success_count}</Descriptions.Item>
-            <Descriptions.Item label="Failed Count">{selectedJob.failed_count}</Descriptions.Item>
-            <Descriptions.Item label="Start Time">{selectedJob.start_time || '-'}</Descriptions.Item>
-            <Descriptions.Item label="End Time">{selectedJob.end_time || '-'}</Descriptions.Item>
-            <Descriptions.Item label="Duration">{selectedJob.duration_seconds} seconds</Descriptions.Item>
-            <Descriptions.Item label="Execution Count">{selectedJob.execution_count}</Descriptions.Item>
-            <Descriptions.Item label="Result Message">{selectedJob.result_message || '-'}</Descriptions.Item>
-            <Descriptions.Item label="Created At">{selectedJob.created_at}</Descriptions.Item>
-          </Descriptions>
+          <div style={{ border: '1px solid #f0f0f0' }}>
+            {[
+              { label: 'Job ID', value: selectedJob.job_id },
+              { label: 'Client/Metadata ID', value: selectedJob.metadata_id },
+              { label: 'Source', value: selectedJob.src_dir, fullWidth: true },
+              { label: 'Destination', value: selectedJob.dst_dir, fullWidth: true },
+              { label: 'Include', value: selectedJob.include || '-' },
+              { label: 'Exclude', value: selectedJob.exclude || '-' },
+              { label: 'Delete Source', value: selectedJob.delete_source ? 'Yes' : 'No' },
+              { label: 'Incremental', value: selectedJob.is_incremental ? 'Yes' : 'No' },
+              ...(selectedJob.is_incremental ? [{ label: 'Periodic Interval', value: `${selectedJob.periodic_interval} s` }] : []),
+              { label: 'Status', value: <Tag color={statusColors[selectedJob.status]}>{selectedJob.status}</Tag> },
+              { label: 'Total Count', value: selectedJob.total_count },
+              { label: 'Pending Count', value: selectedJob.pending_count },
+              { label: 'Running Count', value: selectedJob.running_count },
+              { label: 'Success Count', value: selectedJob.success_count },
+              { label: 'Failed Count', value: selectedJob.failed_count },
+              { label: 'Start Time', value: selectedJob.start_time || '-' },
+              { label: 'End Time', value: selectedJob.end_time || '-' },
+              { label: 'Duration', value: `${selectedJob.duration_seconds} seconds` },
+              { label: 'Execution Count', value: selectedJob.execution_count },
+              { label: 'Result Message', value: selectedJob.result_message || 'N/A', fullWidth: true },
+              { label: 'Created At', value: selectedJob.created_at },
+              { label: 'Updated At', value: selectedJob.updated_at },
+            ].map((item, index) => (
+              <div 
+                key={index}
+                style={{ 
+                  display: 'flex', 
+                  borderBottom: (index < 21) ? '1px solid #f0f0f0' : 'none',
+                  flexWrap: 'wrap'
+                }}
+              >
+                <div style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  fontWeight: 'bold',
+                  background: '#fafafa',
+                  borderRight: '1px solid #f0f0f0',
+                  flex: '0 0 150px'
+                }}>
+                  {item.label}
+                </div>
+                <div style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  flex: 1,
+                  overflowWrap: 'break-word',
+                  wordWrap: 'break-word',
+                }}>
+                  {item.value}
+                </div>
+              </div>
+            ))}
+          </div>
         )}
       </Modal>
     </div>

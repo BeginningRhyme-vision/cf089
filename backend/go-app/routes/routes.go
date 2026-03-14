@@ -36,7 +36,6 @@ func SetupRouter() *gin.Engine {
 		{
 			auth.GET("/feishu/login_url", handlers.GetFeishuLoginURL)
 			auth.GET("/feishu/callback", handlers.FeishuCallback)
-			auth.POST("/debug/login", handlers.DebugLogin)
 		}
 
         // Transfer Jobs
@@ -59,9 +58,12 @@ func SetupRouter() *gin.Engine {
         {
             ytJobs.POST("/", handlers.CreateYoutubeJob)
             ytJobs.GET("/", handlers.ListYoutubeJobs)
+            ytJobs.GET("/queue-stats", handlers.GetYoutubeQueueStats)
             ytJobs.GET("/:id", handlers.GetYoutubeJob)
             ytJobs.POST("/:id/tasks", handlers.AddTasksToYoutubeJob)
             ytJobs.POST("/:id/retry", handlers.RetryFailedYoutubeTasks)
+            ytJobs.POST("/:id/retry-non-completed", handlers.RetryNonCompletedYoutubeTasks)
+            ytJobs.POST("/:id/reset-offset", handlers.ResetYoutubeJobOffset)
             ytJobs.DELETE("/pending", handlers.DeletePendingYoutubeJobs)
             ytJobs.DELETE("/:id", handlers.DeleteYoutubeJob)
         }
@@ -84,7 +86,6 @@ func SetupRouter() *gin.Engine {
             tasks.POST("/fetch", handlers.BatchFetch)
             tasks.POST("/acquire", handlers.AcquireTasks)
             tasks.POST("/delete", handlers.BatchDelete)
-            tasks.POST("/reconcile", handlers.ReconcileStats)
         }
 
         // Transfer Tasks
@@ -119,6 +120,19 @@ func SetupRouter() *gin.Engine {
             pipelines.GET("/", handlers.ListPipelineJobs)
             pipelines.GET("/:id", handlers.GetPipelineJob)
             pipelines.POST("/:id/retry", handlers.RetryPipelineJob)
+        }
+
+        // Worker Cookie Configs
+        cookieConfigs := api.Group("/worker-cookie-configs")
+        {
+            cookieConfigs.GET("", handlers.GetWorkerCookieConfig)
+            cookieConfigs.GET("/machine-names", handlers.ListWorkerMachineNames)
+        }
+
+        // Youtube Tasks (Database Records)
+        youtubeTasks := api.Group("/youtube-tasks")
+        {
+            youtubeTasks.POST("/update", handlers.UpdateYoutubeTaskRecord)
         }
 	}
 

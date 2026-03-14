@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"net/url"
@@ -74,12 +75,12 @@ type UpdateStatusRequest struct {
 var (
 	cfg        *Config
 	apiBaseURL string
-	
+
 	PagesScanned = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "scanner_pages_scanned_total",
 		Help: "Total number of S3 pages scanned",
 	})
-	
+
 	TasksDiscovered = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "scanner_tasks_discovered_total",
 		Help: "Total number of tasks discovered",
@@ -88,13 +89,12 @@ var (
 
 func main() {
 	loadConfig()
-	
 	go func() {
 		http.Handle("/metrics", promhttp.Handler())
 		log.Println("Metrics server listening on :9093")
 		http.ListenAndServe(":9093", nil)
 	}()
-	
+
 	apiBaseURL = os.Getenv("BACKEND_API_URL")
 	if apiBaseURL == "" {
 		apiBaseURL = "http://localhost:8080/api"
@@ -145,7 +145,7 @@ func loadConfig() {
 	if data == nil {
 		// Fallback or just empty if we rely on DB for source creds?
 		// Note: The previous r2s3 implementation read Source creds from CLI or Env, OR DB?
-		// The Scanner needs Source Creds. 
+		// The Scanner needs Source Creds.
 		// The Job has Metadata which is for DESTINATION.
 		// Source is usually global in config.yaml?
 		// Checking `config.yaml` content from memory: `storage.src` has endpoint, access_key, secret_key.
@@ -183,13 +183,13 @@ func updateJobStatus(jobID uint, status string, lastScanTime *time.Time, msg str
 
 	reqObj, _ := http.NewRequest("PATCH", fmt.Sprintf("%s/jobs/%d/status", apiBaseURL, jobID), bytes.NewBuffer(data))
 	reqObj.Header.Set("Content-Type", "application/json")
-	
+
 	resp, err := http.DefaultClient.Do(reqObj)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("failed to update status: %d", resp.StatusCode)
 	}
@@ -236,7 +236,7 @@ func processJob(job TransferJob) {
 	lastUpdate := time.Now()
 
 	// Channel for async sending
-	taskChan := make(chan TransferTaskInput, 2000)
+	taskChan := make(chan TransferTaskInput, 1500)
 	var wg sync.WaitGroup
 	wg.Add(1)
 
@@ -246,7 +246,7 @@ func processJob(job TransferJob) {
 		var internalBatch []TransferTaskInput
 		for task := range taskChan {
 			internalBatch = append(internalBatch, task)
-			if len(internalBatch) >= 1000 {
+			if len(internalBatch) >= 700 {
 				if err := sendBatch(job.JobID, internalBatch); err != nil {
 					log.Printf("Failed to send batch for job %d: %v", job.JobID, err)
 				}
@@ -265,10 +265,53 @@ func processJob(job TransferJob) {
 		pages++
 		PagesScanned.Inc()
 		log.Printf("Requesting page %d for job %d...", pages, job.JobID)
-		page, err := paginator.NextPage(context.TODO())
+
+		// Retry logic with exponential backoff
+		var page *s3.ListObjectsV2Output
+		var err error
+		maxRetries := 5
+		retryCount := 0
+		baseDelay := 5 * time.Second
+
+		for retryCount < maxRetries {
+			page, err = paginator.NextPage(context.TODO())
+			if err == nil {
+				break // Success, exit retry loop
+			}
+
+			log.Printf("ListObjectsV2 failed for job %d on page %d (attempt %d/%d): %v", job.JobID, pages, retryCount+1, maxRetries, err)
+
+			// Check if the error is due to rate limiting
+			errMsg := err.Error()
+			isRateLimited := strings.Contains(strings.ToLower(errMsg), "ratelimit") ||
+				strings.Contains(strings.ToLower(errMsg), "throttled") ||
+				strings.Contains(strings.ToLower(errMsg), "slowdown") ||
+				strings.Contains(errMsg, "429")
+
+			if isRateLimited {
+				log.Printf("Detected rate limiting for job %d, applying backoff strategy", job.JobID)
+				// Use a longer delay for rate limiting
+				delay := baseDelay * time.Duration(1<<uint(retryCount)) // Exponential backoff
+				if retryCount > 0 {
+					log.Printf("Rate limited, waiting for %v before retry %d/%d", delay, retryCount+1, maxRetries)
+				}
+				time.Sleep(delay)
+			} else {
+				// Standard error - shorter delay
+				delay := baseDelay * time.Duration(1<<uint(retryCount)) / 2
+				if delay < baseDelay {
+					delay = baseDelay
+				}
+				log.Printf("Request failed, waiting for %v before retry %d/%d", delay, retryCount+1, maxRetries)
+				time.Sleep(delay)
+			}
+
+			retryCount++
+		}
+
 		if err != nil {
-			log.Printf("ListObjectsV2 failed for job %d on page %d: %v", job.JobID, pages, err)
-			updateJobStatus(job.JobID, "FAILED", nil, fmt.Sprintf("List failed on page %d: %v", pages, err)) // Mark as failed on list error
+			log.Printf("ListObjectsV2 failed for job %d on page %d after %d retries: %v", job.JobID, pages, maxRetries, err)
+			updateJobStatus(job.JobID, "FAILED", nil, fmt.Sprintf("List failed on page %d after %d retries: %v", pages, maxRetries, err))
 			close(taskChan) // Ensure consumer stops
 			return
 		}
@@ -301,7 +344,6 @@ func processJob(job TransferJob) {
 				}
 			}
 
-
 			var size int64
 			if obj.Size != nil {
 				size = *obj.Size
@@ -311,7 +353,7 @@ func processJob(job TransferJob) {
 			TasksDiscovered.Inc()
 			count++
 		}
-		
+
 		// Periodic Job Update (Heartbeat / Metadata Refresh)
 		if time.Since(lastUpdate) > 10*time.Second { // Check every 10s roughly (per page)
 			// Refresh Job Config
@@ -321,7 +363,7 @@ func processJob(job TransferJob) {
 				job.Include = latestJob.Include
 				job.Exclude = latestJob.Exclude
 				job.IsIncremental = latestJob.IsIncremental
-				
+
 				// Optional: Check status. If Cancelled, abort?
 				if latestJob.Status != "RUNNING" && latestJob.Status != "PENDING" {
 					log.Printf("Job %d status changed to %s. Aborting scan.", job.JobID, latestJob.Status)
@@ -331,16 +373,26 @@ func processJob(job TransferJob) {
 			} else {
 				log.Printf("Failed to refresh job %d: %v", job.JobID, err)
 			}
-			
+
 			// Update Status / Heartbeat
 			msg := fmt.Sprintf("Scanning... Pages: %d, Tasks: %d, Skipped: %d", pages, count, skipped)
 			updateJobStatus(job.JobID, "RUNNING", nil, msg)
 			lastUpdate = time.Now()
 		}
+
+		// Add a small delay between pages to reduce request rate after encountering rate limiting
+		// We track whether the last page request was affected by rate limiting
+		if pages > 0 {
+			// In case we've had a rate limiting event recently, apply a small delay
+			// This is a proactive measure to prevent subsequent rate limiting
+			standardDelay := 100 * time.Millisecond
+			//log.Printf("Waiting %v before requesting next page for job %d to prevent rate limiting", standardDelay, job.JobID)
+			time.Sleep(standardDelay)
+		}
 	}
 
 	close(taskChan) // Signal consumer to finish
-	wg.Wait() // Wait for consumer to finish processing
+	wg.Wait()       // Wait for consumer to finish processing
 
 	log.Printf("Job %d scanned. Total pages: %d. New tasks: %d, Skipped (old): %d", job.JobID, pages, count, skipped)
 	resultMsg := fmt.Sprintf("Scanned %d pages. Tasks: %d, Skipped: %d", pages, count, skipped)
@@ -349,7 +401,7 @@ func processJob(job TransferJob) {
 		updateJobStatus(job.JobID, "RUNNING", &startTime, resultMsg)
 		log.Printf("Job %d is periodic. Next scan in %d seconds.", job.JobID, job.PeriodicInterval)
 	} else {
-		updateJobStatus(job.JobID, "COMPLETED", &startTime, resultMsg)
+		updateJobStatus(job.JobID, "RUNNING", &startTime, resultMsg)
 	}
 }
 
@@ -359,7 +411,7 @@ func getJob(jobID uint) (*TransferJob, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
-	
+
 	if resp.StatusCode != 200 {
 		return nil, fmt.Errorf("status %d", resp.StatusCode)
 	}
@@ -382,6 +434,8 @@ func sendBatch(jobID uint, tasks []TransferTaskInput) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
+		body, _ := io.ReadAll(resp.Body)
+		log.Println("job ", jobID, "error body: ", string(body))
 		return fmt.Errorf("status %d", resp.StatusCode)
 	}
 	return nil
@@ -445,6 +499,6 @@ func getBucketFromEndpoint(endpoint string) string {
 	if err != nil {
 		return ""
 	}
-	
+
 	return strings.Trim(u.Path, "/")
 }

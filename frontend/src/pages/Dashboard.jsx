@@ -73,7 +73,14 @@ const Dashboard = () => {
 
   return (
     <Layout style={{ minHeight: '100vh' }}>
-      <Sider trigger={null} collapsible collapsed={collapsed}>
+      <Sider 
+        trigger={null} 
+        collapsible 
+        collapsed={collapsed}
+        breakpoint="lg"
+        collapsedWidth="0"
+        onCollapse={(isCollapsed) => setCollapsed(isCollapsed)}
+      >
         <div style={{ height: 32, margin: 16, background: 'rgba(255, 255, 255, 0.2)', textAlign: 'center', color: '#fff', lineHeight: '32px', fontWeight: 'bold' }}>
           {collapsed ? 'UFA' : 'Unbound Future'}
         </div>

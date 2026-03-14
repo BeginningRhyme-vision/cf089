@@ -1,9 +1,17 @@
 import React, { useEffect, useState } from 'react';
 import { Table, Button, Modal, Form, Input, Select, Tag, message, Space, Popconfirm, Descriptions, Checkbox } from 'antd';
-import { ReloadOutlined, PlusOutlined, DeleteOutlined, EyeOutlined, SyncOutlined } from '@ant-design/icons';
+import { ReloadOutlined, PlusOutlined, DeleteOutlined, EyeOutlined } from '@ant-design/icons';
 import api from '../api';
 
 const { Option } = Select;
+
+const cellStyle = {
+  maxWidth: 250,
+  whiteSpace: 'nowrap',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  display: 'inline-block' 
+};
 
 const FfmpegJobList = () => {
   const [jobs, setJobs] = useState([]);
@@ -12,17 +20,39 @@ const FfmpegJobList = () => {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [detailVisible, setDetailVisible] = useState(false);
   const [selectedJob, setSelectedJob] = useState(null);
+  const [pagination, setPagination] = useState({
+    current: 1,
+    pageSize: 10,
+    total: 0
+  });
   const [form] = Form.useForm();
 
-  const fetchJobs = async (background = false) => {
-    if (!background) setLoading(true);
+  const fetchJobs = async (page = 1, pageSize = 10) => {
+    setLoading(true);
     try {
-      const res = await api.get('/ffmpeg-jobs/');
+      const res = await api.get(`/ffmpeg-jobs/?page=${page}&limit=${pageSize}`);
       setJobs(res.data);
+      
+      // 检查是否有 X-Total-Count 响应头
+      if (res.headers && res.headers['x-total-count']) {
+        setPagination(prev => ({
+          ...prev,
+          current: page,
+          pageSize: pageSize,
+          total: parseInt(res.headers['x-total-count'])
+        }));
+      } else {
+        // 如果没有获取到总数，则基于当前数据长度进行更新
+        setPagination(prev => ({
+          ...prev,
+          current: page,
+          pageSize: pageSize
+        }));
+      }
     } catch (error) {
-      if (!background) message.error('Failed to load jobs');
+      message.error('Failed to load jobs');
     } finally {
-      if (!background) setLoading(false);
+      setLoading(false);
     }
   };
 
@@ -36,15 +66,17 @@ const FfmpegJobList = () => {
   };
 
   useEffect(() => {
-    fetchJobs();
+    fetchJobs(pagination.current, pagination.pageSize);
     fetchMetadata();
-    
-    const interval = setInterval(() => {
-      fetchJobs(true);
-    }, 5000);
+  }, [pagination.current, pagination.pageSize]);
 
-    return () => clearInterval(interval);
-  }, []);
+  const handleTableChange = (page, pageSize) => {
+    setPagination({
+      ...pagination,
+      current: page,
+      pageSize: pageSize
+    });
+  };
 
   const handleCreate = async () => {
     try {
@@ -52,7 +84,7 @@ const FfmpegJobList = () => {
       await api.post('/ffmpeg-jobs/', values);
       message.success('Job created');
       setIsModalOpen(false);
-      fetchJobs();
+      fetchJobs(pagination.current, pagination.pageSize);
     } catch (error) {
       console.error(error);
       message.error('Failed to create job');
@@ -63,21 +95,9 @@ const FfmpegJobList = () => {
     try {
       await api.delete(`/ffmpeg-jobs/${jobId}`);
       message.success('Job deleted');
-      fetchJobs();
+      fetchJobs(pagination.current, pagination.pageSize);
     } catch (error) {
       message.error('Failed to delete job');
-    }
-  };
-
-  const handleReconcile = async (jobId) => {
-    try {
-      await api.post('/tasks/reconcile', {
-        job_id: jobId,
-        type: 'ffmpeg'
-      });
-      message.success('Reconciliation started');
-    } catch (error) {
-      message.error('Failed to start reconciliation');
     }
   };
 
@@ -90,14 +110,24 @@ const FfmpegJobList = () => {
 
   const columns = [
     { title: 'ID', dataIndex: 'id', key: 'id', width: 60 },
-    { title: 'Metadata ID', dataIndex: 'metadata_id', key: 'metadata_id', width: 100 },
-    { title: 'S3 Prefix', dataIndex: 's3_prefix', key: 's3_prefix' },
+    { title: 'Metadata ID', dataIndex: 'metadata_id', key: 'metadata_id', width: 100, responsive: ['md'] },
+    { 
+      title: 'S3 Prefix', 
+      dataIndex: 's3_prefix', 
+      key: 's3_prefix',
+      render: (text) => (
+        <div style={cellStyle} title={text}>
+          {text}
+        </div>
+      ) 
+    },
     { 
       title: 'Inc', 
       dataIndex: 'is_incremental', 
       key: 'is_incremental',
       width: 60,
-      render: (val) => val ? <Tag color="blue">Yes</Tag> : <Tag>No</Tag>
+      render: (val) => val ? <Tag color="blue">Yes</Tag> : <Tag>No</Tag>,
+      responsive: ['md']
     },
     { 
       title: 'Status', 
@@ -108,12 +138,14 @@ const FfmpegJobList = () => {
     { 
       title: 'Success', 
       dataIndex: 'success_count', 
-      key: 'success_count' 
+      key: 'success_count',
+      responsive: ['md']
     },
     { 
       title: 'Failed', 
       dataIndex: 'failed_count', 
-      key: 'failed_count' 
+      key: 'failed_count',
+      responsive: ['md']
     },
     { 
       title: 'Action',
@@ -128,12 +160,12 @@ const FfmpegJobList = () => {
             Details
           </Button>
           <Popconfirm 
-            title="Are you sure delete this job?" 
+            title="Are you sure delete this job?"  
             onConfirm={() => handleDelete(record.id)} 
             okText="Yes" 
             cancelText="No"
           >
-             <Button icon={<DeleteOutlined />} size="small" danger>Delete</Button>
+            <Button icon={<DeleteOutlined />} size="small" danger>Delete</Button>
           </Popconfirm>
         </Space>
       ),
@@ -146,10 +178,25 @@ const FfmpegJobList = () => {
         <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); setIsModalOpen(true); }}>
           New FFmpeg Job
         </Button>
-        <Button icon={<ReloadOutlined />} onClick={() => fetchJobs(false)}>Refresh</Button>
+        <Button icon={<ReloadOutlined />} onClick={() => fetchJobs(pagination.current, pagination.pageSize)}>Refresh</Button>
       </div>
       
-      <Table columns={columns} dataSource={jobs} rowKey="id" loading={loading} />
+      <Table 
+        columns={columns} 
+        dataSource={jobs} 
+        rowKey="id" 
+        loading={loading}
+        scroll={{ x: 'max-content' }}
+        pagination={{
+          current: pagination.current,
+          pageSize: pagination.pageSize,
+          total: pagination.total,
+          onChange: (page, pageSize) => handleTableChange(page, pageSize),
+          showSizeChanger: true,
+          showQuickJumper: true,
+          showTotal: (total) => `Total ${total} jobs`
+        }}
+      />
 
       <Modal 
         title="Create FFmpeg Job" 
@@ -158,21 +205,38 @@ const FfmpegJobList = () => {
         onCancel={() => setIsModalOpen(false)}
       >
         <Form form={form} layout="vertical">
-          <Form.Item name="metadata_id" label="S3 Config (Metadata)" rules={[{ required: true }]}>
+          <Form.Item name="metadata_id" label="Client/Metadata" rules={[{ required: true }]}>
             <Select>
               {metadataList.map(m => (
                 <Option key={m.id} value={m.id}>{m.client_name} ({m.endpoint})</Option>
               ))}
             </Select>
           </Form.Item>
-          <Form.Item name="s3_prefix" label="S3 Prefix (Folder)" rules={[{ required: true }]} tooltip="Folder containing {id}_video.ext and {id}_audio.ext">
-            <Input placeholder="raw_uploads/" />
+          <Form.Item name="s3_prefix" label="S3 Prefix (Source)" rules={[{ required: true }]}>
+            <Input placeholder="e.g., bucket/prefix/" />
           </Form.Item>
-          <Form.Item name="s3_upload_prefix" label="S3 Upload Prefix (Optional)" tooltip="Folder to upload output files. Defaults to source folder if empty.">
-            <Input placeholder="processed/" />
+          <Form.Item name="s3_upload_prefix" label="S3 Upload Prefix (Destination)" rules={[{ required: true }]}>
+            <Input placeholder="e.g., bucket/output_path/" />
           </Form.Item>
-          <Form.Item name="is_incremental" valuePropName="checked">
-            <Checkbox>Incremental Mode (Continuously scan for new files)</Checkbox>
+          <Form.Item name="is_incremental" valuePropName="checked" label="Incremental Mode">
+            <Checkbox>Enable incremental processing (continuous scan)</Checkbox>
+          </Form.Item>
+          <Form.Item
+            noStyle
+            shouldUpdate={(prev, current) => prev.is_incremental !== current.is_incremental}
+          >
+            {({ getFieldValue }) =>
+              getFieldValue('is_incremental') ? (
+                <Form.Item
+                  name="periodic_interval"
+                  label="Periodic Interval (Seconds)"
+                  rules={[{ required: true, message: 'Please set interval' }]}
+                  initialValue={600}
+                >
+                  <Input type="number" placeholder="600" />
+                </Form.Item>
+              ) : null
+            }
           </Form.Item>
         </Form>
       </Modal>
@@ -182,30 +246,58 @@ const FfmpegJobList = () => {
         open={detailVisible}
         onCancel={() => setDetailVisible(false)}
         footer={[
-          <Button key="close" onClick={() => setDetailVisible(false)}>Close</Button>,
-          selectedJob && (
-            <Button key="reconcile" icon={<SyncOutlined />} onClick={() => handleReconcile(selectedJob.id)}>Reconcile Stats</Button>
-          )
+          <Button key="close" onClick={() => setDetailVisible(false)}>Close</Button>
         ]}
         width={700}
       >
         {selectedJob && (
-          <Descriptions column={1} bordered>
-            <Descriptions.Item label="Job ID">{selectedJob.id}</Descriptions.Item>
-            <Descriptions.Item label="Metadata ID">{selectedJob.metadata_id}</Descriptions.Item>
-            <Descriptions.Item label="S3 Prefix">{selectedJob.s3_prefix}</Descriptions.Item>
-            <Descriptions.Item label="S3 Upload Prefix">{selectedJob.s3_upload_prefix}</Descriptions.Item>
-            <Descriptions.Item label="Incremental">{selectedJob.is_incremental ? 'Yes' : 'No'}</Descriptions.Item>
-            <Descriptions.Item label="Status">
-              <Tag color={statusColors[selectedJob.status]}>{selectedJob.status}</Tag>
-            </Descriptions.Item>
-            <Descriptions.Item label="Pending Count">{selectedJob.pending_count}</Descriptions.Item>
-            <Descriptions.Item label="Running Count">{selectedJob.running_count}</Descriptions.Item>
-            <Descriptions.Item label="Success Count">{selectedJob.success_count}</Descriptions.Item>
-            <Descriptions.Item label="Failed Count">{selectedJob.failed_count}</Descriptions.Item>
-            <Descriptions.Item label="Created At">{selectedJob.created_at}</Descriptions.Item>
-            <Descriptions.Item label="Updated At">{selectedJob.updated_at}</Descriptions.Item>
-          </Descriptions>
+          <div style={{ border: '1px solid #f0f0f0' }}>
+            {[
+              { label: 'Job ID', value: selectedJob.id },
+              { label: 'Metadata ID', value: selectedJob.metadata_id },
+              { label: 'S3 Prefix', value: selectedJob.s3_prefix, fullWidth: true },
+              { label: 'S3 Upload Prefix', value: selectedJob.s3_upload_prefix, fullWidth: true },
+              { label: 'Is Incremental', value: selectedJob.is_incremental ? 'Yes' : 'No' },
+              { label: 'Periodic Interval', value: selectedJob.periodic_interval > 0 ? `${selectedJob.periodic_interval}s` : 'N/A' },
+              { label: 'Status', value: <Tag color={statusColors[selectedJob.status]}>{selectedJob.status}</Tag> },
+              { label: 'Total Count', value: selectedJob.total_count },
+              { label: 'Pending Count', value: selectedJob.pending_count },
+              { label: 'Running Count', value: selectedJob.running_count },
+              { label: 'Success Count', value: selectedJob.success_count },
+              { label: 'Failed Count', value: selectedJob.failed_count },
+              { label: 'Created At', value: selectedJob.created_at },
+              { label: 'Updated At', value: selectedJob.updated_at },
+            ].map((item, index, arr) => (
+              <div 
+                key={index}
+                style={{ 
+                  display: 'flex', 
+                  borderBottom: (index < arr.length - 1) ? '1px solid #f0f0f0' : 'none',
+                  flexWrap: 'wrap'
+                }}
+              >
+                <div style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  fontWeight: 'bold',
+                  background: '#fafafa',
+                  borderRight: '1px solid #f0f0f0',
+                  flex: '0 0 150px'
+                }}>
+                  {item.label}
+                </div>
+                <div style={{
+                  width: '100%',
+                  padding: '12px 16px',
+                  flex: 1,
+                  overflowWrap: 'break-word',
+                  wordWrap: 'break-word',
+                }}>
+                  {item.value}
+                </div>
+              </div>
+            ))}
+          </div>
         )}
       </Modal>
     </div>

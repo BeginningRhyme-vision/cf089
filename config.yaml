@@ -23,7 +23,6 @@ security:
 worker:
   max_threads: 1024
   proxy_url: "http://5851b070f69-zone-adam435032:t5gNbn29fwu2Rlhc@novabpm-ins-8sk4v7s.novada.pro:7788"
-  proxy_list: "http://5851b070f69-zone-adam435032:t5gNbn29fwu2Rlhc@novabpm-ins-8sk4v7s.novada.pro:7788"
 
 storage:
   transfer_service_url: "http://r2-worker.cf022.workers.dev/initiate-copy"

@@ -1,0 +1,17 @@
+name: Delivery Pipeline
+
+on:
+  push:
+    branches: [ "main","dev" ]
+    tags: 
+      - "v*"
+    paths:
+      - 'backend/**'
+      - 'frontend/**'
+      - '.github/workflows/delivery-pipeline.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    uses: unbound-future/github-actions/.github/workflows/unbound-future-admin-delivery-pipeline.yml@main
+    secrets: inherit

@@ -1,5 +1,5 @@
 # Registry Config
-REGISTRY := 209.222.101.19:5000
+REGISTRY := image.unboundfuture.ai
 TAG := latest
 
 # Image Names
@@ -7,16 +7,14 @@ IMAGE_BACKEND := $(REGISTRY)/unbound-backend:$(TAG)
 IMAGE_FRONTEND := $(REGISTRY)/unbound-frontend:$(TAG)
 IMAGE_DOWNLOADER := $(REGISTRY)/unbound-worker-downloader:$(TAG)
 IMAGE_TRANSFER := $(REGISTRY)/unbound-worker-transfer:$(TAG)
-IMAGE_FFMPEG := $(REGISTRY)/unbound-worker-ffmpeg:$(TAG)
-IMAGE_PROXY_TESTER := $(REGISTRY)/unbound-proxy-tester:$(TAG)
 
-.PHONY: all build push build-backend push-backend build-frontend push-frontend build-downloader push-downloader build-transfer push-transfer build-ffmpeg push-ffmpeg build-proxy-tester push-proxy-tester
+.PHONY: all build push build-backend push-backend build-frontend push-frontend build-downloader push-downloader build-transfer push-transfer
 
 all: build push
 
 # --- Build ---
 
-build: build-backend build-frontend build-downloader build-transfer build-ffmpeg build-proxy-tester
+build: build-backend build-frontend build-downloader build-transfer
 
 build-backend:
 	docker build -t $(IMAGE_BACKEND) backend/go-app
@@ -25,20 +23,14 @@ build-frontend:
 	docker build -t $(IMAGE_FRONTEND) frontend
 
 build-downloader:
-	docker build -t $(IMAGE_DOWNLOADER) -f backend/worker_downloader/Dockerfile backend
+	docker build -t $(IMAGE_DOWNLOADER) backend/worker_downloader
 
 build-transfer:
 	docker build -t $(IMAGE_TRANSFER) backend/worker_transfer
 
-build-ffmpeg:
-	docker build -t $(IMAGE_FFMPEG) backend/worker_ffmpeg
-
-build-proxy-tester:
-	docker build -t $(IMAGE_PROXY_TESTER) -f backend/proxy_tester/Dockerfile .
-
 # --- Push ---
 
-push: push-backend push-frontend push-downloader push-transfer push-ffmpeg push-proxy-tester
+push: push-backend push-frontend push-downloader push-transfer
 
 push-backend:
 	docker push $(IMAGE_BACKEND)
@@ -51,12 +43,6 @@ push-downloader:
 
 push-transfer:
 	docker push $(IMAGE_TRANSFER)
-
-push-ffmpeg:
-	docker push $(IMAGE_FFMPEG)
-
-push-proxy-tester:
-	docker push $(IMAGE_PROXY_TESTER)
 
 # --- Deploy (Optional K8s helpers) ---
 

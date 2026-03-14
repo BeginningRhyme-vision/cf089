@@ -456,7 +456,7 @@ func callTransferService(srcUrl, dstUrl string, size, offset int64, uploadID str
 	// Payload matches r2s3 / downloader logic
 	// But `r2s3` sent `r2Key` and `s3Url`.
 	// We are sending Presigned URLs for both.
-
+	
 	payload := map[string]interface{}{
 		"r2Key":      srcUrl,
 		"s3Url":      dstUrl,
@@ -465,43 +465,28 @@ func callTransferService(srcUrl, dstUrl string, size, offset int64, uploadID str
 		"uploadId":   uploadID,
 		"partNumber": partNum,
 	}
-
+	
 	body, _ := json.Marshal(payload)
-
-	var lastErr error
+	
 	// Retry
-	for i := 0; i < 3; i++ {
+	for i:=0; i<3; i++ {
 		resp, err := http.Post(cfg.Storage.TransferServiceURL, "application/json", bytes.NewBuffer(body))
 		if err != nil {
-			lastErr = fmt.Errorf("http post failed: %v", err)
-			log.Printf("Transfer service call attempt %d failed: %v", i+1, err)
-			time.Sleep(1 * time.Second)
+			time.Sleep(1*time.Second)
 			continue
 		}
-
+		defer resp.Body.Close()
+		
 		if resp.StatusCode == 200 {
 			var res map[string]interface{}
-			err := json.NewDecoder(resp.Body).Decode(&res)
-			resp.Body.Close()
-			if err != nil {
-				lastErr = fmt.Errorf("failed to decode response: %v", err)
-				continue
-			}
+			json.NewDecoder(resp.Body).Decode(&res)
 			if etag, ok := res["etag"].(string); ok {
 				return etag, nil
 			}
-			lastErr = fmt.Errorf("missing etag in response")
-		} else {
-			// Read error body for context
-			buf := new(bytes.Buffer)
-			buf.ReadFrom(resp.Body)
-			resp.Body.Close()
-			lastErr = fmt.Errorf("status %d: %s", resp.StatusCode, buf.String())
-			log.Printf("Transfer service call attempt %d returned error: %v", i+1, lastErr)
 		}
-		time.Sleep(1 * time.Second)
+		time.Sleep(1*time.Second)
 	}
-	return "", fmt.Errorf("service call failed after retries: %v", lastErr)
+	return "", fmt.Errorf("service call failed")
 }
 
 func getBucketFromEndpoint(endpoint string) string {
@@ -707,9 +692,7 @@ func updateTaskStatus(t TransferTask, status string, msg string) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		buf := new(bytes.Buffer)
-		buf.ReadFrom(resp.Body)
-		log.Printf("Failed to update status for task %d: status %d, body: %s", t.ID, resp.StatusCode, buf.String())
+		log.Printf("Failed to update status for task %d: status %d", t.ID, resp.StatusCode)
 	}
 }
 
