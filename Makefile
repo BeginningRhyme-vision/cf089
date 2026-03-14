@@ -1,5 +1,5 @@
 # Registry Config
-REGISTRY := image.unboundfuture.ai
+REGISTRY := 209.222.101.19:5000
 TAG := latest
 
 # Image Names
