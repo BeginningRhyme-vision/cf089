@@ -892,6 +892,8 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 	var partsMu sync.Mutex
 	var wg sync.WaitGroup
 	errAbort := make(chan error, 1)
+	missingEtagParts := make(map[int32]struct{})
+	var missingMu sync.Mutex
 
 	// 使用可配置的并发chunk数量（默认30，可通过环境变量 DOWNLOAD_CONCURRENT_CHUNKS_PER_FILE 配置）
 	sem := make(chan struct{}, ConcurrentChunksPerFile)
@@ -941,6 +943,13 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 
 			etag, err := uploadChunkExternal(sourceURL, key, uploadID, pNum, s, e)
 			if err != nil {
+				if isMissingEtagRecoverable(err) {
+					missingMu.Lock()
+					missingEtagParts[pNum] = struct{}{}
+					missingMu.Unlock()
+					log.Printf("[CHUNK RECOVERABLE] Part %d missing etag, defer to final recovery: %v", pNum, err)
+					return
+				}
 				log.Printf("[CHUNK ERROR] Part %d failed: %v", pNum, err)
 				select {
 				case errAbort <- err:
@@ -972,6 +981,19 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 		})
 		return err
 	default:
+	}
+
+	if len(completedParts) != numParts {
+		recoveredParts, recoverErr := waitAndCollectCompletedParts(bucketName, key, uploadID, numParts, 2*time.Minute)
+		if recoverErr == nil {
+			completedParts = recoveredParts
+			log.Printf("[UPLOAD RECOVERY] recovered all parts via ListParts: %d/%d", len(completedParts), numParts)
+		} else {
+			missingMu.Lock()
+			missingCount := len(missingEtagParts)
+			missingMu.Unlock()
+			log.Printf("[UPLOAD RECOVERY] failed to recover all parts (current=%d expected=%d missing_marked=%d): %v", len(completedParts), numParts, missingCount, recoverErr)
+		}
 	}
 
 	// Verify all parts were uploaded
@@ -1063,6 +1085,67 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 	}
 
 	return nil
+}
+
+func isMissingEtagRecoverable(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "2xx but missing etag")
+}
+
+func waitAndCollectCompletedParts(bucket, key, uploadID string, expectedParts int, timeout time.Duration) ([]types.CompletedPart, error) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		paginator := s3.NewListPartsPaginator(s3Client, &s3.ListPartsInput{
+			Bucket:   aws.String(bucket),
+			Key:      aws.String(key),
+			UploadId: aws.String(uploadID),
+		})
+		partETagMap := make(map[int32]string, expectedParts)
+		var pageErr error
+		for paginator.HasMorePages() {
+			out, err := paginator.NextPage(ctx)
+			if err != nil {
+				pageErr = err
+				break
+			}
+			for _, part := range out.Parts {
+				if part.PartNumber != nil && part.ETag != nil {
+					etag := strings.Trim(*part.ETag, `"`)
+					if etag != "" {
+						partETagMap[*part.PartNumber] = etag
+					}
+				}
+			}
+		}
+		cancel()
+		if pageErr == nil {
+			if len(partETagMap) >= expectedParts {
+				result := make([]types.CompletedPart, 0, expectedParts)
+				ok := true
+				for i := 1; i <= expectedParts; i++ {
+					pn := int32(i)
+					etag, exists := partETagMap[pn]
+					if !exists {
+						ok = false
+						break
+					}
+					result = append(result, types.CompletedPart{
+						ETag:       aws.String(etag),
+						PartNumber: aws.Int32(pn),
+					})
+				}
+				if ok {
+					return result, nil
+				}
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+	return nil, fmt.Errorf("collect parts timeout: expected=%d", expectedParts)
 }
 
 // listIncompleteMultipartUploads 列出所有未完成的多部分上传
@@ -1216,15 +1299,31 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 	requestLogJSON, _ := json.MarshalIndent(requestLog, "", "  ")
 	log.Printf("[REQUEST DEBUG] Chunk %d - Request details:\n%s", partNum, string(requestLogJSON))
 
-	// 只尝试一次上传，不重试
-	resp, err := externalClient.Post(cfg.Storage.DownloadServiceURL, "application/json", bytes.NewBuffer(body))
-	if err != nil {
-		return "", fmt.Errorf("failed to upload chunk %d: HTTP request failed: %v", partNum, err)
+	var (
+		resp      *http.Response
+		err       error
+		bodyBytes []byte
+	)
+	for attempt := 1; attempt <= 3; attempt++ {
+		resp, err = externalClient.Post(cfg.Storage.DownloadServiceURL, "application/json", bytes.NewBuffer(body))
+		if err != nil {
+			if attempt == 3 {
+				return "", fmt.Errorf("failed to upload chunk %d: HTTP request failed after %d attempts: %v", partNum, attempt, err)
+			}
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
+		bodyBytes, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode >= 500 || resp.StatusCode == 429 {
+			if attempt == 3 {
+				break
+			}
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
+		break
 	}
-
-	// 读取响应体（只能读取一次）
-	bodyBytes, _ := io.ReadAll(resp.Body)
-	resp.Body.Close()
 
 	etag := ""
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
@@ -1269,12 +1368,7 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 			log.Printf("[CHUNK WAIT] Part %d: waiting 1s before ListParts attempt", partNum)
 			time.Sleep(1 * time.Second)
 
-			// 等待30秒，给上传服务时间将 part 提交到 R2
-			log.Printf("[CHUNK WAIT] Part %d: waiting 30s for upload service to commit part to R2", partNum)
-			time.Sleep(30 * time.Second)
-
-			// 增大 ListParts 超时时间到 60 秒
-			lookupCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			lookupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			etag2, lerr := fetchPartETag(lookupCtx, bucketName, key, uploadID, partNum)
 			cancel()
 			if lerr == nil && etag2 != "" {
@@ -1312,8 +1406,7 @@ func fetchPartETag(ctx context.Context, bucket, key, uploadID string, partNum in
 	// 为避免对 R2 造成过高压力，这里做一个"温和"的短轮询：
 	// - 全局并发上限：3（listPartsSem）
 	// - 每个 part 最多 3 次尝试，退避时间从1秒起步（1s, 2s, 3s），总等待时间约 <= 10 秒
-	start := time.Now()
-	maxAttempts := 3
+	maxAttempts := 8
 	var lastErr error
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -1361,15 +1454,14 @@ func fetchPartETag(ctx context.Context, bucket, key, uploadID string, partNum in
 			return etag, nil
 		}
 
-		// 如果已经超时或到达最大重试次数，返回最后一次错误
-		if time.Since(start) > 10*time.Second || attempt == maxAttempts {
+		if attempt == maxAttempts {
 			if lastErr != nil {
 				return "", fmt.Errorf("part %d not found in ListParts after %d attempts: %w", partNum, attempt, lastErr)
 			}
 			return "", fmt.Errorf("part %d not found in ListParts after %d attempts", partNum, attempt)
 		}
 
-		// 退避时间从1秒起步：1s, 2s, 3s
+		// 退避时间：1s, 2s, 3s，之后固定3s
 		sleep := 1 * time.Second
 		if attempt == 2 {
 			sleep = 2 * time.Second
