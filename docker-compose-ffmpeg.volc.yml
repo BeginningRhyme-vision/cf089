@@ -11,7 +11,7 @@ services:
       - ZONE=cn-shanghai
       - FFMPEG_QUEUE_PREFIX=ffmpeg-volc
       - FFMPEG_REQUIRE_PRIVATE_ENDPOINT=true
-      - FFMPEG_INTERNAL_ENDPOINT_KEYWORDS=internal,intranet,private,privatelink,vpc,aliyuncs,ivolces,tos-s3
+      - FFMPEG_INTERNAL_ENDPOINT_KEYWORDS=internal,intranet,private,privatelink,vpc,ivolces,tos-s3
     restart: always
 
   ffmpeg-worker:
@@ -22,5 +22,8 @@ services:
       - REDIS_URL=${REDIS_URL:-redis://:redis_password@YOUR_REDIS_IP:6379/0}
       - MAX_THREADS=${MAX_THREADS:-32}
       - FFMPEG_QUEUE_PREFIX=ffmpeg-volc
-    shm_size: "40gb"
+      - FFMPEG_TEMP_DIR=${FFMPEG_TEMP_DIR:-/data/ffmpeg-tmp}
+    volumes:
+      - ${FFMPEG_HOST_TEMP_DIR:-/data/ffmpeg-tmp}:${FFMPEG_TEMP_DIR:-/data/ffmpeg-tmp}
+    shm_size: "${FFMPEG_SHM_SIZE:-8gb}"
     restart: always

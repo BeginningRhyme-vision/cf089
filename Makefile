@@ -7,14 +7,15 @@ IMAGE_BACKEND := $(REGISTRY)/unbound-backend:$(TAG)
 IMAGE_FRONTEND := $(REGISTRY)/unbound-frontend:$(TAG)
 IMAGE_DOWNLOADER := $(REGISTRY)/unbound-worker-downloader:$(TAG)
 IMAGE_TRANSFER := $(REGISTRY)/unbound-worker-transfer:$(TAG)
+IMAGE_FFMPEG := $(REGISTRY)/unbound-worker-ffmpeg:$(TAG)
 
-.PHONY: all build push build-backend push-backend build-frontend push-frontend build-downloader push-downloader build-transfer push-transfer
+.PHONY: all build push build-backend push-backend build-frontend push-frontend build-downloader push-downloader build-transfer push-transfer build-ffmpeg push-ffmpeg
 
 all: build push
 
 # --- Build ---
 
-build: build-backend build-frontend build-downloader build-transfer
+build: build-backend build-frontend build-downloader build-transfer build-ffmpeg
 
 build-backend:
 	docker build -t $(IMAGE_BACKEND) backend/go-app
@@ -28,9 +29,12 @@ build-downloader:
 build-transfer:
 	docker build -t $(IMAGE_TRANSFER) backend/worker_transfer
 
+build-ffmpeg:
+	docker build -t $(IMAGE_FFMPEG) -f backend/worker_ffmpeg/Dockerfile backend/worker_ffmpeg
+
 # --- Push ---
 
-push: push-backend push-frontend push-downloader push-transfer
+push: push-backend push-frontend push-downloader push-transfer push-ffmpeg
 
 push-backend:
 	docker push $(IMAGE_BACKEND)
@@ -43,6 +47,9 @@ push-downloader:
 
 push-transfer:
 	docker push $(IMAGE_TRANSFER)
+
+push-ffmpeg:
+	docker push $(IMAGE_FFMPEG)
 
 # --- Deploy (Optional K8s helpers) ---
 

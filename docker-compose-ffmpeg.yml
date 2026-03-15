@@ -6,17 +6,17 @@ services:
     command: ["ffmpeg_scanner"]
     environment:
       # 请修改为后端 API 的实际 IP 地址 (例如 http://209.222.101.19:8080/api)
-      - BACKEND_API_URL=http://YOUR_BACKEND_IP:8080/api
+      - BACKEND_API_URL=${BACKEND_API_URL:-http://YOUR_BACKEND_IP:8080/api}
       # 请修改为 Redis 的实际 IP 地址，并带密码 (例如 redis://:redis_password@209.222.101.19:6379/0)
-      - REDIS_URL=redis://:redis_password@YOUR_REDIS_IP:6379/0
-      # 云厂商路由过滤（scanner 使用）
-      - PROVIDER=aliyun
-      - ZONE=cn-hangzhou
+      - REDIS_URL=${REDIS_URL:-redis://:redis_password@YOUR_REDIS_IP:6379/0}
+      # 置空表示不过滤云厂商和区域，可拉取全量 FFmpeg 任务
+      - PROVIDER=${PROVIDER:-}
+      - ZONE=${ZONE:-}
       # 队列前缀隔离（scanner/worker 必须一致）
-      - FFMPEG_QUEUE_PREFIX=ffmpeg-aliyun
+      - FFMPEG_QUEUE_PREFIX=${FFMPEG_QUEUE_PREFIX:-ffmpeg-global}
       # 强制要求 endpoint 为内网地址（scanner 生效）
-      - FFMPEG_REQUIRE_PRIVATE_ENDPOINT=true
-      - FFMPEG_INTERNAL_ENDPOINT_KEYWORDS=internal,intranet,private,privatelink,vpc,aliyuncs,ivolces,tos-s3
+      - FFMPEG_REQUIRE_PRIVATE_ENDPOINT=${FFMPEG_REQUIRE_PRIVATE_ENDPOINT:-true}
+      - FFMPEG_INTERNAL_ENDPOINT_KEYWORDS=${FFMPEG_INTERNAL_ENDPOINT_KEYWORDS:-internal,intranet,private,privatelink,vpc,aliyuncs,oss-,ivolces,tos-s3}
     restart: always
 
   ffmpeg-worker:
@@ -24,12 +24,14 @@ services:
     command: ["ffmpeg_worker"]
     environment:
       # 请修改为后端 API 的实际 IP 地址
-      - BACKEND_API_URL=http://YOUR_BACKEND_IP:8080/api
+      - BACKEND_API_URL=${BACKEND_API_URL:-http://YOUR_BACKEND_IP:8080/api}
       # 请修改为 Redis 的实际 IP 地址，并带密码
-      - REDIS_URL=redis://:redis_password@YOUR_REDIS_IP:6379/0
-      - MAX_THREADS=32
+      - REDIS_URL=${REDIS_URL:-redis://:redis_password@YOUR_REDIS_IP:6379/0}
+      - MAX_THREADS=${MAX_THREADS:-32}
       # 队列前缀隔离（scanner/worker 必须一致）
-      - FFMPEG_QUEUE_PREFIX=ffmpeg-aliyun
-    # FFmpeg 需要较大的共享内存
-    shm_size: "40gb"
+      - FFMPEG_QUEUE_PREFIX=${FFMPEG_QUEUE_PREFIX:-ffmpeg-global}
+      - FFMPEG_TEMP_DIR=${FFMPEG_TEMP_DIR:-/data/ffmpeg-tmp}
+    volumes:
+      - ${FFMPEG_HOST_TEMP_DIR:-/data/ffmpeg-tmp}:${FFMPEG_TEMP_DIR:-/data/ffmpeg-tmp}
+    shm_size: "${FFMPEG_SHM_SIZE:-8gb}"
     restart: always

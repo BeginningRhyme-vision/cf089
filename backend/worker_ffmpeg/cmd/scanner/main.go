@@ -39,9 +39,8 @@ var (
 	failedQueue string
 	dedupPrefix string
 	permFailureKey string
+	providerGuard string
 	requirePrivateEndpoint bool
-	internalEndpointKeywords []string
-
 	PagesScanned = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "ffmpeg_scanner_pages_scanned_total",
 		Help: "Total number of S3 pages scanned",
@@ -177,11 +176,17 @@ func initQueueConfig() {
 	dedupPrefix = fmt.Sprintf("queue:%s:dedup:", queuePrefix)
 	permFailureKey = fmt.Sprintf("%s:task:perm_failure", queuePrefix)
 	log.Printf("FFmpeg queue config initialized: prefix=%s task=%s failed=%s", queuePrefix, taskQueue, failedQueue)
-	requirePrivateEndpoint = strings.EqualFold(strings.TrimSpace(os.Getenv("FFMPEG_REQUIRE_PRIVATE_ENDPOINT")), "true")
+	privateFlag := strings.TrimSpace(os.Getenv("FFMPEG_REQUIRE_PRIVATE_ENDPOINT"))
+	if privateFlag == "" {
+		requirePrivateEndpoint = true
+	} else {
+		requirePrivateEndpoint = strings.EqualFold(privateFlag, "true")
+	}
 	rawKeywords := strings.TrimSpace(os.Getenv("FFMPEG_INTERNAL_ENDPOINT_KEYWORDS"))
 	if rawKeywords == "" {
 		rawKeywords = "internal,intranet,private,privatelink,vpc,aliyuncs,ivolces,tos-s3"
 	}
+	providerGuard = strings.ToLower(strings.TrimSpace(os.Getenv("PROVIDER")))
 	internalEndpointKeywords = nil
 	for _, k := range strings.Split(rawKeywords, ",") {
 		k = strings.ToLower(strings.TrimSpace(k))
@@ -268,26 +273,36 @@ func getPendingJobs() ([]common.FfmpegJob, error) {
 }
 
 func isAllowedEndpoint(endpoint string) bool {
-	if !requirePrivateEndpoint {
-		return true
-	}
 	u, err := url.Parse(strings.TrimSpace(endpoint))
 	if err != nil || u.Hostname() == "" {
 		return false
 	}
 	host := strings.ToLower(u.Hostname())
+	privateOK := false
 	if host == "localhost" {
-		return true
+		privateOK = true
 	}
 	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsPrivate() || ip.IsLoopback()
+		privateOK = ip.IsPrivate() || ip.IsLoopback()
 	}
-	for _, k := range internalEndpointKeywords {
-		if strings.Contains(host, k) {
-			return true
+	if !privateOK {
+		for _, k := range internalEndpointKeywords {
+			if strings.Contains(host, k) {
+				privateOK = true
+				break
+			}
 		}
 	}
-	return false
+	if requirePrivateEndpoint && !privateOK {
+		return false
+	}
+	if providerGuard == "aliyun" || providerGuard == "aliyuncs" || providerGuard == "oss" {
+		return strings.Contains(host, "aliyuncs.com") && strings.Contains(host, "internal")
+	}
+	if providerGuard == "ivolces" || providerGuard == "volcengine" || providerGuard == "volc" || providerGuard == "tos" {
+		return strings.Contains(host, "ivolces.com") && strings.Contains(host, "tos-s3-")
+	}
+	return true
 }
 
 func updateJobStatus(jobID int64, status string, lastScanTime *time.Time, msg string, totalCount *int) error {

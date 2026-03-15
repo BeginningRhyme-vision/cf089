@@ -108,8 +108,17 @@ func main() {
 		http.ListenAndServe(":9094", nil)
 	}()
 
-	// Determine TempDir
-	CurrentTempDir = DefaultTempDir
+	tempDir := strings.TrimSpace(os.Getenv("FFMPEG_TEMP_DIR"))
+	if tempDir != "" {
+		if err := os.MkdirAll(tempDir, 0755); err != nil {
+			log.Printf("Failed to initialize FFMPEG_TEMP_DIR=%s: %v", tempDir, err)
+		} else {
+			CurrentTempDir = tempDir
+		}
+	}
+	if CurrentTempDir == "" {
+		CurrentTempDir = DefaultTempDir
+	}
 	if _, err := os.Stat(CurrentTempDir); os.IsNotExist(err) {
 		CurrentTempDir = os.TempDir()
 		log.Printf("%s not found, using %s", DefaultTempDir, CurrentTempDir)
