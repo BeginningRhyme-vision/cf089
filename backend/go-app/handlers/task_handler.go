@@ -546,7 +546,6 @@ func BatchUpdate(c *gin.Context) {
 	}
 
 	pipe := database.RDB.Pipeline()
-	successSizeIncrements := make(map[int64]int64)
 
 	for i, u := range updates {
 		val := existingJSONs[i]
