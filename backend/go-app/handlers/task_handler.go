@@ -901,34 +901,31 @@ func AcquireTasks(c *gin.Context) {
 		}
 		
 		for len(tasks) < req.Limit {
-			// Use BLPOP with short timeout per queue to avoid CROSSSLOT error in Redis cluster
-			// Try each queue sequentially to ensure compatibility with Redis cluster mode
-			// BLPOP is atomic and prevents multiple workers from getting the same task
+			// 使用非阻塞 LPOP 轮询队列，避免“machine 专属队列为空、all 队列有数据”时每次都被 1s 阻塞
+			// 这样可以显著降低 /tasks/acquire 的尾延迟，避免 worker 10s read timeout
+			// LPOP 同样是原子操作，不会出现多 worker 重复弹出同一个任务
 			var idStr string
 			var queueName string
 			var found bool
 
-			// Try each queue sequentially.
-			// Note: go-redis BLPOP minimal supported timeout is 1s (sub-second will be truncated and logged).
+			// 顺序尝试队列：先 machine 队列，再 all 队列
 			for _, qName := range queueNames {
-				log.Printf("[AcquireTasks] Attempting BLPOP from queue %s (worker: %s, current tasks: %d)", qName, req.WorkerID, len(tasks))
-				result, err := database.RDB.BLPop(ctx, 1*time.Second, qName).Result()
-			if err == redis.Nil {
-					// Timeout or queue empty, try next queue
-					continue
-			}
-			if err != nil {
-					// Check if it's a CROSSSLOT error (shouldn't happen with single queue, but log it)
-					log.Printf("[AcquireTasks] BLPOP error from queue %s: %v (worker: %s)", qName, err, req.WorkerID)
+				id, err := database.RDB.LPop(ctx, qName).Result()
+				if err == redis.Nil {
+					// 队列为空，尝试下一个队列
 					continue
 				}
-				if len(result) >= 2 {
-					queueName = result[0] // 队列名
-					idStr = result[1]     // task ID
-					found = true
-					log.Printf("[AcquireTasks] Popped task %s from retry queue %s (worker: %s)", idStr, queueName, req.WorkerID)
+				if err != nil {
+					log.Printf("[AcquireTasks] LPOP error from queue %s: %v (worker: %s)", qName, err, req.WorkerID)
+					continue
+				}
+				queueName = qName
+				idStr = id
+				found = true
+				if len(tasks) == 0 {
+					log.Printf("[AcquireTasks] Popped first task %s from retry queue %s (worker: %s)", idStr, queueName, req.WorkerID)
+				}
 				break
-			}
 			}
 
 			if !found {
