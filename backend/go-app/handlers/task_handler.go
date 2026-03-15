@@ -19,6 +19,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -1559,6 +1560,17 @@ func addShardedTransferTasks(jobID int64, inputs []TransferTaskInput) (int, erro
 		return 0, err
 	}
 
+	var totalSizeBytes int64
+	for _, input := range newInputs {
+		if input.Size > 0 {
+			totalSizeBytes += input.Size
+		}
+	}
+	if totalSizeBytes > 0 {
+		database.DB.Model(&models.TransferJob{}).Where("job_id = ?", jobID).
+			UpdateColumn("total_size_bytes", gorm.Expr("total_size_bytes + ?", totalSizeBytes))
+	}
+
 	return len(tasks), nil
 }
 
@@ -1655,6 +1667,17 @@ func addLegacyTransferTasks(jobID int64, inputs []TransferTaskInput) (int, error
 	_, err = pipe.Exec(ctx)
 	if err != nil {
 		return 0, err
+	}
+
+	var totalSizeBytes int64
+	for _, input := range newInputs {
+		if input.Size > 0 {
+			totalSizeBytes += input.Size
+		}
+	}
+	if totalSizeBytes > 0 {
+		database.DB.Model(&models.TransferJob{}).Where("job_id = ?", jobID).
+			UpdateColumn("total_size_bytes", gorm.Expr("total_size_bytes + ?", totalSizeBytes))
 	}
 
 	return len(tasks), nil
@@ -2224,6 +2247,20 @@ func AddFfmpegTasksToJob(jobID int64, tasks []models.FfmpegTask) (int, error) {
 
 		return 0, err
 
+	}
+
+	var totalSizeBytes int64
+	for _, task := range tasks {
+		if task.VideoSize > 0 {
+			totalSizeBytes += task.VideoSize
+		}
+		if task.AudioSize > 0 {
+			totalSizeBytes += task.AudioSize
+		}
+	}
+	if totalSizeBytes > 0 {
+		database.DB.Model(&models.FfmpegJob{}).Where("id = ?", jobID).
+			UpdateColumn("total_size_bytes", gorm.Expr("total_size_bytes + ?", totalSizeBytes))
 	}
 
 	return len(tasks), nil

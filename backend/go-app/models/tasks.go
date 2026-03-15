@@ -52,6 +52,8 @@ type FfmpegTask struct {
 		IsIncremental  bool      `json:"is_incremental"`
 		Status         string    `json:"status"` // PENDING, RUNNING, COMPLETED, FAILED
 		ErrorMessage   string    `json:"error_message"`
+	VideoSize      int64     `json:"video_size"`
+	AudioSize      int64     `json:"audio_size"`
 	WorkerID     string    `json:"worker_id"`
 	StartedAt    time.Time `json:"started_at"`
 	CompletedAt  time.Time `json:"completed_at"`

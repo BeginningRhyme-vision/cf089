@@ -61,6 +61,7 @@ type TransferJob struct {
 	RunningCount     int        `gorm:"default:0" json:"running_count"`
 	SuccessCount     int        `gorm:"default:0" json:"success_count"`
 	FailedCount      int        `gorm:"default:0" json:"failed_count"`
+	TotalSizeBytes   int64      `gorm:"default:0" json:"total_size_bytes"`
 	ResultMessage    string     `gorm:"type:text" json:"result_message"`
 	RedisCleaned     bool       `gorm:"default:false" json:"redis_cleaned"`
 	CreatedAt        time.Time  `gorm:"autoCreateTime" json:"created_at"`
@@ -85,6 +86,7 @@ type YoutubeJob struct {
 	RunningCount           int       `gorm:"default:0" json:"running_count"`
 	SuccessCount           int       `gorm:"default:0" json:"success_count"`
 	FailedCount            int       `gorm:"default:0" json:"failed_count"`
+	TotalSizeBytes         int64     `gorm:"default:0" json:"total_size_bytes"`
 	CreatedAt              time.Time `gorm:"autoCreateTime" json:"created_at"`
 }
 
@@ -106,6 +108,7 @@ type FfmpegJob struct {
 	RunningCount     int        `gorm:"default:0" json:"running_count"`
 	SuccessCount     int        `gorm:"default:0" json:"success_count"`
 	FailedCount      int        `gorm:"default:0" json:"failed_count"`
+	TotalSizeBytes   int64      `gorm:"default:0" json:"total_size_bytes"`
 	CreatedAt        time.Time  `gorm:"autoCreateTime" json:"created_at"`
 	UpdatedAt        time.Time  `gorm:"autoUpdateTime" json:"updated_at"`
 

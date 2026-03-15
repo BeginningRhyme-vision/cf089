@@ -13,6 +13,18 @@ const cellStyle = {
   display: 'inline-block' 
 };
 
+const formatBytes = (bytes) => {
+  if (!bytes || bytes <= 0) return '-';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return `${value.toFixed(index === 0 ? 0 : 2)} ${units[index]}`;
+};
+
 const JobList = () => {
   const [jobs, setJobs] = useState([]);
   const [metadataList, setMetadataList] = useState([]);
@@ -162,6 +174,14 @@ const JobList = () => {
       key: 'status',
       render: (status) => <Tag color={statusColors[status]}>{status}</Tag>
     },
+    {
+      title: 'Size',
+      dataIndex: 'total_size_bytes',
+      key: 'total_size_bytes',
+      width: 120,
+      render: (value) => formatBytes(value),
+      responsive: ['md']
+    },
     { 
       title: 'Action',
       key: 'action',
@@ -300,6 +320,7 @@ const JobList = () => {
               { label: 'Incremental', value: selectedJob.is_incremental ? 'Yes' : 'No' },
               ...(selectedJob.is_incremental ? [{ label: 'Periodic Interval', value: `${selectedJob.periodic_interval} s` }] : []),
               { label: 'Status', value: <Tag color={statusColors[selectedJob.status]}>{selectedJob.status}</Tag> },
+              { label: 'Total Size', value: formatBytes(selectedJob.total_size_bytes) },
               { label: 'Total Count', value: selectedJob.total_count },
               { label: 'Pending Count', value: selectedJob.pending_count },
               { label: 'Running Count', value: selectedJob.running_count },

@@ -14,6 +14,18 @@ const cellStyle = {
   display: 'inline-block' 
 };
 
+const formatBytes = (bytes) => {
+  if (!bytes || bytes <= 0) return '-';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let index = 0;
+  while (value >= 1024 && index < units.length - 1) {
+    value /= 1024;
+    index += 1;
+  }
+  return `${value.toFixed(index === 0 ? 0 : 2)} ${units[index]}`;
+};
+
 const YoutubeJobList = () => {
   const [jobs, setJobs] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -369,6 +381,14 @@ const YoutubeJobList = () => {
       dataIndex: 'failed_count', 
       key: 'failed_count',
       width: 80,
+      responsive: ['md']
+    },
+    {
+      title: 'Size',
+      dataIndex: 'total_size_bytes',
+      key: 'total_size_bytes',
+      width: 120,
+      render: (value) => formatBytes(value),
       responsive: ['md']
     },
     { 

@@ -1055,6 +1055,7 @@ func ListYoutubeJobs(c *gin.Context) {
 			Running  int64
 			Success  int64
 			Failed   int64
+			Size     int64
 		}
 		
 		database.DB.Model(&models.YoutubeTaskRecord{}).
@@ -1064,7 +1065,8 @@ func ListYoutubeJobs(c *gin.Context) {
 				SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END) as pending,
 				SUM(CASE WHEN status = 'RUNNING' THEN 1 ELSE 0 END) as running,
 				SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END) as success,
-				SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) as failed
+				SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) as failed,
+				SUM(COALESCE(audio_size, 0) + COALESCE(video_size, 0)) as size
 			`).
 			Scan(&counts)
 		
@@ -1073,6 +1075,7 @@ func ListYoutubeJobs(c *gin.Context) {
 		jobs[i].RunningCount = int(counts.Running)
 		jobs[i].SuccessCount = int(counts.Success)
 		jobs[i].FailedCount = int(counts.Failed)
+		jobs[i].TotalSizeBytes = counts.Size
 	}
 
 	// Count total records for pagination
@@ -1101,6 +1104,7 @@ func GetYoutubeJob(c *gin.Context) {
 		Running  int64
 		Success  int64
 		Failed   int64
+		Size     int64
 	}
 	
 	database.DB.Model(&models.YoutubeTaskRecord{}).
@@ -1110,7 +1114,8 @@ func GetYoutubeJob(c *gin.Context) {
 			SUM(CASE WHEN status = 'PENDING' THEN 1 ELSE 0 END) as pending,
 			SUM(CASE WHEN status = 'RUNNING' THEN 1 ELSE 0 END) as running,
 			SUM(CASE WHEN status = 'COMPLETED' THEN 1 ELSE 0 END) as success,
-			SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) as failed
+			SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) as failed,
+			SUM(COALESCE(audio_size, 0) + COALESCE(video_size, 0)) as size
 		`).
 		Scan(&counts)
 	
@@ -1120,6 +1125,7 @@ func GetYoutubeJob(c *gin.Context) {
 	job.RunningCount = int(counts.Running)
 	job.SuccessCount = int(counts.Success)
 	job.FailedCount = int(counts.Failed)
+	job.TotalSizeBytes = counts.Size
 	
 	c.JSON(http.StatusOK, job)
 }

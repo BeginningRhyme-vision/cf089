@@ -77,7 +77,7 @@ services:
     environment:
       - BACKEND_API_URL=http://backend-api:8080/api
       - MACHINE_NAME=yt-node-1
-      - METADATA_MAX_THREADS=8
+      - METADATA_MAX_THREADS=12
     volumes:
       - ./config/config.yaml:/app/config.yaml
     depends_on:
@@ -119,10 +119,10 @@ services:
       - BACKEND_API_URL=http://backend-api:8080/api
       - WORKER_ID=worker-downloader-go-1
       - MACHINE_NAME=yt-node-1
-      - DOWNLOAD_MAX_CONCURRENT_WORKERS=64
-      - DOWNLOAD_CONCURRENT_CHUNKS_PER_FILE=12
-      - DOWNLOAD_REQUESTS_PER_MINUTE=1200
-      - DOWNLOAD_TASK_BUFFER_SIZE=200
+      - DOWNLOAD_MAX_CONCURRENT_WORKERS=96
+      - DOWNLOAD_CONCURRENT_CHUNKS_PER_FILE=16
+      - DOWNLOAD_REQUESTS_PER_MINUTE=2400
+      - DOWNLOAD_TASK_BUFFER_SIZE=400
     volumes:
       - ./config/config.yaml:/app/config.yaml
     depends_on:
