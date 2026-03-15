@@ -71,8 +71,8 @@ services:
   worker-downloader-py:
     image: 209.222.101.19:5000/unbound-worker-downloader:latest
     build:
-      context: ./backend
-      dockerfile: worker_downloader/Dockerfile
+      context: ./backend/worker_downloader
+      dockerfile: Dockerfile
     command: ["python", "get_yt_metadata.py"]
     environment:
       - BACKEND_API_URL=http://backend-api:8080/api
@@ -112,8 +112,8 @@ services:
   worker-downloader-go:
     image: 209.222.101.19:5000/unbound-worker-downloader:latest
     build:
-      context: ./backend
-      dockerfile: worker_downloader/Dockerfile
+      context: ./backend/worker_downloader
+      dockerfile: Dockerfile
     command: ["downloader"]
     environment:
       - BACKEND_API_URL=http://backend-api:8080/api
