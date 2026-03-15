@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Table, Button, Modal, Form, Input, Select, Tag, message, Space, Popconfirm, Descriptions, Checkbox } from 'antd';
+import { Table, Button, Modal, Form, Input, Select, Tag, message, Space, Popconfirm, Descriptions, Checkbox, Alert } from 'antd';
 import { ReloadOutlined, PlusOutlined, DeleteOutlined, EyeOutlined } from '@ant-design/icons';
 import api from '../api';
 
@@ -26,6 +26,14 @@ const FfmpegJobList = () => {
     total: 0
   });
   const [form] = Form.useForm();
+
+  const getMetadataName = (record) => {
+    if (record?.metadata?.client_name) {
+      return record.metadata.client_name;
+    }
+    const matched = metadataList.find(m => m.id === record?.metadata_id);
+    return matched?.client_name || '-';
+  };
 
   const fetchJobs = async (page = 1, pageSize = 10) => {
     setLoading(true);
@@ -111,6 +119,17 @@ const FfmpegJobList = () => {
   const columns = [
     { title: 'ID', dataIndex: 'id', key: 'id', width: 60 },
     { title: 'Metadata ID', dataIndex: 'metadata_id', key: 'metadata_id', width: 100, responsive: ['md'] },
+    {
+      title: 'Metadata Name',
+      key: 'metadata_name',
+      width: 180,
+      render: (_, record) => (
+        <div style={cellStyle} title={getMetadataName(record)}>
+          {getMetadataName(record)}
+        </div>
+      ),
+      responsive: ['md']
+    },
     { 
       title: 'S3 Prefix', 
       dataIndex: 's3_prefix', 
@@ -205,6 +224,13 @@ const FfmpegJobList = () => {
         onCancel={() => setIsModalOpen(false)}
       >
         <Form form={form} layout="vertical">
+          <Alert
+            type="error"
+            showIcon
+            message="高风险提醒：请务必使用内网 Endpoint，否则会产生巨额公网流量费用。"
+            description="阿里云内网判断：Endpoint 需包含 aliyuncs.com 且 host 包含 internal。火山云内网判断：Endpoint 需包含 ivolces.com 且 host 包含 tos-s3-。"
+            style={{ marginBottom: 12 }}
+          />
           <Form.Item name="metadata_id" label="Client/Metadata" rules={[{ required: true }]}>
             <Select>
               {metadataList.map(m => (
@@ -255,6 +281,7 @@ const FfmpegJobList = () => {
             {[
               { label: 'Job ID', value: selectedJob.id },
               { label: 'Metadata ID', value: selectedJob.metadata_id },
+              { label: 'Metadata Name', value: getMetadataName(selectedJob) },
               { label: 'S3 Prefix', value: selectedJob.s3_prefix, fullWidth: true },
               { label: 'S3 Upload Prefix', value: selectedJob.s3_upload_prefix, fullWidth: true },
               { label: 'Is Incremental', value: selectedJob.is_incremental ? 'Yes' : 'No' },

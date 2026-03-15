@@ -27,6 +27,14 @@ const JobList = () => {
   });
   const [form] = Form.useForm();
 
+  const getMetadataName = (record) => {
+    if (record?.metadata?.client_name) {
+      return record.metadata.client_name;
+    }
+    const matched = metadataList.find(m => m.id === record?.metadata_id);
+    return matched?.client_name || '-';
+  };
+
   const fetchJobs = async (page = 1, pageSize = 10) => {
     setLoading(true);
     try {
@@ -117,6 +125,17 @@ const JobList = () => {
   const columns = [
     { title: 'ID', dataIndex: 'job_id', key: 'job_id', width: 60 },
     { title: 'Metadata ID', dataIndex: 'metadata_id', key: 'metadata_id', width: 100, responsive: ['md'] },
+    {
+      title: 'Metadata Name',
+      key: 'metadata_name',
+      width: 180,
+      render: (_, record) => (
+        <div style={cellStyle} title={getMetadataName(record)}>
+          {getMetadataName(record)}
+        </div>
+      ),
+      responsive: ['md']
+    },
     { 
       title: 'Source', 
       dataIndex: 'src_dir', 
@@ -272,6 +291,7 @@ const JobList = () => {
             {[
               { label: 'Job ID', value: selectedJob.job_id },
               { label: 'Client/Metadata ID', value: selectedJob.metadata_id },
+              { label: 'Client/Metadata Name', value: getMetadataName(selectedJob) },
               { label: 'Source', value: selectedJob.src_dir, fullWidth: true },
               { label: 'Destination', value: selectedJob.dst_dir, fullWidth: true },
               { label: 'Include', value: selectedJob.include || '-' },
