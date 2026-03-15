@@ -128,15 +128,23 @@ func InitPostgres(cfg *config.Config) error {
 		log.Printf("Table '%s' exists", tableName)
 	}
 
-	// 创建 job_id + id 的唯一索引（如果不存在）
-	// GORM 的 uniqueIndex 标签可能不会自动创建复合唯一索引，手动创建
-	if !DB.Migrator().HasIndex(&models.YoutubeTaskRecord{}, "idx_job_task") {
-		err = DB.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_job_task ON youtube_task_records (job_id, id)").Error
-		if err != nil {
-			log.Printf("Warning: Failed to create unique index idx_job_task: %v", err)
+	var indexDef string
+	err = DB.Raw("SELECT indexdef FROM pg_indexes WHERE schemaname = current_schema() AND tablename = 'youtube_task_records' AND indexname = 'idx_job_task'").Scan(&indexDef).Error
+	if err != nil {
+		log.Printf("Warning: Failed to query idx_job_task definition: %v", err)
+	}
+	if indexDef != "" && !strings.Contains(indexDef, "(job_id, id)") {
+		if dropErr := DB.Exec("DROP INDEX IF EXISTS idx_job_task").Error; dropErr != nil {
+			log.Printf("Warning: Failed to drop wrong idx_job_task index: %v", dropErr)
 		} else {
-			log.Println("Created unique index idx_job_task on youtube_task_records (job_id, id)")
+			log.Printf("Dropped wrong idx_job_task index definition: %s", indexDef)
 		}
+	}
+	err = DB.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_job_task ON youtube_task_records (job_id, id)").Error
+	if err != nil {
+		log.Printf("Warning: Failed to create unique index idx_job_task(job_id,id): %v", err)
+	} else {
+		log.Println("Ensured unique index idx_job_task on youtube_task_records (job_id, id)")
 	}
 
 	sqlDB, err := DB.DB()
