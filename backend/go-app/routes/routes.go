@@ -36,6 +36,7 @@ func SetupRouter() *gin.Engine {
 		{
 			auth.GET("/feishu/login_url", handlers.GetFeishuLoginURL)
 			auth.GET("/feishu/callback", handlers.FeishuCallback)
+			auth.POST("/passcode/login", handlers.PasscodeLogin)
 		}
 
         // Transfer Jobs

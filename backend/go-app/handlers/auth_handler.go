@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -40,6 +41,10 @@ type FeishuUserInfo struct {
 	AvatarURL string `json:"avatar_url"` // Sometimes different key
 }
 
+type PasscodeLoginRequest struct {
+	Passcode string `json:"passcode"`
+}
+
 func GetFeishuLoginURL(c *gin.Context) {
 	cfg, err := config.LoadConfig()
 	if err != nil {
@@ -60,6 +65,51 @@ func GetFeishuLoginURL(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"url": u.String(),
+	})
+}
+
+func PasscodeLogin(c *gin.Context) {
+	var req PasscodeLoginRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	passcode := os.Getenv("ACCESS_PASSCODE")
+	if passcode == "" {
+		passcode = "jaime123"
+	}
+
+	if req.Passcode != passcode {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid passcode"})
+		return
+	}
+
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load config"})
+		return
+	}
+
+	user := models.User{
+		ID:    1,
+		Name:  "Passcode Admin",
+		Email: "passcode@login.local",
+	}
+
+	tokenString, err := generateJWT(user, cfg)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"access_token": tokenString,
+		"user": gin.H{
+			"id":    user.ID,
+			"name":  user.Name,
+			"email": user.Email,
+		},
 	})
 }
 

@@ -25,6 +25,28 @@ TASK_DURATION = Histogram('worker_meta_task_duration_seconds', 'Duration of meta
 
 # API Configuration
 API_BASE_URL = os.environ.get("BACKEND_API_URL", "http://localhost:8080/api")
+API_CONNECT_TIMEOUT = float(os.environ.get("API_CONNECT_TIMEOUT", "5"))
+API_READ_TIMEOUT = float(os.environ.get("API_READ_TIMEOUT", "60"))
+API_MAX_RETRIES = int(os.environ.get("API_MAX_RETRIES", "3"))
+
+def api_post_with_retry(url, payload):
+    last_error = None
+    for attempt in range(API_MAX_RETRIES):
+        try:
+            return requests.post(url, json=payload, timeout=(API_CONNECT_TIMEOUT, API_READ_TIMEOUT))
+        except requests.exceptions.ReadTimeout as e:
+            last_error = e
+            wait_seconds = min(8, 2 ** attempt)
+            print(f"  [API] ReadTimeout on {url} (attempt {attempt+1}/{API_MAX_RETRIES}), retry in {wait_seconds}s")
+            time.sleep(wait_seconds)
+        except requests.exceptions.RequestException as e:
+            last_error = e
+            wait_seconds = min(8, 2 ** attempt)
+            print(f"  [API] RequestException on {url} (attempt {attempt+1}/{API_MAX_RETRIES}), retry in {wait_seconds}s: {e}")
+            time.sleep(wait_seconds)
+    if last_error:
+        raise last_error
+    raise RuntimeError(f"API request failed without explicit exception: {url}")
 
 def format_time_go_compatible(dt=None):
     """
@@ -368,7 +390,7 @@ def api_acquire_tasks(limit=10):
         machine_name = get_machine_name()
         payload = {"worker_id": WORKER_ID, "limit": limit, "stage": "metadata", "machine_name": machine_name}
         print(f"  [API] Calling {url} with limit={limit}, worker_id={WORKER_ID}, machine_name={machine_name}")
-        resp = requests.post(url, json=payload, timeout=10)
+        resp = api_post_with_retry(url, payload)
         print(f"  [API] Response status: {resp.status_code}")
         if resp.status_code == 200:
             data = resp.json()
@@ -418,7 +440,7 @@ def api_update_task_batch(updates):
             "updates": updates,
             "machine_name": machine_name
         }
-        resp = requests.post(f"{API_BASE_URL}/tasks/update", json=payload, timeout=10)
+        resp = api_post_with_retry(f"{API_BASE_URL}/tasks/update", payload)
         print(f"  [API] Update response: status={resp.status_code}")
         if resp.status_code != 200:
             print(f"  [API] Update failed: {resp.text}")
@@ -433,7 +455,7 @@ def api_save_task_record(task_data):
     """保存任务记录到数据库（使用 job_id + id 作为唯一索引）"""
     try:
         url = f"{API_BASE_URL}/youtube-tasks/update"
-        resp = requests.post(url, json=task_data, timeout=10)
+        resp = api_post_with_retry(url, task_data)
         if resp.status_code == 200 or resp.status_code == 201:
             return True
         else:
