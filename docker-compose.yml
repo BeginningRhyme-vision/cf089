@@ -137,7 +137,7 @@ services:
     command: ["transfer"]
     environment:
       - BACKEND_API_URL=http://backend-api:8080/api
-      - TRANSFER_MAX_WORKERS=16
+      - TRANSFER_MAX_WORKERS=128
       - TRANSFER_TASK_BUFFER=64
       - TRANSFER_PART_CONCURRENCY=8
     volumes:
