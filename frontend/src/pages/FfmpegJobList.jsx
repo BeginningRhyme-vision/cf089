@@ -167,9 +167,9 @@ const FfmpegJobList = () => {
       render: (status) => <Tag color={statusColors[status]}>{status}</Tag>
     },
     {
-      title: 'Size',
-      dataIndex: 'total_size_bytes',
-      key: 'total_size_bytes',
+      title: 'Success Size',
+      dataIndex: 'success_size_bytes',
+      key: 'success_size_bytes',
       width: 120,
       render: (value) => formatBytes(value),
       responsive: ['md']
@@ -307,7 +307,7 @@ const FfmpegJobList = () => {
               { label: 'Is Incremental', value: selectedJob.is_incremental ? 'Yes' : 'No' },
               { label: 'Periodic Interval', value: selectedJob.periodic_interval > 0 ? `${selectedJob.periodic_interval}s` : 'N/A' },
               { label: 'Status', value: <Tag color={statusColors[selectedJob.status]}>{selectedJob.status}</Tag> },
-              { label: 'Total Size', value: formatBytes(selectedJob.total_size_bytes) },
+              { label: 'Success Size', value: formatBytes(selectedJob.success_size_bytes) },
               { label: 'Total Count', value: selectedJob.total_count },
               { label: 'Pending Count', value: selectedJob.pending_count },
               { label: 'Running Count', value: selectedJob.running_count },

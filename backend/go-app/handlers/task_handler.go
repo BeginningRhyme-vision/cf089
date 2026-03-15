@@ -448,6 +448,7 @@ func BatchInsert(c *gin.Context) {
 
 	ctx := context.Background()
 	pipe := database.RDB.Pipeline()
+	successSizeIncrements := make(map[int64]int64)
 
 	successCount := 0
 	for _, task := range tasks {
@@ -2107,34 +2108,51 @@ func BatchUpdateTransfer(c *gin.Context) {
 	}
 
 	ctx := context.Background()
-	pipe := database.RDB.Pipeline()
-
-	// 【修改点】 缓存 Job 模式，避免循环内频繁 check
-	jobModeCache := make(map[int64]bool)
-
+	var keys []string
 	for _, u := range updates {
+		keys = append(keys, fmt.Sprintf("tx:task:%d:%d", u.JobID, u.ID))
+	}
+	existingJSONs, err := database.RDB.MGet(ctx, keys...).Result()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch existing tasks: " + err.Error()})
+		return
+	}
+	pipe := database.RDB.Pipeline()
+	successSizeIncrements := make(map[int64]int64)
+
+	for i, u := range updates {
 		data, err := json.Marshal(u)
 		if err != nil {
 			continue
 		}
 
-		// 确定 Job 模式
-		isSharded, known := jobModeCache[u.JobID]
-		if !known {
-			isSharded = isJobSharded(ctx, u.JobID)
-			jobModeCache[u.JobID] = isSharded
-		}
-
 		var taskKey string
 		taskKey = fmt.Sprintf("tx:task:%d:%d", u.JobID, u.ID)
+
+		val := existingJSONs[i]
+		if str, ok := val.(string); ok && str != "" {
+			var existing models.TransferTask
+			if json.Unmarshal([]byte(str), &existing) == nil {
+				if existing.Status != "COMPLETED" && u.Status == "COMPLETED" && existing.Size > 0 {
+					successSizeIncrements[u.JobID] += existing.Size
+				}
+			}
+		}
 
 		pipe.Set(ctx, taskKey, data, 0)
 	}
 
-	_, err := pipe.Exec(ctx)
+	_, err = pipe.Exec(ctx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
+	}
+
+	for jobID, bytes := range successSizeIncrements {
+		if bytes > 0 {
+			database.DB.Model(&models.TransferJob{}).Where("job_id = ?", jobID).
+				UpdateColumn("success_size_bytes", gorm.Expr("success_size_bytes + ?", bytes))
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "updated"})
@@ -2648,6 +2666,18 @@ func BatchUpdateFfmpeg(c *gin.Context) {
 		oldStatus := existing.Status
 
 		newStatus := u.Status
+		if oldStatus != "COMPLETED" && newStatus == "COMPLETED" {
+			var sizeBytes int64
+			if existing.VideoSize > 0 {
+				sizeBytes += existing.VideoSize
+			}
+			if existing.AudioSize > 0 {
+				sizeBytes += existing.AudioSize
+			}
+			if sizeBytes > 0 {
+				successSizeIncrements[existing.JobID] += sizeBytes
+			}
+		}
 
 		// Update fields
 
@@ -2901,6 +2931,13 @@ func BatchUpdateFfmpeg(c *gin.Context) {
 
 		return
 
+	}
+
+	for jobID, bytes := range successSizeIncrements {
+		if bytes > 0 {
+			database.DB.Model(&models.FfmpegJob{}).Where("id = ?", jobID).
+				UpdateColumn("success_size_bytes", gorm.Expr("success_size_bytes + ?", bytes))
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "updated"})

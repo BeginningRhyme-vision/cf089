@@ -384,9 +384,9 @@ const YoutubeJobList = () => {
       responsive: ['md']
     },
     {
-      title: 'Size',
-      dataIndex: 'total_size_bytes',
-      key: 'total_size_bytes',
+      title: 'Success Size',
+      dataIndex: 'success_size_bytes',
+      key: 'success_size_bytes',
       width: 120,
       render: (value) => formatBytes(value),
       responsive: ['md']
