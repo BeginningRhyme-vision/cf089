@@ -41,6 +41,7 @@ var (
 	permFailureKey string
 	providerGuard string
 	requirePrivateEndpoint bool
+	internalEndpointKeywords []string
 	PagesScanned = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "ffmpeg_scanner_pages_scanned_total",
 		Help: "Total number of S3 pages scanned",
