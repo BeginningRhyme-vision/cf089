@@ -448,7 +448,6 @@ func BatchInsert(c *gin.Context) {
 
 	ctx := context.Background()
 	pipe := database.RDB.Pipeline()
-	successSizeIncrements := make(map[int64]int64)
 
 	successCount := 0
 	for _, task := range tasks {
@@ -547,6 +546,7 @@ func BatchUpdate(c *gin.Context) {
 	}
 
 	pipe := database.RDB.Pipeline()
+	successSizeIncrements := make(map[int64]int64)
 
 	for i, u := range updates {
 		val := existingJSONs[i]
@@ -2640,6 +2640,7 @@ func BatchUpdateFfmpeg(c *gin.Context) {
 	}
 
 	pipe := database.RDB.Pipeline()
+	successSizeIncrements := make(map[int64]int64)
 
 	for i, u := range updates {
 
