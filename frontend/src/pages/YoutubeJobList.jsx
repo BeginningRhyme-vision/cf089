@@ -30,12 +30,6 @@ const YoutubeJobList = () => {
   const [submitDisabled, setSubmitDisabled] = useState(false);
   const [submitDisabledTime, setSubmitDisabledTime] = useState(0);
 
-  const getMetadataName = (record) => {
-    if (record?.metadata?.client_name) {
-      return record.metadata.client_name;
-    }
-    return record?.metadata_name || '-';
-  };
 
   const parseTaskInput = (raw) => {
     if (!raw) return [];
@@ -301,17 +295,6 @@ const YoutubeJobList = () => {
 
   const columns = [
     { title: 'ID', dataIndex: 'id', key: 'id', width: 60 },
-    {
-      title: 'Metadata Name',
-      key: 'metadata_name',
-      width: 180,
-      render: (_, record) => (
-        <div style={cellStyle} title={getMetadataName(record)}>
-          {getMetadataName(record)}
-        </div>
-      ),
-      responsive: ['md']
-    },
     { 
       title: 'R2 Prefix', 
       dataIndex: 'r2_prefix', 
