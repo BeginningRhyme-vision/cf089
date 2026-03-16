@@ -138,7 +138,7 @@ const YoutubeJobDetail = () => {
     fetchRecords(newPagination.current, newPagination.pageSize, activeStatus);
   };
 
-  const handleRetry = async () => {
+  const handleRetry = useCallback(async () => {
     try {
       const res = await api.post(`/youtube-jobs/${jobId}/retry-non-completed`);
       message.success(`Retry completed: ${res.data.queued_count} tasks queued, ${res.data.skipped_count} tasks skipped (already in queue)`);
