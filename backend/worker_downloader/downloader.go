@@ -66,7 +66,7 @@ var (
 	globalRateLimiter *RateLimiter
 
 	// Global semaphore to limit concurrent ListParts used for ETag lookup
-	listPartsSem = make(chan struct{}, 3)
+	listPartsSem = make(chan struct{}, getDefaultListPartsConcurrency())
 
 	// Metrics
 	TasksProcessed = promauto.NewCounterVec(prometheus.CounterOpts{
@@ -198,6 +198,8 @@ var (
 	TaskBufferSize                = getDefaultTaskBufferSize()
 	ConcurrentChunksPerFile       = getDefaultConcurrentChunksPerFile() // 每个文件内部的并发chunk数量
 	GlobalRequestsPerMinute       = getDefaultGlobalRequestsPerMinute() // 全局每分钟请求数限制
+	ListPartsConcurrency          = getDefaultListPartsConcurrency()
+	UploadRecoveryTimeout         = getDefaultUploadRecoveryTimeout()
 )
 
 func getDefaultChunkSize() int64 {
@@ -252,6 +254,26 @@ func getDefaultTaskBufferSize() int {
 		}
 	}
 	return 40 // 默认值
+}
+
+func getDefaultListPartsConcurrency() int {
+	v := os.Getenv("DOWNLOAD_LISTPARTS_CONCURRENCY")
+	if v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 12
+}
+
+func getDefaultUploadRecoveryTimeout() time.Duration {
+	v := os.Getenv("DOWNLOAD_UPLOAD_RECOVERY_TIMEOUT_SECONDS")
+	if v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 8 * time.Minute
 }
 
 // --- Models ---
@@ -328,6 +350,8 @@ func main() {
 	log.Printf("Chunk Size: %d bytes (%.2f MB)", ChunkSize, float64(ChunkSize)/(1024*1024))
 	log.Printf("Concurrent Chunks Per File: %d", ConcurrentChunksPerFile)
 	log.Printf("Global Requests Per Minute: %d", GlobalRequestsPerMinute)
+	log.Printf("ListParts Concurrency: %d", ListPartsConcurrency)
+	log.Printf("Upload Recovery Timeout: %s", UploadRecoveryTimeout)
 	log.Printf("Note: This worker connects to backend API, not database directly")
 	log.Printf("=====================================")
 
@@ -988,7 +1012,7 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 	}
 
 	if len(completedParts) != numParts {
-		recoveredParts, recoverErr := waitAndCollectCompletedParts(bucketName, key, uploadID, numParts, 2*time.Minute)
+		recoveredParts, recoverErr := waitAndCollectCompletedParts(bucketName, key, uploadID, numParts, UploadRecoveryTimeout)
 		if recoverErr == nil {
 			completedParts = recoveredParts
 			log.Printf("[UPLOAD RECOVERY] recovered all parts via ListParts: %d/%d", len(completedParts), numParts)

@@ -18,6 +18,7 @@ const YoutubeJobDetail = () => {
   const [records, setRecords] = useState([]);
   const [loading, setLoading] = useState(false);
   const [queueStats, setQueueStats] = useState(null);
+  const [activeStatus, setActiveStatus] = useState('');
   const [pagination, setPagination] = useState({ 
     current: 1, 
     pageSize: 100,  // 增加默认每页显示数量
@@ -48,16 +49,20 @@ const YoutubeJobDetail = () => {
     }
   }, []);
 
-  const fetchRecords = useCallback(async (page = 1, pageSize = 100) => {
+  const fetchRecords = useCallback(async (page = 1, pageSize = 100, status = '') => {
     setLoading(true);
     try {
               // Use new Batch Fetch endpoint
-      
-      const res = await api.post('/tasks/fetch', {
+
+      const payload = {
         job_id: parseInt(jobId),
         limit: pageSize,
         offset: (page - 1) * pageSize
-      });
+      };
+      if (status) {
+        payload.status = status;
+      }
+      const res = await api.post('/tasks/fetch', payload);
       
       // Backend returns { tasks: [...], total: ... }
       setRecords(res.data.tasks || []);
@@ -76,9 +81,9 @@ const YoutubeJobDetail = () => {
 
   useEffect(() => {
     fetchJob();
-    fetchRecords(1, pagination.pageSize);
+    fetchRecords(1, pagination.pageSize, activeStatus);
     fetchQueueStats();
-  }, [fetchJob, fetchRecords, fetchQueueStats]);
+  }, [fetchJob, fetchRecords, fetchQueueStats, activeStatus]);
 
   // Polling
   useEffect(() => {
@@ -96,7 +101,8 @@ const YoutubeJobDetail = () => {
         const res = await api.post('/tasks/fetch', {
             job_id: parseInt(jobId),
             limit: pagination.pageSize,
-            offset: (pagination.current - 1) * pagination.pageSize
+            offset: (pagination.current - 1) * pagination.pageSize,
+            ...(activeStatus ? { status: activeStatus } : {})
         });
         
         if (isMounted) {
@@ -126,10 +132,10 @@ const YoutubeJobDetail = () => {
       isMounted = false;
       if (timeoutId) clearTimeout(timeoutId);
     };
-  }, [jobId, pagination.current, pagination.pageSize, fetchJob]);
+  }, [jobId, pagination.current, pagination.pageSize, fetchJob, activeStatus]);
 
   const handleTableChange = (newPagination) => {
-    fetchRecords(newPagination.current, newPagination.pageSize);
+    fetchRecords(newPagination.current, newPagination.pageSize, activeStatus);
   };
 
   const handleRetry = async () => {
@@ -137,11 +143,17 @@ const YoutubeJobDetail = () => {
       const res = await api.post(`/youtube-jobs/${jobId}/retry-non-completed`);
       message.success(`Retry completed: ${res.data.queued_count} tasks queued, ${res.data.skipped_count} tasks skipped (already in queue)`);
       fetchJob();
-      fetchRecords(pagination.current, pagination.pageSize);
+      fetchRecords(pagination.current, pagination.pageSize, activeStatus);
     } catch (error) {
       message.error('Failed to retry tasks: ' + (error.response?.data?.error || error.message));
     }
-  };
+  }, [jobId, fetchJob, fetchRecords, pagination.current, pagination.pageSize, activeStatus]);
+
+  const handleStatusFilter = useCallback((status) => {
+    const nextStatus = activeStatus === status ? '' : status;
+    setActiveStatus(nextStatus);
+    fetchRecords(1, pagination.pageSize, nextStatus);
+  }, [activeStatus, fetchRecords, pagination.pageSize]);
 
   const statusColors = {
     PENDING: 'default',
@@ -324,34 +336,66 @@ const YoutubeJobDetail = () => {
           {job && (job.failed_count > 0 || job.pending_count > 0 || job.running_count > 0) && (
             <Button onClick={handleRetry} style={{ marginRight: 8 }} danger>Retry Non-Completed</Button>
           )}
-          <Button icon={<ReloadOutlined />} onClick={() => { fetchJob(); fetchRecords(pagination.current, pagination.pageSize); fetchQueueStats(); }}>Refresh</Button>
+          <Button icon={<ReloadOutlined />} onClick={() => { fetchJob(); fetchRecords(pagination.current, pagination.pageSize, activeStatus); fetchQueueStats(); }}>Refresh</Button>
         </div>
       </div>
+
+      {activeStatus && (
+        <div style={{ marginBottom: 12, color: '#666' }}>
+          当前筛选: <Tag color={statusColors[activeStatus] || 'default'}>{activeStatus}</Tag>
+          <Button type="link" size="small" onClick={() => handleStatusFilter(activeStatus)}>清除筛选</Button>
+        </div>
+      )}
 
       {job && (
         <Row gutter={16} style={{ marginBottom: 24 }}>
           <Col xs={12} sm={8} md={4}>
-            <Card size="small">
+            <Card
+              size="small"
+              hoverable
+              onClick={() => handleStatusFilter('')}
+              style={activeStatus === '' ? { borderColor: '#1677ff' } : {}}
+            >
               <Statistic title="Total" value={job.total_count} />
             </Card>
           </Col>
           <Col xs={12} sm={8} md={4}>
-            <Card size="small">
+            <Card
+              size="small"
+              hoverable
+              onClick={() => handleStatusFilter('COMPLETED')}
+              style={activeStatus === 'COMPLETED' ? { borderColor: '#1677ff' } : {}}
+            >
               <Statistic title="Success" value={job.success_count} valueStyle={{ color: '#3f8600' }} />
             </Card>
           </Col>
           <Col xs={12} sm={8} md={4}>
-            <Card size="small">
+            <Card
+              size="small"
+              hoverable
+              onClick={() => handleStatusFilter('FAILED')}
+              style={activeStatus === 'FAILED' ? { borderColor: '#1677ff' } : {}}
+            >
               <Statistic title="Failed" value={job.failed_count} valueStyle={{ color: '#cf1322' }} />
             </Card>
           </Col>
           <Col xs={12} sm={8} md={4}>
-            <Card size="small">
+            <Card
+              size="small"
+              hoverable
+              onClick={() => handleStatusFilter('RUNNING')}
+              style={activeStatus === 'RUNNING' ? { borderColor: '#1677ff' } : {}}
+            >
               <Statistic title="Running" value={job.running_count} valueStyle={{ color: '#faad14' }} />
             </Card>
           </Col>
           <Col xs={12} sm={8} md={4}>
-            <Card size="small">
+            <Card
+              size="small"
+              hoverable
+              onClick={() => handleStatusFilter('PENDING')}
+              style={activeStatus === 'PENDING' ? { borderColor: '#1677ff' } : {}}
+            >
               <Statistic title="Pending" value={job.pending_count} valueStyle={{ color: '#1890ff' }} />
             </Card>
           </Col>

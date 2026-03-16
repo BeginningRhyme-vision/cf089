@@ -77,7 +77,10 @@ services:
     environment:
       - BACKEND_API_URL=http://backend-api:8080/api
       - MACHINE_NAME=yt-node-1
-      - METADATA_MAX_THREADS=128
+      - METADATA_MAX_THREADS=160
+      - YT_DLP_AUTO_UPDATE_ENABLED=1
+      - YT_DLP_AUTO_UPDATE_INTERVAL_SECONDS=3600
+      - YT_DLP_AUTO_UPDATE_TIMEOUT_SECONDS=300
     volumes:
       - ./config/config.yaml:/app/config.yaml
     depends_on:
@@ -117,12 +120,13 @@ services:
     command: ["downloader"]
     environment:
       - BACKEND_API_URL=http://backend-api:8080/api
-      - WORKER_ID=worker-downloader-go-1
       - MACHINE_NAME=yt-node-1
-      - DOWNLOAD_MAX_CONCURRENT_WORKERS=192
-      - DOWNLOAD_CONCURRENT_CHUNKS_PER_FILE=24
-      - DOWNLOAD_REQUESTS_PER_MINUTE=12000
-      - DOWNLOAD_TASK_BUFFER_SIZE=1200
+      - DOWNLOAD_MAX_CONCURRENT_WORKERS=256
+      - DOWNLOAD_CONCURRENT_CHUNKS_PER_FILE=28
+      - DOWNLOAD_REQUESTS_PER_MINUTE=16000
+      - DOWNLOAD_TASK_BUFFER_SIZE=1600
+      - DOWNLOAD_LISTPARTS_CONCURRENCY=16
+      - DOWNLOAD_UPLOAD_RECOVERY_TIMEOUT_SECONDS=900
     volumes:
       - ./config/config.yaml:/app/config.yaml
     depends_on:

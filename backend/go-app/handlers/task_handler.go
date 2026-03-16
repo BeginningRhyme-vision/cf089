@@ -1062,6 +1062,7 @@ func BatchFetch(c *gin.Context) {
 		JobID  int64 `json:"job_id"`
 		Limit  int   `json:"limit"`
 		Offset int   `json:"offset"`
+		Status string `json:"status"`
 	}
 
 	var req FetchRequest
@@ -1074,9 +1075,12 @@ func BatchFetch(c *gin.Context) {
 
 	// 从 MySQL 查询总数
 	var total int64
-	if err := database.DB.Model(&models.YoutubeTaskRecord{}).
-		Where("job_id = ?", req.JobID).
-		Count(&total).Error; err != nil {
+	countQuery := database.DB.Model(&models.YoutubeTaskRecord{}).
+		Where("job_id = ?", req.JobID)
+	if req.Status != "" {
+		countQuery = countQuery.Where("status = ?", req.Status)
+	}
+	if err := countQuery.Count(&total).Error; err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get count: " + err.Error()})
 		return
 	}
@@ -1091,8 +1095,12 @@ func BatchFetch(c *gin.Context) {
 	queryCtx, queryCancel := context.WithTimeout(ctx, 30*time.Second)
 	defer queryCancel()
 
-	if err := database.DB.WithContext(queryCtx).
-		Where("job_id = ?", req.JobID).
+	taskQuery := database.DB.WithContext(queryCtx).
+		Where("job_id = ?", req.JobID)
+	if req.Status != "" {
+		taskQuery = taskQuery.Where("status = ?", req.Status)
+	}
+	if err := taskQuery.
 		Order("id ASC").
 		Offset(req.Offset).
 		Limit(req.Limit).

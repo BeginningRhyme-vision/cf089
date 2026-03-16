@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 from prometheus_client import start_http_server, Counter, Histogram
 import boto3
 from botocore.exceptions import ClientError
+import subprocess
+import importlib
 
 WORKER_ID = f"worker-meta-{uuid.uuid4()}"
 
@@ -28,6 +30,57 @@ API_BASE_URL = os.environ.get("BACKEND_API_URL", "http://localhost:8080/api")
 API_CONNECT_TIMEOUT = float(os.environ.get("API_CONNECT_TIMEOUT", "5"))
 API_READ_TIMEOUT = float(os.environ.get("API_READ_TIMEOUT", "60"))
 API_MAX_RETRIES = int(os.environ.get("API_MAX_RETRIES", "3"))
+YT_DLP_AUTO_UPDATE_ENABLED = os.environ.get("YT_DLP_AUTO_UPDATE_ENABLED", "1") != "0"
+YT_DLP_AUTO_UPDATE_INTERVAL_SECONDS = int(os.environ.get("YT_DLP_AUTO_UPDATE_INTERVAL_SECONDS", "3600"))
+YT_DLP_AUTO_UPDATE_TIMEOUT_SECONDS = int(os.environ.get("YT_DLP_AUTO_UPDATE_TIMEOUT_SECONDS", "300"))
+yt_dlp_update_lock = threading.Lock()
+yt_dlp_last_update_at = 0
+
+def get_yt_dlp_version():
+    try:
+        return yt_dlp.version.__version__
+    except Exception:
+        return "unknown"
+
+def run_yt_dlp_update():
+    global yt_dlp, yt_dlp_last_update_at
+    if not YT_DLP_AUTO_UPDATE_ENABLED:
+        return
+    if not yt_dlp_update_lock.acquire(blocking=False):
+        return
+    try:
+        before = get_yt_dlp_version()
+        cmd = [sys.executable, "-m", "pip", "install", "--no-cache-dir", "-U", "yt-dlp"]
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=YT_DLP_AUTO_UPDATE_TIMEOUT_SECONDS
+        )
+        if result.returncode != 0:
+            print(f"[yt-dlp updater] update failed, code={result.returncode}")
+            if result.stderr:
+                print(result.stderr[-1000:])
+            return
+        importlib.invalidate_caches()
+        yt_dlp = importlib.reload(yt_dlp)
+        after = get_yt_dlp_version()
+        yt_dlp_last_update_at = time.time()
+        print(f"[yt-dlp updater] updated {before} -> {after}")
+    except Exception as e:
+        print(f"[yt-dlp updater] exception: {e}")
+    finally:
+        yt_dlp_update_lock.release()
+
+def yt_dlp_updater_loop():
+    if not YT_DLP_AUTO_UPDATE_ENABLED:
+        print("[yt-dlp updater] disabled")
+        return
+    interval = max(300, YT_DLP_AUTO_UPDATE_INTERVAL_SECONDS)
+    print(f"[yt-dlp updater] enabled, interval={interval}s")
+    while True:
+        run_yt_dlp_update()
+        time.sleep(interval)
 
 def api_post_with_retry(url, payload):
     last_error = None
@@ -1147,6 +1200,9 @@ def main():
     # Start metrics server
     start_http_server(9092)
     print("Metrics server listening on :9092")
+    print(f"yt-dlp version: {get_yt_dlp_version()}")
+    updater_thread = threading.Thread(target=yt_dlp_updater_loop, daemon=True)
+    updater_thread.start()
 
     config = load_config()
     proxy_address = config.get('worker', {}).get('proxy_url')
