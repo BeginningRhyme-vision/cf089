@@ -200,6 +200,8 @@ var (
 	GlobalRequestsPerMinute       = getDefaultGlobalRequestsPerMinute() // 全局每分钟请求数限制
 	ListPartsConcurrency          = getDefaultListPartsConcurrency()
 	UploadRecoveryTimeout         = getDefaultUploadRecoveryTimeout()
+	TransferMaxAttempts           = getDefaultTransferMaxAttempts()
+	TransferRetryBackoffSeconds   = getDefaultTransferRetryBackoffSeconds()
 )
 
 func getDefaultChunkSize() int64 {
@@ -274,6 +276,26 @@ func getDefaultUploadRecoveryTimeout() time.Duration {
 		}
 	}
 	return 8 * time.Minute
+}
+
+func getDefaultTransferMaxAttempts() int {
+	v := os.Getenv("DOWNLOAD_TRANSFER_MAX_ATTEMPTS")
+	if v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 3
+}
+
+func getDefaultTransferRetryBackoffSeconds() int {
+	v := os.Getenv("DOWNLOAD_TRANSFER_RETRY_BACKOFF_SECONDS")
+	if v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 2
 }
 
 // --- Models ---
@@ -352,6 +374,8 @@ func main() {
 	log.Printf("Global Requests Per Minute: %d", GlobalRequestsPerMinute)
 	log.Printf("ListParts Concurrency: %d", ListPartsConcurrency)
 	log.Printf("Upload Recovery Timeout: %s", UploadRecoveryTimeout)
+	log.Printf("Transfer Max Attempts: %d", TransferMaxAttempts)
+	log.Printf("Transfer Retry Backoff Seconds: %d", TransferRetryBackoffSeconds)
 	log.Printf("Note: This worker connects to backend API, not database directly")
 	log.Printf("=====================================")
 
@@ -725,6 +749,48 @@ func getJobInfo(jobID int64) (JobInfo, error) {
 	return job, nil
 }
 
+func isRetryableTransferError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "incomplete upload") {
+		return true
+	}
+	if strings.Contains(msg, "collect parts timeout") {
+		return true
+	}
+	if strings.Contains(msg, "missing etag") {
+		return true
+	}
+	if strings.Contains(msg, "context deadline exceeded") {
+		return true
+	}
+	if strings.Contains(msg, "http status 429") || strings.Contains(msg, "http status 500") || strings.Contains(msg, "http status 502") || strings.Contains(msg, "http status 503") || strings.Contains(msg, "http status 504") {
+		return true
+	}
+	return false
+}
+
+func transferFileWithRetry(sourceURL, key string, providedSize int64) error {
+	var lastErr error
+	for attempt := 1; attempt <= TransferMaxAttempts; attempt++ {
+		err := transferFile(sourceURL, key, providedSize)
+		if err == nil {
+			return nil
+		}
+		lastErr = err
+		if attempt == TransferMaxAttempts || !isRetryableTransferError(err) {
+			break
+		}
+		backoff := time.Duration(TransferRetryBackoffSeconds*attempt) * time.Second
+		jitter := time.Duration(rand.Intn(1000)) * time.Millisecond
+		log.Printf("[TRANSFER RETRY] key=%s attempt=%d/%d retryable_error=%v next_wait=%s", key, attempt, TransferMaxAttempts, err, backoff+jitter)
+		time.Sleep(backoff + jitter)
+	}
+	return lastErr
+}
+
 func processTask(t YoutubeTask) {
 	start := time.Now()
 	defer func() {
@@ -775,7 +841,7 @@ func processTask(t YoutubeTask) {
 			}
 
 			log.Printf("Task %d: Starting audio download to %s (size=%d)", t.ID, key, t.AudioSize)
-			if err := transferFile(t.AudioURL, key, t.AudioSize); err != nil {
+			if err := transferFileWithRetry(t.AudioURL, key, t.AudioSize); err != nil {
 				log.Printf("Task %d: Audio download failed: %v", t.ID, err)
 				errChan <- fmt.Errorf("audio failed: %w", err)
 			} else {
@@ -804,7 +870,7 @@ func processTask(t YoutubeTask) {
 			}
 
 			log.Printf("Task %d: Starting video download to %s (size=%d)", t.ID, key, t.VideoSize)
-			if err := transferFile(t.VideoURL, key, t.VideoSize); err != nil {
+			if err := transferFileWithRetry(t.VideoURL, key, t.VideoSize); err != nil {
 				log.Printf("Task %d: Video download failed: %v", t.ID, err)
 				errChan <- fmt.Errorf("video failed: %w", err)
 			} else {

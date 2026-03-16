@@ -127,6 +127,8 @@ services:
       - DOWNLOAD_TASK_BUFFER_SIZE=1600
       - DOWNLOAD_LISTPARTS_CONCURRENCY=16
       - DOWNLOAD_UPLOAD_RECOVERY_TIMEOUT_SECONDS=900
+      - DOWNLOAD_TRANSFER_MAX_ATTEMPTS=49
+      - DOWNLOAD_TRANSFER_RETRY_BACKOFF_SECONDS=2
     volumes:
       - ./config/config.yaml:/app/config.yaml
     depends_on:
