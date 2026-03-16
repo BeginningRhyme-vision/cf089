@@ -1346,6 +1346,29 @@ func RetryFailedYoutubeTasks(c *gin.Context) {
 }
 
 // RetryNonCompletedYoutubeTasks 从 PostgreSQL 查询非 COMPLETED 状态的任务，检查是否在队列中，如果不在则重新入队
+func isPermanentYoutubeTaskError(msg string) bool {
+	if msg == "" {
+		return false
+	}
+	m := strings.ToLower(msg)
+	permanentKeywords := []string{
+		"sign in to confirm you're not a bot",
+		"this video is not available",
+		"video unavailable",
+		"this video is restricted",
+		"private video",
+		"members-only",
+		"removed by the uploader",
+		"copyright",
+	}
+	for _, kw := range permanentKeywords {
+		if strings.Contains(m, kw) {
+			return true
+		}
+	}
+	return false
+}
+
 func RetryNonCompletedYoutubeTasks(c *gin.Context) {
 	id := c.Param("id")
 	jobID, _ := strconv.Atoi(id)
@@ -1367,6 +1390,7 @@ func RetryNonCompletedYoutubeTasks(c *gin.Context) {
 	pipe := database.RDB.Pipeline()
 	queuedCount := 0
 	skippedCount := 0
+	permanentSkippedCount := 0
 
 	// 获取 Job 的 machine_name 来确定队列名
 	// 使用 task_handler.go 中的函数来获取队列名
@@ -1423,6 +1447,12 @@ func RetryNonCompletedYoutubeTasks(c *gin.Context) {
 	
 	for _, task := range tasks {
 		taskID := int64(task.ID)
+
+		if task.Status == "FAILED" && isPermanentYoutubeTaskError(task.ErrorMessage) {
+			skippedCount++
+			permanentSkippedCount++
+			continue
+		}
 		
 		// 检查任务是否已经在队列中
 		if existingInQueue[taskID] {
@@ -1552,13 +1582,14 @@ func RetryNonCompletedYoutubeTasks(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":       "Retry completed",
-		"queued_count":  queuedCount,
-		"skipped_count": skippedCount,
-		"total_tasks":   len(tasks),
-		"queue_name":    metadataQueueName, // 所有任务都推入 metadata_retry 队列
+		"message":                "Retry completed",
+		"queued_count":           queuedCount,
+		"skipped_count":          skippedCount,
+		"permanent_skipped_count": permanentSkippedCount,
+		"total_tasks":            len(tasks),
+		"queue_name":             metadataQueueName,
 		"status_changes": statusCounts,
-		"note":          "All non-COMPLETED tasks have been reset to PENDING and queued to metadata_retry queue for reprocessing by metadata worker",
+		"note":                   "Non-COMPLETED tasks were reset to PENDING and queued to metadata_retry, except permanent FAILED errors",
 	})
 }
 
