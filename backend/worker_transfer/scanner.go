@@ -401,7 +401,7 @@ func processJob(job TransferJob) {
 		updateJobStatus(job.JobID, "RUNNING", &startTime, resultMsg)
 		log.Printf("Job %d is periodic. Next scan in %d seconds.", job.JobID, job.PeriodicInterval)
 	} else {
-		updateJobStatus(job.JobID, "RUNNING", &startTime, resultMsg)
+		updateJobStatus(job.JobID, "COMPLETED", &startTime, resultMsg)
 	}
 }
 
