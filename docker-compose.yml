@@ -99,6 +99,10 @@ services:
       - ./config/config.yaml:/app/config.yaml
     depends_on:
       - backend-api
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+      - 223.5.5.5
     networks:
       - unbound
 
@@ -127,12 +131,16 @@ services:
       - DOWNLOAD_TASK_BUFFER_SIZE=1600
       - DOWNLOAD_LISTPARTS_CONCURRENCY=16
       - DOWNLOAD_UPLOAD_RECOVERY_TIMEOUT_SECONDS=900
-      - DOWNLOAD_TRANSFER_MAX_ATTEMPTS=49
-      - DOWNLOAD_TRANSFER_RETRY_BACKOFF_SECONDS=2
+      - DOWNLOAD_TRANSFER_MAX_ATTEMPTS=8
+      - DOWNLOAD_TRANSFER_RETRY_BACKOFF_SECONDS=6
     volumes:
       - ./config/config.yaml:/app/config.yaml
     depends_on:
       - backend-api
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+      - 223.5.5.5
     networks:
       - unbound
 
@@ -150,6 +158,10 @@ services:
       - ./config/config.yaml:/app/config.yaml
     depends_on:
       - backend-api
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
+      - 223.5.5.5
     networks:
       - unbound
 
