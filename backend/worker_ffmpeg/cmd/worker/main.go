@@ -73,7 +73,7 @@ func handleTaskFailure(t common.FfmpegTask, reason string) {
 	if err != nil {
 		log.Printf("CRITICAL: Failed to marshal failed task %d for requeue: %v", t.ID, err)
 		// If we can't marshal it, we just drop it but still report failure.
-		reportResultPatch(t.JobID, false)
+		reportResultPatch(t.JobID, false, 0)
 		TasksProcessed.WithLabelValues("failed").Inc()
 		return
 	}
@@ -81,7 +81,7 @@ func handleTaskFailure(t common.FfmpegTask, reason string) {
 	if err := rdb.RPush(context.Background(), failedQueue, failedTaskData).Err(); err != nil {
 		log.Printf("CRITICAL: Failed to push task %d to failed queue: %v", t.ID, err)
 		// If we can't push to redis, we also have to drop it.
-		reportResultPatch(t.JobID, false)
+		reportResultPatch(t.JobID, false, 0)
 		TasksProcessed.WithLabelValues("failed").Inc()
 		return
 	}
@@ -251,10 +251,13 @@ func getJobInfo(jobID int64) (*common.FfmpegJob, error) {
 	return &job, nil
 }
 
-func reportResultPatch(jobID int64, success bool) {
+func reportResultPatch(jobID int64, success bool, successBytes int64) {
 	req := common.UpdateJobStatusRequest{}
 	if success {
 		req.IncSuccess = 1
+		if successBytes > 0 {
+			req.IncSuccessBytes = successBytes
+		}
 	} else {
 		req.IncFailed = 1
 	}
@@ -301,13 +304,17 @@ func processTask(t common.FfmpegTask) {
 		outputKey = strings.TrimPrefix(outputKey, "/")
 	}
 
-	_, err = s3Client.HeadObject(context.TODO(), &s3.HeadObjectInput{
+	headOut, err := s3Client.HeadObject(context.TODO(), &s3.HeadObjectInput{
 		Bucket: aws.String(bucket),
 		Key:    aws.String(outputKey),
 	})
 	if err == nil {
 		log.Printf("Output %s already exists, skipping.", outputKey)
-		reportResultPatch(t.JobID, true)
+		existingSize := int64(0)
+		if headOut.ContentLength != nil {
+			existingSize = *headOut.ContentLength
+		}
+		reportResultPatch(t.JobID, true, existingSize)
 		TasksProcessed.WithLabelValues("skipped").Inc()
 		return
 	}
@@ -353,7 +360,13 @@ func processTask(t common.FfmpegTask) {
 		return
 	}
 
-	reportResultPatch(t.JobID, true)
+	outputInfo, statErr := os.Stat(localOutput)
+	if statErr != nil {
+		log.Printf("Stat output failed for task %d: %v", t.ID, statErr)
+		reportResultPatch(t.JobID, true, 0)
+	} else {
+		reportResultPatch(t.JobID, true, outputInfo.Size())
+	}
 	TasksProcessed.WithLabelValues("success").Inc()
 	ProcessingDuration.Observe(time.Since(start).Seconds())
 	log.Printf("Task %d completed", t.ID)

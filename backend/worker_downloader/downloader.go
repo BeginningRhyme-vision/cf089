@@ -964,8 +964,10 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 		return fmt.Errorf("invalid content length: %d", size)
 	}
 
-	// 智能获取 Content-Type：优先从 URL 参数（如 mime=video/mp4），其次从文件扩展名
 	contentType := getContentType(sourceURL, key)
+	if size <= ChunkSize {
+		return transferSingleFile(sourceURL, key, size, contentType)
+	}
 
 	// 2. Initiate Multipart
 	createOut, err := s3Client.CreateMultipartUpload(context.TODO(), &s3.CreateMultipartUploadInput{
@@ -1179,6 +1181,100 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 	}
 
 	return nil
+}
+
+func transferSingleFile(sourceURL, key string, size int64, contentType string) error {
+	ctx := context.TODO()
+	if maybeNeedsPresignedGet(sourceURL) {
+		if presignedSrc, perr := presignR2GetObjectURL(ctx, sourceURL); perr == nil && presignedSrc != "" {
+			sourceURL = presignedSrc
+		}
+	}
+
+	presignRequest, err := s3PresignClient.PresignPutObject(ctx, &s3.PutObjectInput{
+		Bucket:      aws.String(bucketName),
+		Key:         aws.String(key),
+		ContentType: aws.String(contentType),
+	}, func(opts *s3.PresignOptions) {
+		opts.Expires = 24 * time.Hour
+	})
+	if err != nil {
+		return fmt.Errorf("failed to generate single upload url: %w", err)
+	}
+
+	signedHeaders := map[string]string{}
+	for k, vals := range presignRequest.SignedHeader {
+		if len(vals) > 0 {
+			signedHeaders[k] = vals[0]
+		}
+	}
+
+	payload := map[string]interface{}{
+		"fileUrl": sourceURL,
+		"offset":  0,
+		"size":    size,
+		"r2Key":   presignRequest.URL,
+		"headers": signedHeaders,
+		"method":  "PUT",
+	}
+	body, _ := json.Marshal(payload)
+
+	var (
+		resp      *http.Response
+		reqErr    error
+		bodyBytes []byte
+	)
+	for attempt := 1; attempt <= 3; attempt++ {
+		resp, reqErr = externalClient.Post(cfg.Storage.DownloadServiceURL, "application/json", bytes.NewBuffer(body))
+		if reqErr != nil {
+			if attempt == 3 {
+				return fmt.Errorf("single upload request failed after %d attempts: %v", attempt, reqErr)
+			}
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
+		bodyBytes, _ = io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode >= 500 || resp.StatusCode == 429 {
+			if attempt == 3 {
+				break
+			}
+			time.Sleep(time.Duration(attempt) * time.Second)
+			continue
+		}
+		break
+	}
+
+	if resp == nil {
+		return fmt.Errorf("single upload request failed: empty response")
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("single upload http status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var headErr error
+	for i := 0; i < 5; i++ {
+		headOut, err := s3Client.HeadObject(ctx, &s3.HeadObjectInput{
+			Bucket: aws.String(bucketName),
+			Key:    aws.String(key),
+		})
+		if err == nil {
+			actualSize := int64(0)
+			if headOut.ContentLength != nil {
+				actualSize = *headOut.ContentLength
+			}
+			if actualSize == size || actualSize > 0 {
+				log.Printf("Successfully uploaded(single): %s (size=%d, content-type: %s)", key, actualSize, contentType)
+				return nil
+			}
+			headErr = fmt.Errorf("head object size mismatch: expected %d, got %d", size, actualSize)
+		} else {
+			headErr = err
+		}
+		time.Sleep(time.Duration(i+1) * time.Second)
+	}
+
+	return fmt.Errorf("single upload verification failed: %v", headErr)
 }
 
 func isMissingEtagRecoverable(err error) bool {

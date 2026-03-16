@@ -2,6 +2,7 @@ import sys
 import json
 import yt_dlp
 import time
+import random
 import concurrent.futures
 import requests
 import uuid
@@ -30,6 +31,8 @@ API_BASE_URL = os.environ.get("BACKEND_API_URL", "http://localhost:8080/api")
 API_CONNECT_TIMEOUT = float(os.environ.get("API_CONNECT_TIMEOUT", "5"))
 API_READ_TIMEOUT = float(os.environ.get("API_READ_TIMEOUT", "60"))
 API_MAX_RETRIES = int(os.environ.get("API_MAX_RETRIES", "3"))
+METADATA_TASK_MAX_ATTEMPTS = int(os.environ.get("METADATA_TASK_MAX_ATTEMPTS", "9"))
+METADATA_TASK_RETRY_BACKOFF_SECONDS = int(os.environ.get("METADATA_TASK_RETRY_BACKOFF_SECONDS", "5"))
 YT_DLP_AUTO_UPDATE_ENABLED = os.environ.get("YT_DLP_AUTO_UPDATE_ENABLED", "1") != "0"
 YT_DLP_AUTO_UPDATE_INTERVAL_SECONDS = int(os.environ.get("YT_DLP_AUTO_UPDATE_INTERVAL_SECONDS", "3600"))
 YT_DLP_AUTO_UPDATE_TIMEOUT_SECONDS = int(os.environ.get("YT_DLP_AUTO_UPDATE_TIMEOUT_SECONDS", "300"))
@@ -889,11 +892,9 @@ def process_metadata(task, ydl_opts):
     }
     
     try:
-        with yt_dlp.YoutubeDL(local_ydl_opts) as ydl:
-            # 使用 extract_info 获取完整信息（类似 --dump-json）
-            # 不指定 format，让 yt-dlp 自动选择最佳客户端和格式
-            print(f"  Extracting metadata from YouTube...")
-            info = ydl.extract_info(url, download=False)
+        print(f"  Extracting metadata from YouTube...")
+        info = extract_info_with_retry(url, local_ydl_opts)
+        if True:
             
             result["title"] = info.get('title', '')
             result["video_id"] = info.get('id', '')
@@ -1196,6 +1197,65 @@ def process_metadata(task, ydl_opts):
         
     return result
 
+def is_retryable_metadata_error(error_msg):
+    if not error_msg:
+        return False
+    msg = str(error_msg).lower()
+    non_retryable_keywords = [
+        "private video",
+        "members-only",
+        "removed by the uploader",
+        "video has been removed",
+        "video has been deleted",
+        "copyright",
+        "account associated with this video has been terminated",
+        "this video is no longer available because",
+    ]
+    if any(kw in msg for kw in non_retryable_keywords):
+        return False
+    retryable_keywords = [
+        "sign in to confirm",
+        "you’re not a bot",
+        "you're not a bot",
+        "age-restricted",
+        "video unavailable",
+        "this video is restricted",
+        "not available in your country",
+        "http error 429",
+        "http error 500",
+        "http error 502",
+        "http error 503",
+        "http error 504",
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "remote end closed connection",
+        "connection reset",
+        "proxy error",
+    ]
+    return any(kw in msg for kw in retryable_keywords)
+
+def extract_info_with_retry(url, local_ydl_opts):
+    last_error = None
+    for attempt in range(1, METADATA_TASK_MAX_ATTEMPTS + 1):
+        try:
+            with yt_dlp.YoutubeDL(local_ydl_opts) as ydl:
+                return ydl.extract_info(url, download=False)
+        except Exception as e:
+            last_error = e
+            retryable = is_retryable_metadata_error(e)
+            if attempt >= METADATA_TASK_MAX_ATTEMPTS or not retryable:
+                raise
+            backoff = METADATA_TASK_RETRY_BACKOFF_SECONDS * attempt
+            jitter = random.uniform(0, 1.5)
+            wait_seconds = backoff + jitter
+            print(f"  [METADATA RETRY] attempt {attempt}/{METADATA_TASK_MAX_ATTEMPTS} failed: {e}")
+            print(f"  [METADATA RETRY] sleeping {wait_seconds:.1f}s before next attempt")
+            time.sleep(wait_seconds)
+    if last_error:
+        raise last_error
+    raise RuntimeError("extract_info failed without explicit exception")
+
 def main():
     # Start metrics server
     start_http_server(9092)
@@ -1233,7 +1293,7 @@ def main():
         print("不使用 cookies，使用 Android/iOS/Web 客户端模式")
         ydl_opts['extractor_args'] = {
             'youtube': {
-                'player_client': ['android', 'ios', 'web']
+                'player_client': ['android', 'ios', 'tv_embedded', 'web']
             }
         }
     # 2. 如果显式指定了 YOUTUBE_COOKIES_FILE，则优先使用该文件，并跳过后端下发的 cookie
@@ -1303,7 +1363,7 @@ def main():
                         print("未找到浏览器 cookies，使用 Android/iOS/Web 客户端模式（无需 cookies）")
                         ydl_opts['extractor_args'] = {
                             'youtube': {
-                                'player_client': ['android', 'ios', 'web']
+                                'player_client': ['android', 'ios', 'tv_embedded', 'web']
                             }
                         }
 

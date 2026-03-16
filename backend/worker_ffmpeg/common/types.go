@@ -45,4 +45,5 @@ type UpdateJobStatusRequest struct {
 	TotalCount    *int       `json:"total_count,omitempty"`
 	IncSuccess    int        `json:"inc_success,omitempty"`
 	IncFailed     int        `json:"inc_failed,omitempty"`
+	IncSuccessBytes int64    `json:"inc_success_bytes,omitempty"`
 }

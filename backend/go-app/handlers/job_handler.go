@@ -511,6 +511,7 @@ type UpdateJobStatusRequest struct {
 	ResultMessage string           `json:"result_message"`
 	IncSuccess    int              `json:"inc_success"`
 	IncFailed     int              `json:"inc_failed"`
+	IncSuccessBytes int64          `json:"inc_success_bytes"`
 	StartTime     *time.Time       `json:"start_time"`
 	EndTime       *time.Time       `json:"end_time"`
 	TotalCount    *int             `json:"total_count"`
@@ -1770,9 +1771,9 @@ func UpdateFfmpegJobStatus(c *gin.Context) {
 	}
 
 	// Atomic counter updates if provided
-	if req.IncSuccess > 0 || req.IncFailed > 0 {
+	if req.IncSuccess > 0 || req.IncFailed > 0 || req.IncSuccessBytes > 0 {
 		totalDec := req.IncSuccess + req.IncFailed
-		database.DB.Exec("UPDATE ffmpeg_jobs SET success_count = success_count + ?, failed_count = failed_count + ?, pending_count = GREATEST(0, pending_count - ?) WHERE id = ?", req.IncSuccess, req.IncFailed, totalDec, id)
+		database.DB.Exec("UPDATE ffmpeg_jobs SET success_count = success_count + ?, failed_count = failed_count + ?, pending_count = GREATEST(0, pending_count - ?), success_size_bytes = success_size_bytes + ? WHERE id = ?", req.IncSuccess, req.IncFailed, totalDec, req.IncSuccessBytes, id)
 	}
 
 	if len(updates) > 0 {
