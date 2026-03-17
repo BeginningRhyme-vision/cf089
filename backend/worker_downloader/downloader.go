@@ -200,6 +200,7 @@ var (
 	GlobalRequestsPerMinute       = getDefaultGlobalRequestsPerMinute() // 全局每分钟请求数限制
 	ListPartsConcurrency          = getDefaultListPartsConcurrency()
 	UploadRecoveryTimeout         = getDefaultUploadRecoveryTimeout()
+	SingleUploadVerifyTimeout     = getDefaultSingleUploadVerifyTimeout()
 	TransferMaxAttempts           = getDefaultTransferMaxAttempts()
 	TransferRetryBackoffSeconds   = getDefaultTransferRetryBackoffSeconds()
 )
@@ -276,6 +277,16 @@ func getDefaultUploadRecoveryTimeout() time.Duration {
 		}
 	}
 	return 8 * time.Minute
+}
+
+func getDefaultSingleUploadVerifyTimeout() time.Duration {
+	v := os.Getenv("DOWNLOAD_SINGLE_VERIFY_TIMEOUT_SECONDS")
+	if v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 180 * time.Second
 }
 
 func getDefaultTransferMaxAttempts() int {
@@ -1214,6 +1225,11 @@ func transferSingleFile(sourceURL, key string, size int64, contentType string) e
 		"offset":  0,
 		"size":    size,
 		"r2Key":   presignRequest.URL,
+		"r2UploadUrl": presignRequest.URL,
+		"uploadUrl":   presignRequest.URL,
+		"objectKey":   key,
+		"rangeStart":  0,
+		"rangeEnd":    size - 1,
 		"headers": signedHeaders,
 		"method":  "PUT",
 	}
@@ -1251,30 +1267,32 @@ func transferSingleFile(sourceURL, key string, size int64, contentType string) e
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("single upload http status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
-
+	verifyDeadline := time.Now().Add(SingleUploadVerifyTimeout)
 	var headErr error
-	for i := 0; i < 5; i++ {
+	sleepStep := 1 * time.Second
+	for time.Now().Before(verifyDeadline) {
 		headOut, err := s3Client.HeadObject(ctx, &s3.HeadObjectInput{
 			Bucket: aws.String(bucketName),
 			Key:    aws.String(key),
 		})
-		if err == nil {
-			actualSize := int64(0)
-			if headOut.ContentLength != nil {
-				actualSize = *headOut.ContentLength
-			}
-			if actualSize == size || actualSize > 0 {
+		if err == nil && headOut.ContentLength != nil {
+			actualSize := *headOut.ContentLength
+			if actualSize == size {
 				log.Printf("Successfully uploaded(single): %s (size=%d, content-type: %s)", key, actualSize, contentType)
 				return nil
 			}
 			headErr = fmt.Errorf("head object size mismatch: expected %d, got %d", size, actualSize)
-		} else {
+		} else if err != nil {
 			headErr = err
+		} else {
+			headErr = fmt.Errorf("head object content-length missing")
 		}
-		time.Sleep(time.Duration(i+1) * time.Second)
+		time.Sleep(sleepStep)
+		if sleepStep < 5*time.Second {
+			sleepStep++
+		}
 	}
-
-	return fmt.Errorf("single upload verification failed: %v", headErr)
+	return fmt.Errorf("single upload verification failed after %s: %v", SingleUploadVerifyTimeout, headErr)
 }
 
 func isMissingEtagRecoverable(err error) bool {
@@ -1443,11 +1461,16 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 		"fileUrl":    srcURL,
 		"offset":     start,
 		"size":       chunkSize,
-		"r2Key":      presignedURL, // Send presigned URL instead of plain URL
+		"r2Key":      presignedURL,
+		"r2UploadUrl": presignedURL,
+		"uploadUrl":   presignedURL,
+		"objectKey":   key,
+		"rangeStart":  start,
+		"rangeEnd":    end,
+		"requestId":   fmt.Sprintf("%s:%d:%d", uploadID, partNum, start),
 		"headers":    signedHeaders,
 		"partNumber": partNum,
 		"uploadId":   uploadID,
-		// 明确指定 HTTP 方法（UploadPart 必须使用 PUT）
 		"method": "PUT",
 	}
 
@@ -1554,18 +1577,16 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 		if etag == "" {
 			log.Printf("[CHUNK WAIT] Part %d: 2xx response but missing ETag (status=%d), will use ListParts to retrieve ETag", partNum, resp.StatusCode)
 			
-			// 先等待至少1秒，避免立即查询
-			log.Printf("[CHUNK WAIT] Part %d: waiting 1s before ListParts attempt", partNum)
-			time.Sleep(1 * time.Second)
+			log.Printf("[CHUNK WAIT] Part %d: waiting 2s before ListParts attempt", partNum)
+			time.Sleep(2 * time.Second)
 
-			lookupCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			lookupCtx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 			etag2, lerr := fetchPartETag(lookupCtx, bucketName, key, uploadID, partNum)
 			cancel()
 			if lerr == nil && etag2 != "" {
 				log.Printf("[CHUNK RESPONSE] Part %d: recovered ETag via ListParts: %s", partNum, etag2)
 				return etag2, nil
 			} else {
-				// 带上 body，便于定位 upload service 是否"成功但未上传"或"成功但未返回 etag"
 				return "", fmt.Errorf("2xx but missing etag (status=%d) and ListParts lookup failed: %v. body=%s", resp.StatusCode, lerr, string(bodyBytes))
 			}
 		}
@@ -1582,9 +1603,8 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 		}
 		if resp.StatusCode == 403 {
 			return "", fmt.Errorf("403 Forbidden: presigned URL authentication failed - check if upload service uses PUT method and correct headers. Response: %s", string(bodyBytes))
-		} else {
-			return "", fmt.Errorf("HTTP status %d: %s", resp.StatusCode, string(bodyBytes))
 		}
+		return "", fmt.Errorf("HTTP status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
 	
 	return "", fmt.Errorf("failed to upload chunk %d,Can't get Etag", partNum)
