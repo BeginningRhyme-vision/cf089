@@ -39,6 +39,40 @@ const FfmpegJobList = () => {
   });
   const [form] = Form.useForm();
 
+  const normalizeEndpointHost = (endpoint = '') => {
+    const text = String(endpoint || '').trim().toLowerCase();
+    if (!text) return '';
+    const noScheme = text.includes('://') ? text.split('://')[1] : text;
+    return noScheme.split('/')[0];
+  };
+
+  const isInternalEndpoint = (endpoint = '') => {
+    const endpointText = String(endpoint || '').trim().toLowerCase();
+    const host = normalizeEndpointHost(endpointText);
+    const isAliInternal = endpointText.includes('aliyuncs.com') && host.includes('internal');
+    const isVolcInternal = (endpointText.includes('ivolces.com') || endpointText.includes('volces.com')) && host.includes('tos-s3-');
+    return isAliInternal || isVolcInternal;
+  };
+
+  const getMetadataById = (metadataId) => metadataList.find(m => m.id === metadataId);
+
+  const confirmIfPublicEndpoint = async (metadataId) => {
+    const metadata = getMetadataById(metadataId);
+    if (!metadata) return true;
+    if (isInternalEndpoint(metadata.endpoint)) return true;
+    return new Promise((resolve) => {
+      Modal.confirm({
+        title: 'Public Endpoint Warning',
+        content: 'Selected metadata endpoint is not internal. This may cause high public network traffic costs. Continue?',
+        okText: 'Continue',
+        cancelText: 'Cancel',
+        okType: 'danger',
+        onOk: () => resolve(true),
+        onCancel: () => resolve(false)
+      });
+    });
+  };
+
   const getMetadataName = (record) => {
     if (record?.metadata?.client_name) {
       return record.metadata.client_name;
@@ -98,16 +132,45 @@ const FfmpegJobList = () => {
     });
   };
 
+  const createJob = async (payload) => {
+    await api.post('/ffmpeg-jobs/', payload);
+    message.success('Job created');
+    setIsModalOpen(false);
+    fetchJobs(pagination.current, pagination.pageSize);
+  };
+
   const handleCreate = async () => {
     try {
       const values = await form.validateFields();
-      await api.post('/ffmpeg-jobs/', values);
-      message.success('Job created');
-      setIsModalOpen(false);
-      fetchJobs(pagination.current, pagination.pageSize);
+      const shouldContinue = await confirmIfPublicEndpoint(values.metadata_id);
+      if (!shouldContinue) return;
+      await createJob(values);
     } catch (error) {
       console.error(error);
       message.error('Failed to create job');
+    }
+  };
+
+  const handleDuplicateJob = async () => {
+    if (!selectedJob) return;
+    try {
+      const payload = {
+        metadata_id: selectedJob.metadata_id,
+        s3_prefix: selectedJob.s3_prefix,
+        s3_upload_prefix: selectedJob.s3_upload_prefix,
+        is_incremental: !!selectedJob.is_incremental
+      };
+      if (selectedJob.is_incremental) {
+        payload.periodic_interval = selectedJob.periodic_interval > 0 ? selectedJob.periodic_interval : 600;
+      }
+      const shouldContinue = await confirmIfPublicEndpoint(payload.metadata_id);
+      if (!shouldContinue) return;
+      const res = await api.post('/ffmpeg-jobs/', payload);
+      message.success(`New Copy Job created (ID: ${res.data?.id || '-'})`);
+      setDetailVisible(false);
+      fetchJobs(pagination.current, pagination.pageSize);
+    } catch (error) {
+      message.error('Failed to create copy job');
     }
   };
 
@@ -288,7 +351,14 @@ const FfmpegJobList = () => {
       </Modal>
 
       <Modal
-        title="Job Details"
+        title={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {selectedJob && (
+              <Button type="primary" size="small" onClick={handleDuplicateJob}>New Copy Job</Button>
+            )}
+            <span>Job Details</span>
+          </div>
+        }
         open={detailVisible}
         onCancel={() => setDetailVisible(false)}
         footer={[

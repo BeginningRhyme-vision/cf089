@@ -320,11 +320,11 @@ const JobList = () => {
 
       <Modal
         title={
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', paddingRight: 12 }}>
-            <span>Job Details</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             {selectedJob && (
               <Button type="primary" size="small" onClick={handleDuplicateJob}>新建复制任务</Button>
             )}
+            <span>Job Details</span>
           </div>
         }
         open={detailVisible}
