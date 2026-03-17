@@ -141,7 +141,11 @@ const YoutubeJobDetail = () => {
   const handleRetry = useCallback(async () => {
     try {
       const res = await api.post(`/youtube-jobs/${jobId}/retry-non-completed`);
-      message.success(`Retry completed: ${res.data.queued_count} tasks queued, ${res.data.skipped_count} tasks skipped (already in queue)`);
+      if (typeof res.data?.queued_count === 'number') {
+        message.success(`Retry completed: ${res.data.queued_count} tasks queued, ${res.data.skipped_count} tasks skipped (already in queue)`);
+      } else {
+        message.success(res.data?.message || 'Retry request accepted');
+      }
       fetchJob();
       fetchRecords(pagination.current, pagination.pageSize, activeStatus);
     } catch (error) {

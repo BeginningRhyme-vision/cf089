@@ -962,23 +962,21 @@ func AcquireTasks(c *gin.Context) {
 				}
 			}
 			
-			// Only return if status is PENDING
-			if t.Status == "PENDING" {
-				// 不再需要检查主机名过滤，因为已经通过队列分离了
-				log.Printf("[AcquireTasks] Task %s (job %d) is PENDING, returning to worker %s", idStr, t.JobID, req.WorkerID)
-				tasks = append(tasks, t)
-			} else {
-				// Status is not PENDING, requeue it (task was already processed or is in wrong state)
-				// But don't requeue if it's already COMPLETED or FAILED (those shouldn't be retried)
-				if t.Status != "COMPLETED" && t.Status != "FAILED" {
-					log.Printf("[AcquireTasks] Task %s status is %s (not PENDING), requeuing to retry queue", idStr, t.Status)
-					// 根据 Job 的 MachineName 推入对应的队列
-					requeueName := getMetadataQueueName(t.JobID)
-					database.RDB.RPush(ctx, requeueName, idStr)
-				} else {
-					log.Printf("[AcquireTasks] Task %s status is %s, not requeuing (final state)", idStr, t.Status)
+			if t.Status == "COMPLETED" {
+				log.Printf("[AcquireTasks] Task %s status is COMPLETED, skipping", idStr)
+				continue
+			}
+			if t.Status != "PENDING" {
+				t.Status = "PENDING"
+				t.WorkerID = ""
+				t.ErrorMessage = ""
+				t.UpdatedAt = time.Now()
+				if data, merr := json.Marshal(t); merr == nil {
+					database.RDB.Set(ctx, fmt.Sprintf("task:%s", idStr), data, 0)
 				}
 			}
+			log.Printf("[AcquireTasks] Task %s (job %d) accepted from retry queue for worker %s", idStr, t.JobID, req.WorkerID)
+			tasks = append(tasks, t)
 		}
 		
 		if len(tasks) > 0 {
