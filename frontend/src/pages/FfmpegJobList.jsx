@@ -73,6 +73,17 @@ const FfmpegJobList = () => {
     });
   };
 
+  const warnIfPublicEndpointSelected = (metadataId) => {
+    const metadata = getMetadataById(metadataId);
+    if (!metadata) return;
+    if (isInternalEndpoint(metadata.endpoint)) return;
+    Modal.warning({
+      title: 'Public Endpoint Warning',
+      content: `Selected metadata endpoint is not internal and may cause high public network traffic costs.\n${metadata.endpoint}`,
+      okText: 'Got it'
+    });
+  };
+
   const getMetadataName = (record) => {
     if (record?.metadata?.client_name) {
       return record.metadata.client_name;
@@ -315,7 +326,7 @@ const FfmpegJobList = () => {
             style={{ marginBottom: 12 }}
           />
           <Form.Item name="metadata_id" label="Client/Metadata" rules={[{ required: true }]}>
-            <Select>
+            <Select onChange={warnIfPublicEndpointSelected}>
               {metadataList.map(m => (
                 <Option key={m.id} value={m.id}>{m.client_name} ({m.endpoint})</Option>
               ))}
