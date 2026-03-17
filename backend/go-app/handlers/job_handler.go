@@ -117,6 +117,7 @@ func StartTransferJob(c *gin.Context) {
 		"end_time":         nil,
 		"duration_seconds": 0,
 		"result_message":   "",
+		"last_scan_time":   nil,
 	}
 
 	if err := database.DB.Model(&job).Updates(updates).Error; err != nil {
@@ -722,7 +723,7 @@ func AddTasksToTransferJob(c *gin.Context) {
 
 	// Update Job stats
 	if count > 0 {
-		database.DB.Exec("UPDATE transfer_jobs SET total_count = total_count + ?, pending_count = pending_count + ? WHERE job_id = ?", count, count, id)
+		database.DB.Exec("UPDATE transfer_jobs SET total_count = total_count + ?, pending_count = pending_count + ?, status = CASE WHEN status = 'COMPLETED' THEN 'RUNNING' ELSE status END WHERE job_id = ?", count, count, id)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"added": count, "job_id": id})
