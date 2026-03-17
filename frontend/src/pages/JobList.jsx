@@ -428,7 +428,6 @@ const JobList = () => {
       .slice(-14);
 
     return {
-      meta: topBySize(Array.from(byMeta.values())),
       dest: topBySize(Array.from(byDest.values())),
       daily
     };
@@ -520,12 +519,9 @@ const JobList = () => {
     <div>
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
         <Col xs={24} lg={8}>
-          <PiePanel title="按 Metadata 展示 Transfer（文件数量 | 大小）" data={chartData.meta} />
-        </Col>
-        <Col xs={24} lg={8}>
           <PiePanel title="按 Destination 二级目录展示 Transfer（文件数量 | 大小）" data={chartData.dest} />
         </Col>
-        <Col xs={24} lg={8}>
+        <Col xs={24} lg={16}>
           <DailyBarPanel title="每天 Transfer 文件数量与大小（近14天）" data={chartData.daily} />
         </Col>
       </Row>
