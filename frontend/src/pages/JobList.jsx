@@ -46,28 +46,62 @@ const buildConicGradient = (items, valueKey) => {
 };
 
 const PiePanel = ({ title, data }) => {
+  const [hoveredIndex, setHoveredIndex] = useState(-1);
   const totalSize = data.reduce((sum, item) => sum + (item.size || 0), 0);
   const totalCount = data.reduce((sum, item) => sum + (item.count || 0), 0);
+  const radius = 70;
+  const cx = 90;
+  const cy = 90;
+  let cumulative = 0;
+  const arcs = data.map((item, index) => {
+    const value = item.size || 0;
+    const ratio = totalSize > 0 ? value / totalSize : 0;
+    const start = cumulative * Math.PI * 2;
+    cumulative += ratio;
+    const end = cumulative * Math.PI * 2;
+    const x1 = cx + radius * Math.cos(start - Math.PI / 2);
+    const y1 = cy + radius * Math.sin(start - Math.PI / 2);
+    const x2 = cx + radius * Math.cos(end - Math.PI / 2);
+    const y2 = cy + radius * Math.sin(end - Math.PI / 2);
+    const largeArc = end-start > Math.PI ? 1 : 0;
+    const path = `M ${cx} ${cy} L ${x1} ${y1} A ${radius} ${radius} 0 ${largeArc} 1 ${x2} ${y2} Z`;
+    return { item, index, path, ratio };
+  });
   return (
     <Card size="small" title={title} bodyStyle={{ padding: 12 }}>
       {totalSize <= 0 && totalCount <= 0 ? (
         <div style={{ textAlign: 'center', color: '#999', padding: '24px 0' }}>暂无数据</div>
       ) : (
         <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
-          <div
-            style={{
-              width: 160,
-              height: 160,
-              borderRadius: '50%',
-              background: buildConicGradient(data, 'size'),
-              flexShrink: 0
-            }}
-          />
+          <svg viewBox="0 0 180 180" width={180} height={180} style={{ flexShrink: 0 }}>
+            {arcs.map((arc) => (
+              <path
+                key={`${arc.item.label}-${arc.index}`}
+                d={arc.path}
+                fill={chartColors[arc.index % chartColors.length]}
+                stroke="#fff"
+                strokeWidth="1"
+                opacity={hoveredIndex === -1 || hoveredIndex === arc.index ? 1 : 0.45}
+                onMouseEnter={() => setHoveredIndex(arc.index)}
+                onMouseLeave={() => setHoveredIndex(-1)}
+              >
+                <title>{`${arc.item.label}
+文件数量: ${formatNumber(arc.item.count)}
+大小: ${formatBytes(arc.item.size)}
+占比: ${(arc.ratio * 100).toFixed(1)}%`}</title>
+              </path>
+            ))}
+          </svg>
           <div style={{ minWidth: 220, flex: 1, maxHeight: 180, overflow: 'auto' }}>
             {data.map((item, index) => {
               const percent = totalSize > 0 ? (((item.size || 0) / totalSize) * 100).toFixed(1) : '0.0';
               return (
-                <div key={`${item.label}-${index}`} style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+                <div
+                  key={`${item.label}-${index}`}
+                  style={{ display: 'flex', alignItems: 'center', marginBottom: 8, opacity: hoveredIndex === -1 || hoveredIndex === index ? 1 : 0.5 }}
+                  onMouseEnter={() => setHoveredIndex(index)}
+                  onMouseLeave={() => setHoveredIndex(-1)}
+                >
                   <span style={{ width: 10, height: 10, background: chartColors[index % chartColors.length], borderRadius: 2, marginRight: 8 }} />
                   <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.label}>{item.label}</span>
                   <span style={{ marginLeft: 8, color: '#666', whiteSpace: 'nowrap' }}>
@@ -358,7 +392,6 @@ const JobList = () => {
     const source = statsJobs.length > 0 ? statsJobs : jobs;
     const byMeta = new Map();
     const byDest = new Map();
-    const byStatus = new Map();
     const byDay = new Map();
 
     source.forEach(job => {
@@ -386,11 +419,6 @@ const JobList = () => {
       dayAgg.count += count;
       dayAgg.size += size;
 
-      const status = job.status || 'UNKNOWN';
-      if (!byStatus.has(status)) byStatus.set(status, { label: status, count: 0, size: 0 });
-      const statusAgg = byStatus.get(status);
-      statusAgg.count += count;
-      statusAgg.size += size;
     });
 
     const topBySize = (arr) => arr.sort((a, b) => b.size - a.size).slice(0, 10);
@@ -402,7 +430,6 @@ const JobList = () => {
     return {
       meta: topBySize(Array.from(byMeta.values())),
       dest: topBySize(Array.from(byDest.values())),
-      status: topBySize(Array.from(byStatus.values())),
       daily
     };
   }, [jobs, statsJobs, metadataNameMap]);
@@ -492,16 +519,13 @@ const JobList = () => {
   return (
     <div>
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
-        <Col xs={24} xl={8}>
+        <Col xs={24} lg={8}>
           <PiePanel title="按 Metadata 展示 Transfer（文件数量 | 大小）" data={chartData.meta} />
         </Col>
-        <Col xs={24} xl={8}>
+        <Col xs={24} lg={8}>
           <PiePanel title="按 Destination 二级目录展示 Transfer（文件数量 | 大小）" data={chartData.dest} />
         </Col>
-        <Col xs={24} xl={8}>
-          <PiePanel title="按状态展示 Transfer（文件数量 | 大小）" data={chartData.status} />
-        </Col>
-        <Col span={24}>
+        <Col xs={24} lg={8}>
           <DailyBarPanel title="每天 Transfer 文件数量与大小（近14天）" data={chartData.daily} />
         </Col>
       </Row>
