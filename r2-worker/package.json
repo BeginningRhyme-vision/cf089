@@ -1,0 +1,25 @@
+{
+  "name": "r2-worker",
+  "version": "1.0.0",
+  "description": "Cloudflare Worker project",
+  "main": "src/index.js",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "test": "vitest"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "@cloudflare/workers-types": "^4.20251205.0",
+    "vitest": "^4.0.15",
+    "wrangler": "^4.53.0"
+  },
+  "dependencies": {
+    "aws4fetch": "^1.0.20",
+    "https-proxy-agent": "^7.0.6",
+    "node-fetch": "^3.3.2"
+  }
+}

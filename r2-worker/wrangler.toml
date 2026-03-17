@@ -1,0 +1,32 @@
+name = "r2-worker"
+main = "src/index.js"
+compatibility_date = "2024-12-07"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+# S3 Compatible Storage Credentials (Destination)
+# AWS_ACCESS_KEY_ID = "your_access_key"
+# AWS_SECRET_ACCESS_KEY = "your_secret_key"
+# AWS_REGION = "cn-shanghai" # e.g., cn-beijing, us-east-1
+
+# Source R2/S3 Credentials
+# SOURCE_ACCESS_KEY_ID = "source_access_key"
+# SOURCE_SECRET_ACCESS_KEY = "source_secret_key"
+
+[placement]
+mode = "smart"
+
+[observability]
+enabled = false
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 0.5
+persist = true
+invocation_logs = true
+
+[observability.traces]
+enabled = false
+persist = true
+head_sampling_rate = 1
