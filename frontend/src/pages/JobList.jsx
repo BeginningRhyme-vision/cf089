@@ -25,6 +25,8 @@ const formatBytes = (bytes) => {
   return `${value.toFixed(index === 0 ? 0 : 2)} ${units[index]}`;
 };
 
+const formatNumber = (value) => new Intl.NumberFormat('en-US').format(Number(value || 0));
+
 const chartColors = ['#1677ff', '#52c41a', '#faad14', '#eb2f96', '#13c2c2', '#722ed1', '#fa541c', '#2f54eb', '#a0d911', '#f5222d'];
 
 const buildConicGradient = (items, valueKey) => {
@@ -43,35 +45,40 @@ const buildConicGradient = (items, valueKey) => {
   return `conic-gradient(${parts.join(',')})`;
 };
 
-const PiePanel = ({ title, data, valueKey, formatter }) => {
-  const total = data.reduce((sum, item) => sum + (item[valueKey] || 0), 0);
+const PiePanel = ({ title, data }) => {
+  const totalSize = data.reduce((sum, item) => sum + (item.size || 0), 0);
+  const totalCount = data.reduce((sum, item) => sum + (item.count || 0), 0);
   return (
     <Card size="small" title={title} bodyStyle={{ padding: 12 }}>
-      {total <= 0 ? (
+      {totalSize <= 0 && totalCount <= 0 ? (
         <div style={{ textAlign: 'center', color: '#999', padding: '24px 0' }}>暂无数据</div>
       ) : (
-        <div style={{ display: 'flex', gap: 16 }}>
+        <div style={{ display: 'flex', gap: 16, flexWrap: 'wrap' }}>
           <div
             style={{
               width: 160,
               height: 160,
               borderRadius: '50%',
-              background: buildConicGradient(data, valueKey),
+              background: buildConicGradient(data, 'size'),
               flexShrink: 0
             }}
           />
-          <div style={{ minWidth: 0, flex: 1, maxHeight: 180, overflow: 'auto' }}>
+          <div style={{ minWidth: 220, flex: 1, maxHeight: 180, overflow: 'auto' }}>
             {data.map((item, index) => {
-              const value = item[valueKey] || 0;
-              const percent = total > 0 ? ((value / total) * 100).toFixed(1) : '0.0';
+              const percent = totalSize > 0 ? (((item.size || 0) / totalSize) * 100).toFixed(1) : '0.0';
               return (
                 <div key={`${item.label}-${index}`} style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
                   <span style={{ width: 10, height: 10, background: chartColors[index % chartColors.length], borderRadius: 2, marginRight: 8 }} />
                   <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.label}>{item.label}</span>
-                  <span style={{ marginLeft: 8, color: '#666' }}>{formatter(value)} ({percent}%)</span>
+                  <span style={{ marginLeft: 8, color: '#666', whiteSpace: 'nowrap' }}>
+                    {formatNumber(item.count)} | {formatBytes(item.size)} ({percent}%)
+                  </span>
                 </div>
               );
             })}
+            <div style={{ marginTop: 6, color: '#8c8c8c', fontSize: 12 }}>
+              合计：{formatNumber(totalCount)} | {formatBytes(totalSize)}
+            </div>
           </div>
         </div>
       )}
@@ -82,31 +89,89 @@ const PiePanel = ({ title, data, valueKey, formatter }) => {
 const DailyBarPanel = ({ title, data }) => {
   const maxCount = Math.max(1, ...data.map(item => item.count));
   const maxSize = Math.max(1, ...data.map(item => item.size));
+  const width = Math.max(680, data.length * 58 + 180);
+  const height = 300;
+  const margin = { top: 20, right: 72, bottom: 48, left: 72 };
+  const chartWidth = width - margin.left - margin.right;
+  const chartHeight = height - margin.top - margin.bottom;
+  const groupWidth = chartWidth / Math.max(1, data.length);
+  const barWidth = Math.min(18, Math.max(8, groupWidth * 0.25));
+
+  const yByCount = (v) => margin.top + chartHeight - (v / maxCount) * chartHeight;
+  const yBySize = (v) => margin.top + chartHeight - (v / maxSize) * chartHeight;
+  const countTicks = [0, 0.25, 0.5, 0.75, 1].map(r => Math.round(maxCount * r));
+  const sizeTicks = [0, 0.25, 0.5, 0.75, 1].map(r => Math.round(maxSize * r));
+
   return (
     <Card size="small" title={title} bodyStyle={{ padding: 12 }}>
       {data.length === 0 ? (
         <div style={{ textAlign: 'center', color: '#999', padding: '24px 0' }}>暂无数据</div>
       ) : (
-        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8, height: 220, overflowX: 'auto' }}>
-          {data.map(item => (
-            <div key={item.date} style={{ minWidth: 48, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-              <div style={{ height: 170, display: 'flex', alignItems: 'flex-end', gap: 4 }}>
-                <div
-                  title={`数量 ${item.count}`}
-                  style={{ width: 14, height: `${Math.max(4, (item.count / maxCount) * 160)}px`, background: '#1677ff', borderRadius: '4px 4px 0 0' }}
-                />
-                <div
-                  title={`大小 ${formatBytes(item.size)}`}
-                  style={{ width: 14, height: `${Math.max(4, (item.size / maxSize) * 160)}px`, background: '#52c41a', borderRadius: '4px 4px 0 0' }}
-                />
-              </div>
-              <div style={{ fontSize: 12, color: '#999', marginTop: 6 }}>{item.date.slice(5)}</div>
-            </div>
-          ))}
+        <div style={{ overflowX: 'auto' }}>
+          <svg viewBox={`0 0 ${width} ${height}`} style={{ width: '100%', minWidth: width, height: 'auto', display: 'block' }}>
+            <line x1={margin.left} y1={margin.top + chartHeight} x2={margin.left + chartWidth} y2={margin.top + chartHeight} stroke="#d9d9d9" />
+            <line x1={margin.left} y1={margin.top} x2={margin.left} y2={margin.top + chartHeight} stroke="#d9d9d9" />
+            <line x1={margin.left + chartWidth} y1={margin.top} x2={margin.left + chartWidth} y2={margin.top + chartHeight} stroke="#d9d9d9" />
+
+            {countTicks.map((tick, idx) => {
+              const y = yByCount(tick);
+              return (
+                <g key={`ct-${idx}`}>
+                  <line x1={margin.left} y1={y} x2={margin.left + chartWidth} y2={y} stroke="#f0f0f0" />
+                  <text x={margin.left - 8} y={y + 4} textAnchor="end" fontSize="11" fill="#8c8c8c">{formatNumber(tick)}</text>
+                </g>
+              );
+            })}
+
+            {sizeTicks.map((tick, idx) => {
+              const y = yBySize(tick);
+              return (
+                <text key={`st-${idx}`} x={margin.left + chartWidth + 8} y={y + 4} fontSize="11" fill="#8c8c8c">
+                  {formatBytes(tick)}
+                </text>
+              );
+            })}
+
+            <text x={margin.left} y={14} fontSize="11" fill="#1677ff">文件数量</text>
+            <text x={margin.left + chartWidth - 4} y={14} fontSize="11" fill="#52c41a" textAnchor="end">大小</text>
+
+            {data.map((item, index) => {
+              const centerX = margin.left + groupWidth * index + groupWidth / 2;
+              const countTop = yByCount(item.count);
+              const sizeTop = yBySize(item.size);
+              return (
+                <g key={item.date}>
+                  <rect
+                    x={centerX - barWidth - 2}
+                    y={countTop}
+                    width={barWidth}
+                    height={margin.top + chartHeight - countTop}
+                    fill="#1677ff"
+                    rx="3"
+                  >
+                    <title>{`${item.date} 文件数量 ${formatNumber(item.count)}`}</title>
+                  </rect>
+                  <rect
+                    x={centerX + 2}
+                    y={sizeTop}
+                    width={barWidth}
+                    height={margin.top + chartHeight - sizeTop}
+                    fill="#52c41a"
+                    rx="3"
+                  >
+                    <title>{`${item.date} 大小 ${formatBytes(item.size)}`}</title>
+                  </rect>
+                  <text x={centerX} y={margin.top + chartHeight + 18} textAnchor="middle" fontSize="11" fill="#8c8c8c">
+                    {item.date.slice(5)}
+                  </text>
+                </g>
+              );
+            })}
+          </svg>
         </div>
       )}
       <div style={{ marginTop: 8, display: 'flex', gap: 16, color: '#666' }}>
-        <span><span style={{ display: 'inline-block', width: 10, height: 10, background: '#1677ff', marginRight: 6 }} />数量</span>
+        <span><span style={{ display: 'inline-block', width: 10, height: 10, background: '#1677ff', marginRight: 6 }} />文件数量</span>
         <span><span style={{ display: 'inline-block', width: 10, height: 10, background: '#52c41a', marginRight: 6 }} />大小</span>
       </div>
     </Card>
@@ -293,13 +358,14 @@ const JobList = () => {
     const source = statsJobs.length > 0 ? statsJobs : jobs;
     const byMeta = new Map();
     const byDest = new Map();
+    const byStatus = new Map();
     const byDay = new Map();
 
     source.forEach(job => {
       const metaId = job.metadata_id;
       const metaName = job?.metadata?.client_name || metadataNameMap.get(metaId) || `meta-${metaId ?? '-'}`;
       const size = Number(job.success_size_bytes || 0);
-      const count = 1;
+      const count = Number(job.success_count ?? job.total_count ?? 0);
 
       const metaKey = `${metaId || '-'}|${metaName}`;
       if (!byMeta.has(metaKey)) byMeta.set(metaKey, { label: metaName, count: 0, size: 0 });
@@ -319,17 +385,24 @@ const JobList = () => {
       const dayAgg = byDay.get(day);
       dayAgg.count += count;
       dayAgg.size += size;
+
+      const status = job.status || 'UNKNOWN';
+      if (!byStatus.has(status)) byStatus.set(status, { label: status, count: 0, size: 0 });
+      const statusAgg = byStatus.get(status);
+      statusAgg.count += count;
+      statusAgg.size += size;
     });
 
-    const toTop = (arr) => arr.sort((a, b) => b.size - a.size).slice(0, 10);
+    const topBySize = (arr) => arr.sort((a, b) => b.size - a.size).slice(0, 10);
     const daily = Array.from(byDay.values())
       .filter(item => item.date !== '-')
       .sort((a, b) => a.date.localeCompare(b.date))
       .slice(-14);
 
     return {
-      meta: toTop(Array.from(byMeta.values())),
-      dest: toTop(Array.from(byDest.values())),
+      meta: topBySize(Array.from(byMeta.values())),
+      dest: topBySize(Array.from(byDest.values())),
+      status: topBySize(Array.from(byStatus.values())),
       daily
     };
   }, [jobs, statsJobs, metadataNameMap]);
@@ -419,20 +492,17 @@ const JobList = () => {
   return (
     <div>
       <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
-        <Col xs={24} xl={12}>
-          <PiePanel title="按 Metadata 展示 Transfer 数量" data={chartData.meta} valueKey="count" formatter={(value) => `${value}`} />
+        <Col xs={24} xl={8}>
+          <PiePanel title="按 Metadata 展示 Transfer（文件数量 | 大小）" data={chartData.meta} />
         </Col>
-        <Col xs={24} xl={12}>
-          <PiePanel title="按 Metadata 展示 Transfer 大小" data={chartData.meta} valueKey="size" formatter={formatBytes} />
+        <Col xs={24} xl={8}>
+          <PiePanel title="按 Destination 二级目录展示 Transfer（文件数量 | 大小）" data={chartData.dest} />
         </Col>
-        <Col xs={24} xl={12}>
-          <PiePanel title="按 Destination 二级目录展示 Transfer 数量" data={chartData.dest} valueKey="count" formatter={(value) => `${value}`} />
-        </Col>
-        <Col xs={24} xl={12}>
-          <PiePanel title="按 Destination 二级目录展示 Transfer 大小" data={chartData.dest} valueKey="size" formatter={formatBytes} />
+        <Col xs={24} xl={8}>
+          <PiePanel title="按状态展示 Transfer（文件数量 | 大小）" data={chartData.status} />
         </Col>
         <Col span={24}>
-          <DailyBarPanel title="每天任务 Transfer 数量与大小（近14天）" data={chartData.daily} />
+          <DailyBarPanel title="每天 Transfer 文件数量与大小（近14天）" data={chartData.daily} />
         </Col>
       </Row>
       <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between' }}>
