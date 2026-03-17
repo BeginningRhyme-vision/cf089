@@ -1,6 +1,6 @@
-import React, { useEffect, useState } from 'react';
-import { Table, Button, Modal, Form, Input, Select, Checkbox, Tag, message, Space, Popconfirm, Descriptions } from 'antd';
-import { PlayCircleOutlined, PauseCircleOutlined, StopOutlined, ReloadOutlined, PlusOutlined, DeleteOutlined, EyeOutlined } from '@ant-design/icons';
+import React, { useEffect, useMemo, useState } from 'react';
+import { Table, Button, Modal, Form, Input, Select, Checkbox, Tag, message, Space, Popconfirm, Card, Row, Col } from 'antd';
+import { PlayCircleOutlined, StopOutlined, ReloadOutlined, PlusOutlined, DeleteOutlined, EyeOutlined } from '@ant-design/icons';
 import api from '../api';
 
 const { Option } = Select;
@@ -25,8 +25,97 @@ const formatBytes = (bytes) => {
   return `${value.toFixed(index === 0 ? 0 : 2)} ${units[index]}`;
 };
 
+const chartColors = ['#1677ff', '#52c41a', '#faad14', '#eb2f96', '#13c2c2', '#722ed1', '#fa541c', '#2f54eb', '#a0d911', '#f5222d'];
+
+const buildConicGradient = (items, valueKey) => {
+  const total = items.reduce((sum, item) => sum + (item[valueKey] || 0), 0);
+  if (total <= 0) return '#f0f0f0';
+  let start = 0;
+  const parts = items.map((item, index) => {
+    const value = item[valueKey] || 0;
+    const percent = (value / total) * 100;
+    const end = start + percent;
+    const color = chartColors[index % chartColors.length];
+    const segment = `${color} ${start.toFixed(2)}% ${end.toFixed(2)}%`;
+    start = end;
+    return segment;
+  });
+  return `conic-gradient(${parts.join(',')})`;
+};
+
+const PiePanel = ({ title, data, valueKey, formatter }) => {
+  const total = data.reduce((sum, item) => sum + (item[valueKey] || 0), 0);
+  return (
+    <Card size="small" title={title} bodyStyle={{ padding: 12 }}>
+      {total <= 0 ? (
+        <div style={{ textAlign: 'center', color: '#999', padding: '24px 0' }}>暂无数据</div>
+      ) : (
+        <div style={{ display: 'flex', gap: 16 }}>
+          <div
+            style={{
+              width: 160,
+              height: 160,
+              borderRadius: '50%',
+              background: buildConicGradient(data, valueKey),
+              flexShrink: 0
+            }}
+          />
+          <div style={{ minWidth: 0, flex: 1, maxHeight: 180, overflow: 'auto' }}>
+            {data.map((item, index) => {
+              const value = item[valueKey] || 0;
+              const percent = total > 0 ? ((value / total) * 100).toFixed(1) : '0.0';
+              return (
+                <div key={`${item.label}-${index}`} style={{ display: 'flex', alignItems: 'center', marginBottom: 8 }}>
+                  <span style={{ width: 10, height: 10, background: chartColors[index % chartColors.length], borderRadius: 2, marginRight: 8 }} />
+                  <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={item.label}>{item.label}</span>
+                  <span style={{ marginLeft: 8, color: '#666' }}>{formatter(value)} ({percent}%)</span>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </Card>
+  );
+};
+
+const DailyBarPanel = ({ title, data }) => {
+  const maxCount = Math.max(1, ...data.map(item => item.count));
+  const maxSize = Math.max(1, ...data.map(item => item.size));
+  return (
+    <Card size="small" title={title} bodyStyle={{ padding: 12 }}>
+      {data.length === 0 ? (
+        <div style={{ textAlign: 'center', color: '#999', padding: '24px 0' }}>暂无数据</div>
+      ) : (
+        <div style={{ display: 'flex', alignItems: 'flex-end', gap: 8, height: 220, overflowX: 'auto' }}>
+          {data.map(item => (
+            <div key={item.date} style={{ minWidth: 48, display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+              <div style={{ height: 170, display: 'flex', alignItems: 'flex-end', gap: 4 }}>
+                <div
+                  title={`数量 ${item.count}`}
+                  style={{ width: 14, height: `${Math.max(4, (item.count / maxCount) * 160)}px`, background: '#1677ff', borderRadius: '4px 4px 0 0' }}
+                />
+                <div
+                  title={`大小 ${formatBytes(item.size)}`}
+                  style={{ width: 14, height: `${Math.max(4, (item.size / maxSize) * 160)}px`, background: '#52c41a', borderRadius: '4px 4px 0 0' }}
+                />
+              </div>
+              <div style={{ fontSize: 12, color: '#999', marginTop: 6 }}>{item.date.slice(5)}</div>
+            </div>
+          ))}
+        </div>
+      )}
+      <div style={{ marginTop: 8, display: 'flex', gap: 16, color: '#666' }}>
+        <span><span style={{ display: 'inline-block', width: 10, height: 10, background: '#1677ff', marginRight: 6 }} />数量</span>
+        <span><span style={{ display: 'inline-block', width: 10, height: 10, background: '#52c41a', marginRight: 6 }} />大小</span>
+      </div>
+    </Card>
+  );
+};
+
 const JobList = () => {
   const [jobs, setJobs] = useState([]);
+  const [statsJobs, setStatsJobs] = useState([]);
   const [metadataList, setMetadataList] = useState([]);
   const [loading, setLoading] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -45,6 +134,13 @@ const JobList = () => {
     }
     const matched = metadataList.find(m => m.id === record?.metadata_id);
     return matched?.client_name || '-';
+  };
+
+  const getDestSecondary = (dstDir) => {
+    if (!dstDir) return '-';
+    const parts = dstDir.split('/').filter(Boolean);
+    if (parts.length >= 2) return `${parts[0]}/${parts[1]}`;
+    return parts[0] || '-';
   };
 
   const fetchJobs = async (page = 1, pageSize = 10) => {
@@ -74,6 +170,28 @@ const JobList = () => {
     }
   };
 
+  const fetchStatsJobs = async () => {
+    try {
+      const all = [];
+      const limit = 200;
+      let page = 1;
+      let total = 0;
+      while (true) {
+        const res = await api.get(`/jobs/?page=${page}&limit=${limit}`);
+        const list = Array.isArray(res.data) ? res.data : [];
+        all.push(...list);
+        total = Number(res.headers?.['x-total-count'] || 0);
+        if (list.length < limit || (total > 0 && all.length >= total) || page >= 50) {
+          break;
+        }
+        page += 1;
+      }
+      setStatsJobs(all);
+    } catch (error) {
+      setStatsJobs([]);
+    }
+  };
+
   const fetchMetadata = async () => {
     try {
       const res = await api.get('/metadata/');
@@ -85,6 +203,7 @@ const JobList = () => {
 
   useEffect(() => {
     fetchJobs(pagination.current, pagination.pageSize);
+    fetchStatsJobs();
     fetchMetadata();
   }, [pagination.current, pagination.pageSize]);
 
@@ -100,6 +219,7 @@ const JobList = () => {
       message.success('Job created');
       setIsModalOpen(false);
       fetchJobs(pagination.current, pagination.pageSize);
+      fetchStatsJobs();
     } catch (error) {
       console.error(error);
     }
@@ -110,6 +230,7 @@ const JobList = () => {
       await api.post(`/jobs/${jobId}/${action}`);
       message.success(`Job ${action}ed`);
       fetchJobs(pagination.current, pagination.pageSize);
+      fetchStatsJobs();
     } catch (error) {
       message.error(`Failed to ${action} job`);
     }
@@ -120,6 +241,7 @@ const JobList = () => {
       await api.delete(`/jobs/${jobId}`);
       message.success('Job deleted');
       fetchJobs(pagination.current, pagination.pageSize);
+      fetchStatsJobs();
     } catch (error) {
       message.error('Failed to delete job');
     }
@@ -144,6 +266,7 @@ const JobList = () => {
       message.success(`复制任务已创建（ID: ${res.data?.job_id || '-' }）`);
       setDetailVisible(false);
       fetchJobs(pagination.current, pagination.pageSize);
+      fetchStatsJobs();
     } catch (error) {
       message.error('复制任务创建失败');
     }
@@ -157,6 +280,59 @@ const JobList = () => {
     COMPLETED: 'success',
     FAILED: 'error'
   };
+
+  const metadataNameMap = useMemo(() => {
+    const map = new Map();
+    metadataList.forEach(item => {
+      map.set(item.id, item.client_name || `meta-${item.id}`);
+    });
+    return map;
+  }, [metadataList]);
+
+  const chartData = useMemo(() => {
+    const source = statsJobs.length > 0 ? statsJobs : jobs;
+    const byMeta = new Map();
+    const byDest = new Map();
+    const byDay = new Map();
+
+    source.forEach(job => {
+      const metaId = job.metadata_id;
+      const metaName = job?.metadata?.client_name || metadataNameMap.get(metaId) || `meta-${metaId ?? '-'}`;
+      const size = Number(job.success_size_bytes || 0);
+      const count = 1;
+
+      const metaKey = `${metaId || '-'}|${metaName}`;
+      if (!byMeta.has(metaKey)) byMeta.set(metaKey, { label: metaName, count: 0, size: 0 });
+      const metaAgg = byMeta.get(metaKey);
+      metaAgg.count += count;
+      metaAgg.size += size;
+
+      const dest2 = getDestSecondary(job.dst_dir);
+      const destLabel = `${metaName} | ${dest2}`;
+      if (!byDest.has(destLabel)) byDest.set(destLabel, { label: destLabel, count: 0, size: 0 });
+      const destAgg = byDest.get(destLabel);
+      destAgg.count += count;
+      destAgg.size += size;
+
+      const day = (job.created_at || '').slice(0, 10) || '-';
+      if (!byDay.has(day)) byDay.set(day, { date: day, count: 0, size: 0 });
+      const dayAgg = byDay.get(day);
+      dayAgg.count += count;
+      dayAgg.size += size;
+    });
+
+    const toTop = (arr) => arr.sort((a, b) => b.size - a.size).slice(0, 10);
+    const daily = Array.from(byDay.values())
+      .filter(item => item.date !== '-')
+      .sort((a, b) => a.date.localeCompare(b.date))
+      .slice(-14);
+
+    return {
+      meta: toTop(Array.from(byMeta.values())),
+      dest: toTop(Array.from(byDest.values())),
+      daily
+    };
+  }, [jobs, statsJobs, metadataNameMap]);
 
   const columns = [
     { title: 'ID', dataIndex: 'job_id', key: 'job_id', width: 60 },
@@ -242,11 +418,28 @@ const JobList = () => {
 
   return (
     <div>
+      <Row gutter={[12, 12]} style={{ marginBottom: 16 }}>
+        <Col xs={24} xl={12}>
+          <PiePanel title="按 Metadata 展示 Transfer 数量" data={chartData.meta} valueKey="count" formatter={(value) => `${value}`} />
+        </Col>
+        <Col xs={24} xl={12}>
+          <PiePanel title="按 Metadata 展示 Transfer 大小" data={chartData.meta} valueKey="size" formatter={formatBytes} />
+        </Col>
+        <Col xs={24} xl={12}>
+          <PiePanel title="按 Destination 二级目录展示 Transfer 数量" data={chartData.dest} valueKey="count" formatter={(value) => `${value}`} />
+        </Col>
+        <Col xs={24} xl={12}>
+          <PiePanel title="按 Destination 二级目录展示 Transfer 大小" data={chartData.dest} valueKey="size" formatter={formatBytes} />
+        </Col>
+        <Col span={24}>
+          <DailyBarPanel title="每天任务 Transfer 数量与大小（近14天）" data={chartData.daily} />
+        </Col>
+      </Row>
       <div style={{ marginBottom: 16, display: 'flex', justifyContent: 'space-between' }}>
         <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); setIsModalOpen(true); }}>
           New Transfer Job
         </Button>
-        <Button icon={<ReloadOutlined />} onClick={() => fetchJobs(pagination.current, pagination.pageSize)}>Refresh</Button>
+        <Button icon={<ReloadOutlined />} onClick={() => { fetchJobs(pagination.current, pagination.pageSize); fetchStatsJobs(); }}>Refresh</Button>
       </div>
       
       <Table 
