@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -61,6 +62,7 @@ var (
 	machineName     string
 	internalClient  *http.Client
 	externalClient  *http.Client
+	workerClient    *http.Client // 新增：用于调用 Cloudflare Worker 的直连客户端
 
 	// Global rate limiter for download requests (chunks per minute)
 	globalRateLimiter *RateLimiter
@@ -158,11 +160,33 @@ func initClients() {
 		Timeout:   30 * time.Second,
 	}
 
-	// External Client - With Proxy
-	externalTransport := &http.Transport{
+	// Worker 内部调用 Client (不走代理，直连 Cloudflare Worker)
+	// 因为这个请求只是发送 JSON 控制指令，不涉及视频实际下载，不耗费代理带宽，也不会被 YouTube 封禁
+	workerTransport := &http.Transport{
 		MaxIdleConns:        1000,
 		MaxIdleConnsPerHost: 1000,
 		IdleConnTimeout:     90 * time.Second,
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true},
+	}
+	workerClient = &http.Client{
+		Transport: workerTransport,
+		Timeout:   10 * time.Minute, // 从5分钟增加到10分钟
+	}
+
+	// External Client - With Proxy (之前用于 Worker 调用，现在仅保留给可能需要的外部请求，或者废弃不用)
+	externalTransport := &http.Transport{
+		// 禁用长连接池，模拟 Python/curl 的短连接行为
+		MaxIdleConns:        -1, // -1 表示不使用空闲连接池
+		MaxIdleConnsPerHost: -1,
+		DisableKeepAlives:   true, // 强制每个请求都关闭连接
+		IdleConnTimeout:     1 * time.Second,
+		// Force HTTP/1.1 to avoid HTTP/2 stream errors over proxy
+		ForceAttemptHTTP2: false,
+		TLSClientConfig: &tls.Config{
+			InsecureSkipVerify: true,
+			MinVersion:         tls.VersionTLS12,
+			MaxVersion:         tls.VersionTLS13,
+		},
 	}
 
 	if os.Getenv("USE_PROXY") == "true" {
@@ -171,6 +195,7 @@ func initClients() {
 			if err != nil {
 				log.Printf("Invalid proxy URL: %v", err)
 			} else {
+				log.Printf("Using Proxy: %s", cfg.Worker.ProxyURL)
 				externalTransport.Proxy = http.ProxyURL(proxyURL)
 			}
 		}
@@ -201,6 +226,7 @@ var (
 	ListPartsConcurrency          = getDefaultListPartsConcurrency()
 	UploadRecoveryTimeout         = getDefaultUploadRecoveryTimeout()
 	SingleUploadVerifyTimeout     = getDefaultSingleUploadVerifyTimeout()
+	MissingETagRetryAttempts      = getDefaultMissingETagRetryAttempts()
 	TransferMaxAttempts           = getDefaultTransferMaxAttempts()
 	TransferRetryBackoffSeconds   = getDefaultTransferRetryBackoffSeconds()
 )
@@ -287,6 +313,16 @@ func getDefaultSingleUploadVerifyTimeout() time.Duration {
 		}
 	}
 	return 180 * time.Second
+}
+
+func getDefaultMissingETagRetryAttempts() int {
+	v := os.Getenv("DOWNLOAD_MISSING_ETAG_RETRY_ATTEMPTS")
+	if v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 3
 }
 
 func getDefaultTransferMaxAttempts() int {
@@ -765,6 +801,15 @@ func isRetryableTransferError(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "server gave http response to https client") {
+		return true
+	}
+	if strings.Contains(msg, "eof") {
+		return true
+	}
+	if strings.Contains(msg, "connection reset by peer") {
+		return true
+	}
 	if strings.Contains(msg, "incomplete upload") {
 		return true
 	}
@@ -778,6 +823,9 @@ func isRetryableTransferError(err error) bool {
 		return true
 	}
 	if strings.Contains(msg, "http status 429") || strings.Contains(msg, "http status 500") || strings.Contains(msg, "http status 502") || strings.Contains(msg, "http status 503") || strings.Contains(msg, "http status 504") {
+		if strings.Contains(msg, "failed to download from source: 403 forbidden") {
+			return false
+		}
 		return true
 	}
 	return false
@@ -785,6 +833,8 @@ func isRetryableTransferError(err error) bool {
 
 func transferFileWithRetry(sourceURL, key string, providedSize int64) error {
 	var lastErr error
+	proxyErrCount := 0
+	
 	for attempt := 1; attempt <= TransferMaxAttempts; attempt++ {
 		err := transferFile(sourceURL, key, providedSize)
 		if err == nil {
@@ -794,7 +844,29 @@ func transferFileWithRetry(sourceURL, key string, providedSize int64) error {
 		if attempt == TransferMaxAttempts || !isRetryableTransferError(err) {
 			break
 		}
-		backoff := time.Duration(TransferRetryBackoffSeconds*attempt) * time.Second
+		
+		msg := strings.ToLower(err.Error())
+		isProxyErr := strings.Contains(msg, "server gave http response to https client") || strings.Contains(msg, "eof") || strings.Contains(msg, "connection reset by peer")
+		
+		var backoff time.Duration
+		if isProxyErr {
+			proxyErrCount++
+			// 如果连续因为代理错误失败超过 3 次，直接放弃当前块，不浪费时间
+			if proxyErrCount > 3 {
+				log.Printf("[TRANSFER ABORT] key=%s aborted after %d proxy errors to prevent worker stalling", key, proxyErrCount)
+				break
+			}
+			// 代理错误使用极短的固定退避时间，防止阻塞 worker
+			backoff = 2 * time.Second
+		} else {
+			// 普通错误（如超时等）使用指数退避，但设置上限
+			baseBackoff := time.Duration(TransferRetryBackoffSeconds*attempt) * time.Second
+			if baseBackoff > 30*time.Second {
+				baseBackoff = 30 * time.Second
+			}
+			backoff = baseBackoff
+		}
+		
 		jitter := time.Duration(rand.Intn(1000)) * time.Millisecond
 		log.Printf("[TRANSFER RETRY] key=%s attempt=%d/%d retryable_error=%v next_wait=%s", key, attempt, TransferMaxAttempts, err, backoff+jitter)
 		time.Sleep(backoff + jitter)
@@ -831,6 +903,11 @@ func processTask(t YoutubeTask) {
 		t.ID, t.AudioURL != "", t.AudioSize, t.VideoURL != "", t.VideoSize)
 	if t.AudioURL == "" && t.VideoURL == "" {
 		reportErrorWithTask(t, "both audio_url and video_url are empty, task is not downloadable")
+		return
+	}
+	if sourceURLNeedsRefresh(t.AudioURL) || sourceURLNeedsRefresh(t.VideoURL) {
+		log.Printf("Task %d (%s): source URL likely stale/invalid, reset to PENDING for metadata refresh", t.ID, t.VideoID)
+		updateTaskStatusWithTask(t, "PENDING")
 		return
 	}
 
@@ -903,12 +980,51 @@ func processTask(t YoutubeTask) {
 	}
 
 	if len(errs) > 0 {
-		reportErrorWithTask(t, strings.Join(errs, "; "))
+		combinedErr := strings.Join(errs, "; ")
+		if isSource403Error(combinedErr) {
+			log.Printf("Task %d (%s): source 403 detected, reset to PENDING for metadata refresh", t.ID, t.VideoID)
+			updateTaskStatusWithTask(t, "PENDING")
+			return
+		}
+		reportErrorWithTask(t, combinedErr)
 	} else {
 		updateTaskStatusWithTask(t, "COMPLETED")
 		TasksProcessed.WithLabelValues("success").Inc()
 		log.Printf("Task %d (%s) COMPLETED", t.ID, t.VideoID)
 	}
+}
+
+func isSource403Error(msg string) bool {
+	m := strings.ToLower(msg)
+	return strings.Contains(m, "failed to download from source: 403 forbidden")
+}
+
+func sourceURLNeedsRefresh(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Host)
+	q := u.Query()
+	if strings.Contains(host, "r2.cloudflarestorage.com") {
+		if xid := strings.ToLower(q.Get("x-id")); xid == "putobject" {
+			return true
+		}
+	}
+	if strings.Contains(host, "googlevideo.com") {
+		if exp := q.Get("expire"); exp != "" {
+			if ts, err := strconv.ParseInt(exp, 10, 64); err == nil {
+				now := time.Now().Unix()
+				if ts-now <= 180 {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // getContentTypeFromURL 从 URL 参数中提取 MIME 类型（例如 YouTube CDN URL 中的 mime=video/mp4）
@@ -1048,7 +1164,22 @@ func transferFile(sourceURL, key string, providedSize int64) error {
 			log.Printf("[CHUNK DEBUG] Part %d: start=%d, end=%d, size=%d (expected total=%d, chunkSize=%d)",
 				pNum, s, e, chunkSize, size, ChunkSize)
 
-			etag, err := uploadChunkExternal(sourceURL, key, uploadID, pNum, s, e)
+			var (
+				etag string
+				err  error
+			)
+			for retry := 1; retry <= MissingETagRetryAttempts; retry++ {
+				etag, err = uploadChunkExternal(sourceURL, key, uploadID, pNum, s, e)
+				if err == nil {
+					break
+				}
+				if !isMissingEtagRecoverable(err) || retry == MissingETagRetryAttempts {
+					break
+				}
+				wait := time.Duration(retry*2) * time.Second
+				log.Printf("[CHUNK RETRY] Part %d recoverable missing etag, retry=%d/%d after %s", pNum, retry, MissingETagRetryAttempts, wait)
+				time.Sleep(wait)
+			}
 			if err != nil {
 				if isMissingEtagRecoverable(err) {
 					missingMu.Lock()
@@ -1221,78 +1352,193 @@ func transferSingleFile(sourceURL, key string, size int64, contentType string) e
 	}
 
 	payload := map[string]interface{}{
-		"fileUrl": sourceURL,
-		"offset":  0,
-		"size":    size,
-		"r2Key":   presignRequest.URL,
+		"fileUrl":     sourceURL,
+		"offset":      0,
+		"size":        size,
+		"r2Key":       presignRequest.URL,
+		"partNumber":  int32(-1),
+		"uploadId":    "",
 		"r2UploadUrl": presignRequest.URL,
 		"uploadUrl":   presignRequest.URL,
 		"objectKey":   key,
 		"rangeStart":  0,
 		"rangeEnd":    size - 1,
-		"headers": signedHeaders,
-		"method":  "PUT",
+		"headers":     signedHeaders,
+		"method":      "PUT",
 	}
 	body, _ := json.Marshal(payload)
 
-	var (
-		resp      *http.Response
-		reqErr    error
-		bodyBytes []byte
-	)
-	for attempt := 1; attempt <= 3; attempt++ {
-		resp, reqErr = externalClient.Post(cfg.Storage.DownloadServiceURL, "application/json", bytes.NewBuffer(body))
-		if reqErr != nil {
-			if attempt == 3 {
-				return fmt.Errorf("single upload request failed after %d attempts: %v", attempt, reqErr)
-			}
-			time.Sleep(time.Duration(attempt) * time.Second)
-			continue
+	directEnabled := strings.ToLower(os.Getenv("DIRECT_R2_UPLOAD")) == "true"
+	directMaxBytes := int64(0)
+	if v := strings.TrimSpace(os.Getenv("DIRECT_R2_MAX_BYTES")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			directMaxBytes = n
 		}
-		bodyBytes, _ = io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if resp.StatusCode >= 500 || resp.StatusCode == 429 {
-			if attempt == 3 {
+	}
+	if directEnabled && (directMaxBytes <= 0 || size <= directMaxBytes) {
+		req, err := http.NewRequest("GET", sourceURL, nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("User-Agent", "Mozilla/5.0")
+		srcResp, err := externalClient.Do(req)
+		if err != nil {
+			return fmt.Errorf("direct download failed: %w", err)
+		}
+		defer srcResp.Body.Close()
+
+		if srcResp.StatusCode < 200 || srcResp.StatusCode >= 300 {
+			b, _ := io.ReadAll(io.LimitReader(srcResp.Body, 4096))
+			return fmt.Errorf("direct download http status %d: %s", srcResp.StatusCode, string(b))
+		}
+
+		uploadSize := size
+		if srcResp.ContentLength > 0 {
+			uploadSize = srcResp.ContentLength
+		}
+
+		putReq, err := http.NewRequest("PUT", presignRequest.URL, srcResp.Body)
+		if err != nil {
+			return err
+		}
+		if uploadSize > 0 {
+			putReq.ContentLength = uploadSize
+		}
+		putReq.Header.Set("Content-Type", contentType)
+		for k, v := range signedHeaders {
+			putReq.Header.Set(k, v)
+		}
+		putResp, err := workerClient.Do(putReq)
+		if err != nil {
+			return fmt.Errorf("direct upload failed: %w", err)
+		}
+		putBody, _ := io.ReadAll(io.LimitReader(putResp.Body, 4096))
+		putResp.Body.Close()
+		if putResp.StatusCode < 200 || putResp.StatusCode >= 300 {
+			return fmt.Errorf("direct upload http status %d: %s", putResp.StatusCode, string(putBody))
+		}
+
+		size = uploadSize
+		svcEtag := strings.Trim(putResp.Header.Get("ETag"), `"`)
+		verifyDeadline := time.Now().Add(SingleUploadVerifyTimeout)
+		var headErr error
+		sleepStep := 1 * time.Second
+		for time.Now().Before(verifyDeadline) {
+			headOut, err := s3Client.HeadObject(ctx, &s3.HeadObjectInput{
+				Bucket: aws.String(bucketName),
+				Key:    aws.String(key),
+			})
+			if err == nil && headOut.ContentLength != nil {
+				actualSize := *headOut.ContentLength
+				if actualSize == size {
+					log.Printf("Successfully uploaded(single): %s (size=%d, content-type: %s, etag=%s)", key, actualSize, contentType, svcEtag)
+					return nil
+				}
+				headErr = fmt.Errorf("head object size mismatch: expected %d, got %d", size, actualSize)
+			} else if err != nil {
+				headErr = err
+			} else {
+				headErr = fmt.Errorf("head object content-length missing")
+			}
+			time.Sleep(sleepStep)
+			if sleepStep < 5*time.Second {
+				sleepStep++
+			}
+		}
+		if headErr != nil {
+			return fmt.Errorf("single upload verification failed: %v", headErr)
+		}
+		return fmt.Errorf("single upload verification failed: unknown error")
+	}
+
+	maxAttempts := TransferMaxAttempts
+	if maxAttempts < 3 {
+		maxAttempts = 3
+	}
+	var lastErr error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		// 重点修改：调用 Worker 使用 workerClient (直连，不走代理)
+		resp, reqErr := workerClient.Post(cfg.Storage.DownloadServiceURL, "application/json", bytes.NewBuffer(body))
+		if reqErr != nil {
+			lastErr = fmt.Errorf("single upload request failed: %v", reqErr)
+			if attempt == maxAttempts {
 				break
 			}
 			time.Sleep(time.Duration(attempt) * time.Second)
 			continue
 		}
-		break
-	}
 
-	if resp == nil {
-		return fmt.Errorf("single upload request failed: empty response")
-	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("single upload http status %d: %s", resp.StatusCode, string(bodyBytes))
-	}
-	verifyDeadline := time.Now().Add(SingleUploadVerifyTimeout)
-	var headErr error
-	sleepStep := 1 * time.Second
-	for time.Now().Before(verifyDeadline) {
-		headOut, err := s3Client.HeadObject(ctx, &s3.HeadObjectInput{
-			Bucket: aws.String(bucketName),
-			Key:    aws.String(key),
-		})
-		if err == nil && headOut.ContentLength != nil {
-			actualSize := *headOut.ContentLength
-			if actualSize == size {
-				log.Printf("Successfully uploaded(single): %s (size=%d, content-type: %s)", key, actualSize, contentType)
-				return nil
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+			lastErr = fmt.Errorf("single upload http status %d: %s", resp.StatusCode, string(bodyBytes))
+			if (resp.StatusCode >= 500 || resp.StatusCode == 429) && attempt < maxAttempts {
+				time.Sleep(time.Duration(attempt) * time.Second)
+				continue
 			}
-			headErr = fmt.Errorf("head object size mismatch: expected %d, got %d", size, actualSize)
-		} else if err != nil {
-			headErr = err
-		} else {
-			headErr = fmt.Errorf("head object content-length missing")
+			break
 		}
-		time.Sleep(sleepStep)
-		if sleepStep < 5*time.Second {
-			sleepStep++
+
+		svcEtag := extractServiceETag(bodyBytes)
+		if svcEtag == "" {
+			lastErr = fmt.Errorf("single upload response missing etag: %s", string(bodyBytes))
+			if attempt < maxAttempts {
+				wait := time.Duration(attempt) * time.Second
+				log.Printf("[SINGLE RETRY] upload response missing etag, attempt=%d/%d wait=%s key=%s", attempt, maxAttempts, wait, key)
+				time.Sleep(wait)
+				continue
+			}
+			break
+		}
+
+		verifyDeadline := time.Now().Add(SingleUploadVerifyTimeout)
+		var headErr error
+		sleepStep := 1 * time.Second
+		for time.Now().Before(verifyDeadline) {
+			headOut, err := s3Client.HeadObject(ctx, &s3.HeadObjectInput{
+				Bucket: aws.String(bucketName),
+				Key:    aws.String(key),
+			})
+			if err == nil && headOut.ContentLength != nil {
+				actualSize := *headOut.ContentLength
+				if actualSize == size {
+					log.Printf("Successfully uploaded(single): %s (size=%d, content-type: %s, etag=%s)", key, actualSize, contentType, svcEtag)
+					return nil
+				}
+				headErr = fmt.Errorf("head object size mismatch: expected %d, got %d", size, actualSize)
+			} else if err != nil {
+				headErr = err
+			} else {
+				headErr = fmt.Errorf("head object content-length missing")
+			}
+			time.Sleep(sleepStep)
+			if sleepStep < 5*time.Second {
+				sleepStep++
+			}
+		}
+		lastErr = fmt.Errorf("single upload verification failed after %s: %v", SingleUploadVerifyTimeout, headErr)
+		if attempt < maxAttempts {
+			wait := time.Duration(attempt*2) * time.Second
+			log.Printf("[SINGLE RETRY] verification failed, attempt=%d/%d wait=%s key=%s err=%v", attempt, maxAttempts, wait, key, headErr)
+			time.Sleep(wait)
+			continue
 		}
 	}
-	return fmt.Errorf("single upload verification failed after %s: %v", SingleUploadVerifyTimeout, headErr)
+	if lastErr == nil {
+		lastErr = fmt.Errorf("single upload failed: unknown error")
+	}
+	return lastErr
+}
+
+func extractServiceETag(body []byte) string {
+	var parsed struct {
+		ETag string `json:"etag"`
+	}
+	if err := json.Unmarshal(body, &parsed); err != nil {
+		return ""
+	}
+	return strings.Trim(parsed.ETag, `"`)
 }
 
 func isMissingEtagRecoverable(err error) bool {
@@ -1457,6 +1703,51 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 	}
 
 	chunkSize := end - start + 1
+
+	directEnabled := strings.ToLower(os.Getenv("DIRECT_R2_UPLOAD")) == "true"
+	if directEnabled {
+		req, err := http.NewRequest("GET", srcURL, nil)
+		if err != nil {
+			return "", err
+		}
+		req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", start, end))
+		req.Header.Set("User-Agent", "Mozilla/5.0")
+		srcResp, err := externalClient.Do(req)
+		if err != nil {
+			return "", fmt.Errorf("direct chunk download failed: %w", err)
+		}
+		defer srcResp.Body.Close()
+
+		if srcResp.StatusCode != http.StatusPartialContent && srcResp.StatusCode != http.StatusOK {
+			b, _ := io.ReadAll(io.LimitReader(srcResp.Body, 4096))
+			return "", fmt.Errorf("direct chunk download http status %d: %s", srcResp.StatusCode, string(b))
+		}
+
+		putReq, err := http.NewRequest("PUT", presignedURL, srcResp.Body)
+		if err != nil {
+			return "", err
+		}
+		putReq.ContentLength = chunkSize
+		for k, v := range signedHeaders {
+			putReq.Header.Set(k, v)
+		}
+		putResp, err := workerClient.Do(putReq)
+		if err != nil {
+			return "", fmt.Errorf("direct chunk upload failed: %w", err)
+		}
+		putBody, _ := io.ReadAll(io.LimitReader(putResp.Body, 4096))
+		putResp.Body.Close()
+		if putResp.StatusCode < 200 || putResp.StatusCode >= 300 {
+			return "", fmt.Errorf("direct chunk upload http status %d: %s", putResp.StatusCode, string(putBody))
+		}
+
+		etag := strings.Trim(putResp.Header.Get("ETag"), `"`)
+		if etag == "" {
+			return "", fmt.Errorf("missing etag in direct chunk upload response")
+		}
+		return etag, nil
+	}
+
 	payload := map[string]interface{}{
 		"fileUrl":    srcURL,
 		"offset":     start,
@@ -1518,7 +1809,8 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 		bodyBytes []byte
 	)
 	for attempt := 1; attempt <= 3; attempt++ {
-		resp, reqErr = externalClient.Post(cfg.Storage.DownloadServiceURL, "application/json", bytes.NewBuffer(body))
+		// 重点修改：调用 Worker 使用 workerClient (直连，不走代理)
+		resp, reqErr = workerClient.Post(cfg.Storage.DownloadServiceURL, "application/json", bytes.NewBuffer(body))
 		if reqErr != nil {
 			if attempt == 3 {
 				return "", fmt.Errorf("failed to upload chunk %d: HTTP request failed after %d attempts: %v", partNum, attempt, reqErr)
@@ -1616,7 +1908,7 @@ func fetchPartETag(ctx context.Context, bucket, key, uploadID string, partNum in
 	// 为避免对 R2 造成过高压力，这里做一个"温和"的短轮询：
 	// - 全局并发上限：3（listPartsSem）
 	// - 每个 part 最多 3 次尝试，退避时间从1秒起步（1s, 2s, 3s），总等待时间约 <= 10 秒
-	maxAttempts := 8
+	maxAttempts := 20
 	var lastErr error
 
 	for attempt := 1; attempt <= maxAttempts; attempt++ {
@@ -1694,14 +1986,22 @@ func maybeNeedsPresignedGet(srcURL string) bool {
 	if err != nil {
 		return false
 	}
-	// Already presigned?
+	host := strings.ToLower(u.Host)
+	if !strings.Contains(host, "r2.cloudflarestorage.com") {
+		return false
+	}
 	q := u.Query()
+	if xid := strings.ToLower(q.Get("x-id")); xid != "" && xid != "getobject" {
+		return true
+	}
+	if m := strings.ToUpper(q.Get("method")); m == "PUT" {
+		return true
+	}
+	// Already presigned GET
 	if q.Has("X-Amz-Signature") || q.Has("X-Amz-Credential") || q.Has("X-Amz-Algorithm") {
 		return false
 	}
-	host := strings.ToLower(u.Host)
-	// Heuristic: R2 object URLs are on *.r2.cloudflarestorage.com
-	return strings.Contains(host, "r2.cloudflarestorage.com")
+	return true
 }
 
 // presignR2GetObjectURL derives (bucket,key) from an R2 path-style object URL and generates a presigned GET URL.

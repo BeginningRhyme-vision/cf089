@@ -42,33 +42,44 @@ export default {
         console.error("Copy error:", error);
         return new Response(`Error processing copy: ${error.message}`, { status: 500 });
       }
-    } else if (url.pathname === '/upload-part') {
-      const { r2Key, fileUrl, size, offset, uploadId, partNumber } = await request.json();
-
-      if (!r2Key) {
-        return new Response("Missing required parameters", { status: 400 });
+    } else if (url.pathname === "/upload-part") {
+      if (request.method !== "POST") {
+        return new Response("Method not allowed", { status: 405 });
       }
+      try {
+        const { r2Key, fileUrl, size, offset, uploadId, partNumber } = await request.json();
 
-      const task = {
-        r2Key,
-        fileUrl,
-        size: size || 0,
-        offset: offset || 0,
-        uploadId: uploadId || null,
-        partNumber: partNumber || -1,
-        failure: 0
-      };
+        if (!r2Key || !fileUrl) {
+          return new Response("Missing required parameters", { status: 400 });
+        }
 
-      const result = await processDownloadMessage(task, env);
+        const task = {
+          r2Key,
+          fileUrl,
+          size: size || 0,
+          offset: offset || 0,
+          uploadId: uploadId || null,
+          partNumber: partNumber || -1,
+          failure: 0
+        };
 
-      return new Response(JSON.stringify({
-        message: `Successfully processed download for ${r2Key} (Part: ${task.partNumber})`,
-        etag: result.etag
-      }), {
-        headers: { "Content-Type": "application/json" },
-        status: 200,
-      });
+        const result = await processDownloadMessage(task, env);
+        if (!result?.etag) {
+          throw createHttpError(502, "Upload succeeded but ETag is missing");
+        }
 
+        return new Response(JSON.stringify({
+          message: `Successfully processed download for ${r2Key} (Part: ${task.partNumber})`,
+          etag: result.etag
+        }), {
+          headers: { "Content-Type": "application/json" },
+          status: 200,
+        });
+      } catch (error) {
+        console.error("Upload-part error:", error);
+        const status = Number.isInteger(error?.statusCode) ? error.statusCode : 500;
+        return new Response(`Error processing upload-part: ${error.message}`, { status });
+      }
     }
 
     return new Response("Worker is running. Send POST to /initiate-copy with task details.");
@@ -92,11 +103,15 @@ async function processDownloadMessage(task, env) {
       method: 'GET',
       headers: {
         'Range': `bytes=${start}-${end}`,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/139.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-us,en;q=0.5',
-        'Sec-Fetch-Mode': 'navigate'
-      }
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Origin': 'https://www.youtube.com',
+        'Referer': 'https://www.youtube.com/',
+        'Sec-Fetch-Mode': 'cors',
+        'Sec-Fetch-Site': 'cross-site'
+      },
+      redirect: 'follow'
     });
 
     console.log(`Source Response for ${r2Key} (Part: ${partNumber}):`, JSON.stringify({
@@ -105,11 +120,11 @@ async function processDownloadMessage(task, env) {
     }, null, 2));
 
     if (!sourceResponse.ok) {
-      return new Response(`Failed to download from source: ${sourceResponse.status} ${sourceResponse.statusText}`, { status: 502 });
+      throw createHttpError(502, `Failed to download from source: ${sourceResponse.status} ${sourceResponse.statusText}`);
     }
 
     if (!sourceResponse.body) {
-      return new Response('Source response has no body', { status: 502 });
+      throw createHttpError(502, "Source response has no body");
     }
 
     let r2KeyUrl = r2Key;
@@ -180,7 +195,7 @@ async function processDownloadMessage(task, env) {
     let etag = null;
     etag = s3Response.headers.get("etag");
     if (!etag) {
-      console.warn(`No ETag found in S3 response for ${uploadId} part ${partNumber}`);
+      throw createHttpError(502, `No ETag found in S3 response for uploadId=${uploadId} part=${partNumber}`);
     }
 
     console.log(`Successfully copied ${partNumber === -1 ? 'file (single put)' : `part ${partNumber}`} for ${r2Key} to S3`);
@@ -190,6 +205,12 @@ async function processDownloadMessage(task, env) {
     console.error(`Processing failed for ${r2Key} (part ${partNumber}). Error: ${error.message}`);
     throw error; // Re-throw to be handled by caller
   }
+}
+
+function createHttpError(statusCode, message) {
+  const err = new Error(message);
+  err.statusCode = statusCode;
+  return err;
 }
 
 
@@ -305,5 +326,4 @@ async function processMessage(task, env) {
     throw error; // Re-throw to be handled by caller
   }
 }
-
 

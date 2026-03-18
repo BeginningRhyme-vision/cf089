@@ -1347,7 +1347,7 @@ func RetryFailedYoutubeTasks(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Retry initiated in background"})
 }
 
-// RetryNonCompletedYoutubeTasks 从 PostgreSQL 查询非 COMPLETED 状态的任务，检查是否在队列中，如果不在则重新入队
+// RetryNonCompletedYoutubeTasks 仅重试 FAILED 且非永久错误的任务，避免重复入队与资源浪费
 func isPermanentYoutubeTaskError(msg string) bool {
 	if msg == "" {
 		return false
@@ -1423,7 +1423,7 @@ func retryNonCompletedYoutubeTasksBackground(jobID int, lockKey string) {
 		var tasks []models.YoutubeTaskRecord
 		err := database.DB.
 			Select("id, job_id, status, error_message").
-			Where("job_id = ? AND id > ? AND status != ?", jobID, lastID, "COMPLETED").
+			Where("job_id = ? AND id > ? AND status = ?", jobID, lastID, "FAILED").
 			Order("id ASC").
 			Limit(batchSize).
 			Find(&tasks).Error
@@ -1443,7 +1443,7 @@ func retryNonCompletedYoutubeTasksBackground(jobID int, lockKey string) {
 			lastID = taskID
 			totalScanned++
 
-			if task.Status == "FAILED" && isPermanentYoutubeTaskError(task.ErrorMessage) {
+			if isPermanentYoutubeTaskError(task.ErrorMessage) {
 				skippedCount++
 				permanentSkippedCount++
 				continue
