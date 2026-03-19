@@ -97,11 +97,10 @@ async function processDownloadMessage(task, env) {
   const { r2Key, size, offset, fileUrl, uploadId, partNumber } = task;
   const start = offset
   const end = offset + size - 1
-  const safeSource = redactSourceUrl(fileUrl, start, end)
   const safeDest = redactDestUrl(r2Key, partNumber)
 
   try {
-    console.log(`Download task: part=${partNumber} size=${size} range=${start}-${end} source=${safeSource} dest=${safeDest}`)
+    console.log(`Download task: part=${partNumber} size=${size} range=${start}-${end} source=${fileUrl} dest=${safeDest}`)
     const sourceResponse = await fetch(fileUrl, {
       method: 'GET',
       headers: {
@@ -205,7 +204,7 @@ async function processDownloadMessage(task, env) {
 
     return { etag };
   } catch (error) {
-    console.error(`Processing failed for ${safeDest} (part ${partNumber}). Error: ${error.message}. source=${safeSource}`);
+    console.error(`Processing failed for ${safeDest} (part ${partNumber}). Error: ${error.message}. source=${fileUrl}`);
     throw error; // Re-throw to be handled by caller
   }
 }
@@ -220,11 +219,14 @@ function redactSourceUrl(fileUrl, start, end) {
   try {
     const u = new URL(fileUrl);
     const qp = u.searchParams;
-    const keep = ["id", "itag", "ip", "expire", "mime", "source", "c", "requiressl", "ratebypass", "dur"];
+    const redactKeys = new Set([]);
     const parts = [];
-    for (const k of keep) {
-      const v = qp.get(k);
-      if (v) parts.push(`${k}=${v}`);
+    for (const [k, v] of qp.entries()) {
+      if (redactKeys.has(k)) {
+        parts.push(`${k}=<redacted>`);
+      } else {
+        parts.push(`${k}=${v}`);
+      }
     }
     parts.push(`range=${start}-${end}`);
     return `${u.protocol}//${u.host}${u.pathname}?${parts.join("&")}`;

@@ -726,8 +726,8 @@ def validate_and_get_final_url(format_obj):
         # 如果最终 URL 与原始 URL 不同，说明有重定向
         if final_url != url:
             print(f"  ℹ 格式 {format_obj.get('format_id')}: URL 重定向")
-            print(f"     原始: {url[:80]}...")
-            print(f"     最终: {final_url[:80]}...")
+            print(f"     原始: {url}...")
+            print(f"     最终: {final_url}...")
         
         # 验证最终 URL 仍然是有效的 CDN URL
         if 'googlevideo.com' not in final_url:
