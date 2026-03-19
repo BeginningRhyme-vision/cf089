@@ -97,8 +97,11 @@ async function processDownloadMessage(task, env) {
   const { r2Key, size, offset, fileUrl, uploadId, partNumber } = task;
   const start = offset
   const end = offset + size - 1
+  const safeSource = redactSourceUrl(fileUrl, start, end)
+  const safeDest = redactDestUrl(r2Key, partNumber)
 
   try {
+    console.log(`Download task: part=${partNumber} size=${size} range=${start}-${end} source=${safeSource} dest=${safeDest}`)
     const sourceResponse = await fetch(fileUrl, {
       method: 'GET',
       headers: {
@@ -114,7 +117,7 @@ async function processDownloadMessage(task, env) {
       redirect: 'follow'
     });
 
-    console.log(`Source Response for ${r2Key} (Part: ${partNumber}):`, JSON.stringify({
+    console.log(`Source Response for ${safeDest} (Part: ${partNumber}):`, JSON.stringify({
       status: sourceResponse.status,
       headers: Object.fromEntries(sourceResponse.headers.entries()),
     }, null, 2));
@@ -185,7 +188,7 @@ async function processDownloadMessage(task, env) {
     // Log full S3 response headers and content
     const s3Headers = Object.fromEntries(s3Response.headers.entries());
     const s3Body = await s3Response.text();
-    console.log(`S3 Response for ${r2Key} (Part: ${partNumber}):`, JSON.stringify({
+    console.log(`S3 Response for ${safeDest} (Part: ${partNumber}):`, JSON.stringify({
       status: s3Response.status,
       headers: s3Headers,
       body: s3Body
@@ -198,11 +201,11 @@ async function processDownloadMessage(task, env) {
       throw createHttpError(502, `No ETag found in S3 response for uploadId=${uploadId} part=${partNumber}`);
     }
 
-    console.log(`Successfully copied ${partNumber === -1 ? 'file (single put)' : `part ${partNumber}`} for ${r2Key} to S3`);
+    console.log(`Successfully copied ${partNumber === -1 ? 'file (single put)' : `part ${partNumber}`} for ${safeDest} to S3`);
 
     return { etag };
   } catch (error) {
-    console.error(`Processing failed for ${r2Key} (part ${partNumber}). Error: ${error.message}`);
+    console.error(`Processing failed for ${safeDest} (part ${partNumber}). Error: ${error.message}. source=${safeSource}`);
     throw error; // Re-throw to be handled by caller
   }
 }
@@ -211,6 +214,38 @@ function createHttpError(statusCode, message) {
   const err = new Error(message);
   err.statusCode = statusCode;
   return err;
+}
+
+function redactSourceUrl(fileUrl, start, end) {
+  try {
+    const u = new URL(fileUrl);
+    const qp = u.searchParams;
+    const keep = ["id", "itag", "ip", "expire", "mime", "source", "c", "requiressl", "ratebypass", "dur"];
+    const parts = [];
+    for (const k of keep) {
+      const v = qp.get(k);
+      if (v) parts.push(`${k}=${v}`);
+    }
+    parts.push(`range=${start}-${end}`);
+    return `${u.protocol}//${u.host}${u.pathname}?${parts.join("&")}`;
+  } catch {
+    return "<invalid_source_url>";
+  }
+}
+
+function redactDestUrl(r2Key, partNumber) {
+  try {
+    const u = new URL(r2Key);
+    const qp = u.searchParams;
+    const uploadId = qp.get("uploadId");
+    const pn = qp.get("partNumber") || (Number.isInteger(partNumber) ? String(partNumber) : "");
+    const out = [];
+    if (pn) out.push(`partNumber=${pn}`);
+    if (uploadId) out.push(`uploadId=${uploadId.slice(0, 8)}...`);
+    return `${u.protocol}//${u.host}${u.pathname}${out.length ? "?" + out.join("&") : ""}`;
+  } catch {
+    return "<invalid_dest_url>";
+  }
 }
 
 
@@ -326,4 +361,3 @@ async function processMessage(task, env) {
     throw error; // Re-throw to be handled by caller
   }
 }
-
