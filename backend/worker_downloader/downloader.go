@@ -160,8 +160,6 @@ func initClients() {
 		Timeout:   30 * time.Second,
 	}
 
-	// Worker 内部调用 Client (不走代理，直连 Cloudflare Worker)
-	// 因为这个请求只是发送 JSON 控制指令，不涉及视频实际下载，不耗费代理带宽，也不会被 YouTube 封禁
 	workerTransport := &http.Transport{
 		MaxIdleConns:        1000,
 		MaxIdleConnsPerHost: 1000,
@@ -197,6 +195,8 @@ func initClients() {
 			} else {
 				log.Printf("Using Proxy: %s", cfg.Worker.ProxyURL)
 				externalTransport.Proxy = http.ProxyURL(proxyURL)
+				workerTransport.Proxy = http.ProxyURL(proxyURL)
+				workerTransport.ForceAttemptHTTP2 = false
 			}
 		}
 	}
@@ -218,17 +218,17 @@ const (
 )
 
 var (
-	ChunkSize               int64 = getDefaultChunkSize()
-	MaxConcurrentWorkers          = getDefaultMaxConcurrentWorkers()
-	TaskBufferSize                = getDefaultTaskBufferSize()
-	ConcurrentChunksPerFile       = getDefaultConcurrentChunksPerFile() // 每个文件内部的并发chunk数量
-	GlobalRequestsPerMinute       = getDefaultGlobalRequestsPerMinute() // 全局每分钟请求数限制
-	ListPartsConcurrency          = getDefaultListPartsConcurrency()
-	UploadRecoveryTimeout         = getDefaultUploadRecoveryTimeout()
-	SingleUploadVerifyTimeout     = getDefaultSingleUploadVerifyTimeout()
-	MissingETagRetryAttempts      = getDefaultMissingETagRetryAttempts()
-	TransferMaxAttempts           = getDefaultTransferMaxAttempts()
-	TransferRetryBackoffSeconds   = getDefaultTransferRetryBackoffSeconds()
+	ChunkSize                   int64 = getDefaultChunkSize()
+	MaxConcurrentWorkers              = getDefaultMaxConcurrentWorkers()
+	TaskBufferSize                    = getDefaultTaskBufferSize()
+	ConcurrentChunksPerFile           = getDefaultConcurrentChunksPerFile() // 每个文件内部的并发chunk数量
+	GlobalRequestsPerMinute           = getDefaultGlobalRequestsPerMinute() // 全局每分钟请求数限制
+	ListPartsConcurrency              = getDefaultListPartsConcurrency()
+	UploadRecoveryTimeout             = getDefaultUploadRecoveryTimeout()
+	SingleUploadVerifyTimeout         = getDefaultSingleUploadVerifyTimeout()
+	MissingETagRetryAttempts          = getDefaultMissingETagRetryAttempts()
+	TransferMaxAttempts               = getDefaultTransferMaxAttempts()
+	TransferRetryBackoffSeconds       = getDefaultTransferRetryBackoffSeconds()
 )
 
 func getDefaultChunkSize() int64 {
@@ -834,7 +834,7 @@ func isRetryableTransferError(err error) bool {
 func transferFileWithRetry(sourceURL, key string, providedSize int64) error {
 	var lastErr error
 	proxyErrCount := 0
-	
+
 	for attempt := 1; attempt <= TransferMaxAttempts; attempt++ {
 		err := transferFile(sourceURL, key, providedSize)
 		if err == nil {
@@ -844,10 +844,10 @@ func transferFileWithRetry(sourceURL, key string, providedSize int64) error {
 		if attempt == TransferMaxAttempts || !isRetryableTransferError(err) {
 			break
 		}
-		
+
 		msg := strings.ToLower(err.Error())
 		isProxyErr := strings.Contains(msg, "server gave http response to https client") || strings.Contains(msg, "eof") || strings.Contains(msg, "connection reset by peer")
-		
+
 		var backoff time.Duration
 		if isProxyErr {
 			proxyErrCount++
@@ -866,7 +866,7 @@ func transferFileWithRetry(sourceURL, key string, providedSize int64) error {
 			}
 			backoff = baseBackoff
 		}
-		
+
 		jitter := time.Duration(rand.Intn(1000)) * time.Millisecond
 		log.Printf("[TRANSFER RETRY] key=%s attempt=%d/%d retryable_error=%v next_wait=%s", key, attempt, TransferMaxAttempts, err, backoff+jitter)
 		time.Sleep(backoff + jitter)
@@ -1749,20 +1749,20 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 	}
 
 	payload := map[string]interface{}{
-		"fileUrl":    srcURL,
-		"offset":     start,
-		"size":       chunkSize,
-		"r2Key":      presignedURL,
+		"fileUrl":     srcURL,
+		"offset":      start,
+		"size":        chunkSize,
+		"r2Key":       presignedURL,
 		"r2UploadUrl": presignedURL,
 		"uploadUrl":   presignedURL,
 		"objectKey":   key,
 		"rangeStart":  start,
 		"rangeEnd":    end,
 		"requestId":   fmt.Sprintf("%s:%d:%d", uploadID, partNum, start),
-		"headers":    signedHeaders,
-		"partNumber": partNum,
-		"uploadId":   uploadID,
-		"method": "PUT",
+		"headers":     signedHeaders,
+		"partNumber":  partNum,
+		"uploadId":    uploadID,
+		"method":      "PUT",
 	}
 
 	// Validate chunk size before sending
@@ -1864,11 +1864,11 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 				}
 			}
 		}
-		
+
 		// 如果 2xx 但没有 ETag，等待后使用 ListParts
 		if etag == "" {
 			log.Printf("[CHUNK WAIT] Part %d: 2xx response but missing ETag (status=%d), will use ListParts to retrieve ETag", partNum, resp.StatusCode)
-			
+
 			log.Printf("[CHUNK WAIT] Part %d: waiting 2s before ListParts attempt", partNum)
 			time.Sleep(2 * time.Second)
 
@@ -1882,7 +1882,7 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 				return "", fmt.Errorf("2xx but missing etag (status=%d) and ListParts lookup failed: %v. body=%s", resp.StatusCode, lerr, string(bodyBytes))
 			}
 		}
-		
+
 		// 如果成功获取到 ETag，直接返回
 		if etag != "" {
 			return etag, nil
@@ -1898,7 +1898,7 @@ func uploadChunkExternal(srcURL, key, uploadID string, partNum int32, start, end
 		}
 		return "", fmt.Errorf("HTTP status %d: %s", resp.StatusCode, string(bodyBytes))
 	}
-	
+
 	return "", fmt.Errorf("failed to upload chunk %d,Can't get Etag", partNum)
 }
 

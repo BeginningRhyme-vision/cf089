@@ -101,18 +101,45 @@ async function processDownloadMessage(task, env) {
 
   try {
     console.log(`Download task: part=${partNumber} size=${size} range=${start}-${end} source=${fileUrl} dest=${safeDest}`)
+    const userAgents = [
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+      'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3.1 Safari/605.1.15',
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:123.0) Gecko/20100101 Firefox/123.0'
+    ];
+    const randomUA = userAgents[Math.floor(Math.random() * userAgents.length)];
+    
+    // Add realistic fetch headers and sec-ch-ua headers based on UA
+    const isChrome = randomUA.includes('Chrome');
+    const isWindows = randomUA.includes('Windows');
+    
+    const sourceHeaders = {
+      'Range': `bytes=${start}-${end}`,
+      'User-Agent': randomUA,
+      'Accept': '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Accept-Encoding': 'gzip, deflate, br, zstd',
+      'Connection': 'keep-alive',
+      'Origin': 'https://www.youtube.com',
+      'Referer': 'https://www.youtube.com/',
+      'Sec-Fetch-Dest': 'empty',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Site': 'cross-site',
+      'DNT': '1'
+    };
+
+    if (isChrome) {
+      const chVersion = randomUA.match(/Chrome\/(\d+)/)?.[1] || '122';
+      const platform = isWindows ? '"Windows"' : '"macOS"';
+      sourceHeaders['sec-ch-ua'] = `"Chromium";v="${chVersion}", "Not(A:Brand";v="24", "Google Chrome";v="${chVersion}"`;
+      sourceHeaders['sec-ch-ua-mobile'] = '?0';
+      sourceHeaders['sec-ch-ua-platform'] = platform;
+    }
+
     const sourceResponse = await fetch(fileUrl, {
       method: 'GET',
-      headers: {
-        'Range': `bytes=${start}-${end}`,
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': '*/*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Origin': 'https://www.youtube.com',
-        'Referer': 'https://www.youtube.com/',
-        'Sec-Fetch-Mode': 'cors',
-        'Sec-Fetch-Site': 'cross-site'
-      },
+      headers: sourceHeaders,
       redirect: 'follow'
     });
 
