@@ -434,8 +434,88 @@ func main() {
 		log.Printf("Worker will continue running and waiting for new tasks. Press Ctrl+C to stop.")
 		pollCount := 0
 		lastTaskTime := time.Now()
+		pending := make([]YoutubeTask, 0)
+		deferCounts := map[int64]int{}
+		schedEnabled := strings.ToLower(strings.TrimSpace(os.Getenv("DOWNLOAD_SIZE_BASED_SCHEDULING"))) != "false"
+		largeMaxDefers := 5
+		if v := strings.TrimSpace(os.Getenv("DOWNLOAD_LARGE_TASK_MAX_DEFERS")); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				largeMaxDefers = n
+			}
+		}
+		largeMinProb := 0.01
+		if v := strings.TrimSpace(os.Getenv("DOWNLOAD_LARGE_TASK_MIN_PROB")); v != "" {
+			if n, err := strconv.ParseFloat(v, 64); err == nil && n >= 0 && n <= 1 {
+				largeMinProb = n
+			}
+		}
+		partMultiple := func(size int64) int64 {
+			if size <= 0 || ChunkSize <= 0 {
+				return 1
+			}
+			m := int64(math.Ceil(float64(size) / float64(ChunkSize)))
+			if m < 1 {
+				return 1
+			}
+			return m
+		}
+		taskMultiple := func(t YoutubeTask) int64 {
+			var m int64 = 1
+			if t.AudioURL != "" {
+				if ma := partMultiple(t.AudioSize); ma > m {
+					m = ma
+				}
+			}
+			if t.VideoURL != "" {
+				if mv := partMultiple(t.VideoSize); mv > m {
+					m = mv
+				}
+			}
+			return m
+		}
+		shouldEnqueue := func(t YoutubeTask) bool {
+			if !schedEnabled {
+				return true
+			}
+			m := taskMultiple(t)
+			if m <= 1 {
+				return true
+			}
+			if largeMaxDefers > 0 && deferCounts[t.ID] >= largeMaxDefers {
+				return true
+			}
+			p := 1.0 / (float64(m) * float64(m))
+			if p < largeMinProb {
+				p = largeMinProb
+			}
+			return rand.Float64() < p
+		}
+
 		for {
 			pollCount++
+
+			if len(pending) > 0 {
+				available := TaskBufferSize - len(taskChan)
+				if available < 0 {
+					available = 0
+				}
+				rotations := 0
+				maxRotations := len(pending)
+				for available > 0 && len(pending) > 0 && rotations < maxRotations {
+					t := pending[0]
+					pending = pending[1:]
+					if shouldEnqueue(t) {
+						taskChan <- t
+						available--
+						delete(deferCounts, t.ID)
+						continue
+					}
+					deferCounts[t.ID]++
+					pending = append(pending, t)
+					rotations++
+				}
+			}
+
 			// Backpressure: if channel is mostly full, wait a bit
 			// 当 channel 使用率达到 80% 时才等待（避免整数除法问题）
 			threshold := int(float64(TaskBufferSize) * 0.8)
@@ -462,6 +542,10 @@ func main() {
 			}
 
 			if len(tasks) == 0 {
+				if len(pending) > 0 {
+					time.Sleep(200 * time.Millisecond)
+					continue
+				}
 				// 减少无任务时的日志输出频率，每 50 次轮询输出一次，并显示等待时间
 				if pollCount%50 == 0 {
 					timeSinceLastTask := time.Since(lastTaskTime)
@@ -473,9 +557,7 @@ func main() {
 			}
 			lastTaskTime = time.Now()
 			log.Printf("[Poll #%d] ✓ Acquired %d tasks from backend", pollCount, len(tasks))
-			for _, t := range tasks {
-				taskChan <- t
-			}
+			pending = append(pending, tasks...)
 		}
 	}()
 
@@ -801,6 +883,9 @@ func isRetryableTransferError(err error) bool {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "http status 403") || strings.Contains(msg, "403 forbidden") {
+		return true
+	}
 	if strings.Contains(msg, "server gave http response to https client") {
 		return true
 	}
@@ -823,9 +908,6 @@ func isRetryableTransferError(err error) bool {
 		return true
 	}
 	if strings.Contains(msg, "http status 429") || strings.Contains(msg, "http status 500") || strings.Contains(msg, "http status 502") || strings.Contains(msg, "http status 503") || strings.Contains(msg, "http status 504") {
-		if strings.Contains(msg, "failed to download from source: 403 forbidden") {
-			return false
-		}
 		return true
 	}
 	return false
@@ -981,11 +1063,6 @@ func processTask(t YoutubeTask) {
 
 	if len(errs) > 0 {
 		combinedErr := strings.Join(errs, "; ")
-		if isSource403Error(combinedErr) {
-			log.Printf("Task %d (%s): source 403 detected, reset to PENDING for metadata refresh", t.ID, t.VideoID)
-			updateTaskStatusWithTask(t, "PENDING")
-			return
-		}
 		reportErrorWithTask(t, combinedErr)
 	} else {
 		updateTaskStatusWithTask(t, "COMPLETED")

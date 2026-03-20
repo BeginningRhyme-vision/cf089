@@ -5,8 +5,8 @@ services:
     image: 209.222.101.19:5000/unbound-worker-ffmpeg:latest
     command: ["ffmpeg_scanner"]
     environment:
-      - BACKEND_API_URL=${BACKEND_API_URL:-http://YOUR_BACKEND_IP:8080/api}
-      - REDIS_URL=${REDIS_URL:-redis://:redis_password@YOUR_REDIS_IP:6379/0}
+      - BACKEND_API_URL=${BACKEND_API_URL:-http://209.222.101.19:8080/api}
+      - REDIS_URL=${REDIS_URL:-redis://:redis_password@209.222.101.19:6379/0}
       - PROVIDER=aliyun
       - ZONE=cn-shanghai
       - FFMPEG_QUEUE_PREFIX=ffmpeg-aliyun
@@ -18,8 +18,8 @@ services:
     image: 209.222.101.19:5000/unbound-worker-ffmpeg:latest
     command: ["ffmpeg_worker"]
     environment:
-      - BACKEND_API_URL=${BACKEND_API_URL:-http://YOUR_BACKEND_IP:8080/api}
-      - REDIS_URL=${REDIS_URL:-redis://:redis_password@YOUR_REDIS_IP:6379/0}
+      - BACKEND_API_URL=${BACKEND_API_URL:-http://209.222.101.19:8080/api}
+      - REDIS_URL=${REDIS_URL:-redis://:redis_password@209.222.101.19:6379/0}
       - MAX_THREADS=${MAX_THREADS:-32}
       - FFMPEG_QUEUE_PREFIX=ffmpeg-aliyun
       - FFMPEG_TEMP_DIR=${FFMPEG_TEMP_DIR:-/data/ffmpeg-tmp}
