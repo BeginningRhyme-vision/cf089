@@ -26,8 +26,8 @@ worker:
   proxy_url: "http://furion2025-zone-adam:furion2025@i7g4h7p1q3e7-na.grassdata.net:2345"
 
 storage:
-  transfer_service_url: "https://worker.unboundfuture.ai/initiate-copy"
-  download_service_url: "https://worker.unboundfuture.ai/upload-part"
+  transfer_service_url: "https://testchange.unboundfuture.ai/worker/initiate-copy"
+  download_service_url: "https://testchange.unboundfuture.ai/worker/upload-part"
   src:
     endpoint: "https://6d18700b4bd3fff2b330035c35b0bbeb.r2.cloudflarestorage.com/tmp-transfer2"
     access_key: "6e17dce5e6699ec405f7ec07deecf321"

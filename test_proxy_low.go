@@ -36,7 +36,7 @@ func main() {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
-			req, _ := http.NewRequest("GET", "https://r2-worker.cf022.workers.dev/upload-part", nil)
+			req, _ := http.NewRequest("GET", "https://testchange.unboundfuture.ai/worker/upload-part", nil)
 			resp, err := client.Do(req)
 			mu.Lock()
 			defer mu.Unlock()

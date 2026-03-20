@@ -16,7 +16,7 @@ def test_req(i):
     global success, failed
     try:
         # We expect 405 from our worker
-        resp = requests.get("https://r2-worker.cf022.workers.dev/upload-part", proxies=proxies, timeout=10)
+        resp = requests.get("https://testchange.unboundfuture.ai/worker/upload-part", proxies=proxies, timeout=10)
         with lock:
             if resp.status_code == 405:
                 success += 1
