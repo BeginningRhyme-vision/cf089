@@ -10,6 +10,7 @@ import (
 	"log"
 	"math"
 	"math/rand"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,6 +24,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/credentials"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/aws/aws-sdk-go-v2/service/s3/types"
+	"github.com/oschwald/maxminddb-golang"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -80,6 +82,10 @@ var (
 		Name: "worker_downloader_duration_seconds",
 		Help: "Duration of downloads",
 	})
+
+	geoCountryDBOnce sync.Once
+	geoCountryDB     *maxminddb.Reader
+	geoCountryDBErr  error
 )
 
 // RateLimiter 速率限制器：控制每分钟的请求数
@@ -148,6 +154,106 @@ func (rl *RateLimiter) Acquire() {
 	rl.requestTimes = append(rl.requestTimes, time.Now())
 }
 
+func geoCountryDBPath() string {
+	if p := strings.TrimSpace(os.Getenv("GEOIP_COUNTRY_MMDB_PATH")); p != "" {
+		return p
+	}
+	candidates := []string{
+		"/app/GeoLite2-Country.mmdb",
+		"/app/assets/GeoLite2-Country.mmdb",
+		"GeoLite2-Country.mmdb",
+	}
+	for _, p := range candidates {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+func getGeoCountryDB() (*maxminddb.Reader, error) {
+	geoCountryDBOnce.Do(func() {
+		p := geoCountryDBPath()
+		if p == "" {
+			geoCountryDBErr = fmt.Errorf("geoip country mmdb not found")
+			return
+		}
+		geoCountryDB, geoCountryDBErr = maxminddb.Open(p)
+	})
+	return geoCountryDB, geoCountryDBErr
+}
+
+func proxyEgressIP(proxyURL *url.URL) (net.IP, error) {
+	tr := &http.Transport{
+		Proxy:             http.ProxyURL(proxyURL),
+		DisableKeepAlives: true,
+		ForceAttemptHTTP2: false,
+		TLSClientConfig:   &tls.Config{InsecureSkipVerify: true},
+	}
+	c := &http.Client{
+		Transport: tr,
+		Timeout:   10 * time.Second,
+	}
+	reqURL := fmt.Sprintf("http://api.ipify.org?ts=%d", time.Now().UnixNano())
+	resp, err := c.Get(reqURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(resp.Body, 128))
+	ipStr := strings.TrimSpace(string(b))
+	ip := net.ParseIP(ipStr)
+	if ip == nil {
+		return nil, fmt.Errorf("failed to parse ip: %q", ipStr)
+	}
+	return ip, nil
+}
+
+func proxyEgressCountryISO(proxyURL *url.URL) (string, net.IP, error) {
+	ip, err := proxyEgressIP(proxyURL)
+	if err != nil {
+		return "", nil, err
+	}
+	db, err := getGeoCountryDB()
+	if err != nil {
+		return "", ip, err
+	}
+	var rec struct {
+		Country struct {
+			ISOCode string `maxminddb:"iso_code"`
+		} `maxminddb:"country"`
+	}
+	err = db.Lookup(ip, &rec)
+	if err != nil {
+		return "", ip, err
+	}
+	iso := strings.ToUpper(strings.TrimSpace(rec.Country.ISOCode))
+	return iso, ip, nil
+}
+
+func ensureNonUSProxy(proxyURL *url.URL, maxAttempts int) {
+	if maxAttempts < 1 {
+		maxAttempts = 1
+	}
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		iso, ip, err := proxyEgressCountryISO(proxyURL)
+		if err != nil {
+			log.Printf("Proxy geo check failed (attempt %d/%d): %v", attempt, maxAttempts, err)
+			if strings.Contains(strings.ToLower(err.Error()), "mmdb") {
+				return
+			}
+			time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
+			continue
+		}
+		if iso != "US" {
+			log.Printf("Proxy egress accepted: %s (%s)", ip.String(), iso)
+			return
+		}
+		log.Printf("Proxy egress is US, retrying (attempt %d/%d): %s (%s)", attempt, maxAttempts, ip.String(), iso)
+		time.Sleep(time.Duration(attempt) * 300 * time.Millisecond)
+	}
+}
+
 func initClients() {
 	// Internal Client - No Proxy
 	internalTransport := &http.Transport{
@@ -193,6 +299,7 @@ func initClients() {
 			if err != nil {
 				log.Printf("Invalid proxy URL: %v", err)
 			} else {
+				ensureNonUSProxy(proxyURL, 3)
 				log.Printf("Using Proxy: %s", cfg.Worker.ProxyURL)
 				externalTransport.Proxy = http.ProxyURL(proxyURL)
 				workerTransport.Proxy = http.ProxyURL(proxyURL)

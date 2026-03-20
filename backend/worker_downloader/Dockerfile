@@ -5,6 +5,7 @@ WORKDIR /app
 
 # Copy Go module files
 COPY go.mod go.sum ./
+COPY third_party ./third_party
 RUN go mod download
 
 # Copy source code
@@ -28,6 +29,8 @@ RUN apt-get update && \
 # Copy Go binary from builder
 COPY --from=builder /app/downloader /usr/local/bin/downloader
 
+COPY assets/GeoLite2-Country.mmdb /app/assets/GeoLite2-Country.mmdb
+
 # Copy Python requirements and install
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
@@ -37,6 +40,7 @@ COPY get_yt_metadata.py .
 
 # Environment variables (defaults)
 ENV BACKEND_API_URL="http://host.docker.internal:8080/api"
+ENV GEOIP_COUNTRY_MMDB_PATH="/app/assets/GeoLite2-Country.mmdb"
 
 # Default command
 # Users should override this to run either the Go downloader or Python metadata fetcher
