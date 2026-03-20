@@ -7,11 +7,8 @@ require (
 	github.com/aws/aws-sdk-go-v2/config v1.27.0
 	github.com/aws/aws-sdk-go-v2/credentials v1.17.0
 	github.com/aws/aws-sdk-go-v2/service/s3 v1.65.0
-	github.com/oschwald/maxminddb-golang v1.13.0
 	gopkg.in/yaml.v3 v3.0.1
 )
-
-replace github.com/oschwald/maxminddb-golang => ./third_party/maxminddb-golang
 
 require (
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.6.6 // indirect
