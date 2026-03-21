@@ -6,7 +6,9 @@ workers_dev = true
 preview_urls = true
 routes = [
   { pattern = "worker.unboundfuture.ai/worker", zone_name = "unboundfuture.ai" },
-  { pattern = "worker.unboundfuture.ai", zone_name = "unboundfuture.ai", custom_domain = true }
+  { pattern = "worker.unboundfuture.ai", zone_name = "unboundfuture.ai", custom_domain = true },
+  { pattern = "testchange.unboundfuture.ai/worker", zone_name = "unboundfuture.ai" },
+  { pattern = "testchange.unboundfuture.ai", zone_name = "unboundfuture.ai", custom_domain = true }
 ]
 
 [vars]

@@ -9,8 +9,14 @@ export default {
    */
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
+    let pathname = url.pathname;
+    if (pathname === "/worker") {
+      pathname = "/";
+    } else if (pathname.startsWith("/worker/")) {
+      pathname = pathname.slice("/worker".length);
+    }
 
-    if (url.pathname === "/initiate-copy" && request.method === "POST") {
+    if (pathname === "/initiate-copy" && request.method === "POST") {
       try {
         const { r2Key, s3Url, size, offset, uploadId, partNumber } = await request.json();
 
@@ -42,7 +48,7 @@ export default {
         console.error("Copy error:", error);
         return new Response(`Error processing copy: ${error.message}`, { status: 500 });
       }
-    } else if (url.pathname === "/upload-part") {
+    } else if (pathname === "/upload-part") {
       if (request.method !== "POST") {
         return new Response("Method not allowed", { status: 405 });
       }
