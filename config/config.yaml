@@ -24,6 +24,13 @@ worker:
   max_threads: 1024
   # Proxy configuration for worker requests (optional)
   proxy_url: "http://furion2025-zone-adam:furion2025@i7g4h7p1q3e7-na.grassdata.net:2345"
+  proxy_session_username_template: "{base}-session-{session}-sesstime-{sesstime}"
+  proxy_session_sesstime_minutes: 5
+  proxy_session_max_requests: 500
+  proxy_session_max_403: 20
+  proxy_session_max_403_rate: 0.15
+  proxy_session_min_req_for_rate: 50
+  proxy_session_max_age_minutes: 5
 
 storage:
   transfer_service_url: "https://testchange.unboundfuture.ai/worker/initiate-copy"

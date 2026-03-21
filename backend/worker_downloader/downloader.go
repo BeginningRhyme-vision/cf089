@@ -16,6 +16,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -38,6 +39,14 @@ type Config struct {
 
 type WorkerConfig struct {
 	ProxyURL string `yaml:"proxy_url"`
+
+	ProxySessionUsernameTemplate *string  `yaml:"proxy_session_username_template"`
+	ProxySessionSesstimeMinutes  *int     `yaml:"proxy_session_sesstime_minutes"`
+	ProxySessionMaxRequests      *int64   `yaml:"proxy_session_max_requests"`
+	ProxySessionMax403           *int64   `yaml:"proxy_session_max_403"`
+	ProxySessionMax403Rate       *float64 `yaml:"proxy_session_max_403_rate"`
+	ProxySessionMinReqForRate    *int64   `yaml:"proxy_session_min_req_for_rate"`
+	ProxySessionMaxAgeMinutes    *int     `yaml:"proxy_session_max_age_minutes"`
 }
 
 type StorageConfig struct {
@@ -189,25 +198,253 @@ func initClients() {
 
 	if os.Getenv("USE_PROXY") == "true" {
 		if cfg.Worker.ProxyURL != "" {
-			proxyURL, err := url.Parse(cfg.Worker.ProxyURL)
+			mgr, err := newProxySessionManager(cfg.Worker.ProxyURL, cfg.Worker)
 			if err != nil {
 				log.Printf("Invalid proxy URL: %v", err)
 			} else {
-				log.Printf("Using Proxy: %s", cfg.Worker.ProxyURL)
-				externalTransport.Proxy = http.ProxyURL(proxyURL)
-				workerTransport.Proxy = http.ProxyURL(proxyURL)
-				workerTransport.ForceAttemptHTTP2 = false
+				externalTransport.Proxy = mgr.ProxyFunc
+				externalClient = &http.Client{
+					Transport: &proxyStatsRoundTripper{base: externalTransport, mgr: mgr},
+					Timeout:   10 * time.Minute,
+				}
 			}
 		}
 	}
-	// No proxy
-	// Use longer timeout for upload operations (10 minutes for large chunks)
-	// Upload service may need time to download from YouTube CDN and upload to R2
-	// 增加超时时间以支持更大的chunk size和更高的并发
-	externalClient = &http.Client{
-		Transport: externalTransport,
-		Timeout:   10 * time.Minute, // 从5分钟增加到10分钟
+	if externalClient == nil {
+		externalClient = &http.Client{
+			Transport: externalTransport,
+			Timeout:   10 * time.Minute,
+		}
 	}
+}
+
+type proxyStatsRoundTripper struct {
+	base http.RoundTripper
+	mgr  *proxySessionManager
+}
+
+func (rt *proxyStatsRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	if rt.mgr != nil {
+		rt.mgr.BeforeRequest()
+	}
+	resp, err := rt.base.RoundTrip(req)
+	if rt.mgr != nil {
+		rt.mgr.AfterResponse(resp, err)
+	}
+	return resp, err
+}
+
+type proxySessionManager struct {
+	baseProxy     *url.URL
+	usernameBase  string
+	password      string
+	usernameTmpl  string
+	sesstimeMins  int
+	maxRequests   int64
+	max403        int64
+	max403Rate    float64
+	minReqForRate int64
+	maxAge        time.Duration
+
+	mu          sync.Mutex
+	session     string
+	sessionBorn time.Time
+	reqCount    int64
+	forbidCount int64
+	current     atomic.Value // *url.URL
+}
+
+func newProxySessionManager(rawProxy string, wcfg WorkerConfig) (*proxySessionManager, error) {
+	u, err := url.Parse(strings.TrimSpace(rawProxy))
+	if err != nil {
+		return nil, err
+	}
+	if u.Scheme == "" || u.Host == "" {
+		return nil, fmt.Errorf("proxy url missing scheme/host")
+	}
+	user := ""
+	pass := ""
+	if u.User != nil {
+		user = u.User.Username()
+		if p, ok := u.User.Password(); ok {
+			pass = p
+		}
+	}
+	if user == "" {
+		return nil, fmt.Errorf("proxy url missing username")
+	}
+
+	cleanBase := user
+	if i := strings.Index(cleanBase, "-session-"); i >= 0 {
+		cleanBase = cleanBase[:i]
+	}
+	if i := strings.Index(cleanBase, "-sesstime-"); i >= 0 {
+		cleanBase = cleanBase[:i]
+	}
+
+	sesstimeMins := 5
+	if wcfg.ProxySessionSesstimeMinutes != nil && *wcfg.ProxySessionSesstimeMinutes >= 0 {
+		sesstimeMins = *wcfg.ProxySessionSesstimeMinutes
+	}
+	if v := strings.TrimSpace(os.Getenv("PROXY_SESSION_SESSTIME_MINUTES")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			sesstimeMins = n
+		}
+	}
+
+	maxRequests := int64(500)
+	if wcfg.ProxySessionMaxRequests != nil && *wcfg.ProxySessionMaxRequests > 0 {
+		maxRequests = *wcfg.ProxySessionMaxRequests
+	}
+	if v := strings.TrimSpace(os.Getenv("PROXY_SESSION_MAX_REQUESTS")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n > 0 {
+			maxRequests = n
+		}
+	}
+	max403 := int64(20)
+	if wcfg.ProxySessionMax403 != nil && *wcfg.ProxySessionMax403 >= 0 {
+		max403 = *wcfg.ProxySessionMax403
+	}
+	if v := strings.TrimSpace(os.Getenv("PROXY_SESSION_MAX_403")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+			max403 = n
+		}
+	}
+	max403Rate := 0.15
+	if wcfg.ProxySessionMax403Rate != nil && *wcfg.ProxySessionMax403Rate >= 0 && *wcfg.ProxySessionMax403Rate <= 1 {
+		max403Rate = *wcfg.ProxySessionMax403Rate
+	}
+	if v := strings.TrimSpace(os.Getenv("PROXY_SESSION_MAX_403_RATE")); v != "" {
+		if n, err := strconv.ParseFloat(v, 64); err == nil && n >= 0 && n <= 1 {
+			max403Rate = n
+		}
+	}
+	minReqForRate := int64(50)
+	if wcfg.ProxySessionMinReqForRate != nil && *wcfg.ProxySessionMinReqForRate >= 0 {
+		minReqForRate = *wcfg.ProxySessionMinReqForRate
+	}
+	if v := strings.TrimSpace(os.Getenv("PROXY_SESSION_MIN_REQ_FOR_RATE")); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil && n >= 0 {
+			minReqForRate = n
+		}
+	}
+
+	maxAgeMins := sesstimeMins
+	if wcfg.ProxySessionMaxAgeMinutes != nil && *wcfg.ProxySessionMaxAgeMinutes >= 0 {
+		maxAgeMins = *wcfg.ProxySessionMaxAgeMinutes
+	}
+	if v := strings.TrimSpace(os.Getenv("PROXY_SESSION_MAX_AGE_MINUTES")); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			maxAgeMins = n
+		}
+	}
+	var maxAge time.Duration
+	if maxAgeMins > 0 {
+		maxAge = time.Duration(maxAgeMins) * time.Minute
+	}
+
+	usernameTmpl := "{base}-session-{session}-sesstime-{sesstime}"
+	if wcfg.ProxySessionUsernameTemplate != nil && strings.TrimSpace(*wcfg.ProxySessionUsernameTemplate) != "" {
+		usernameTmpl = strings.TrimSpace(*wcfg.ProxySessionUsernameTemplate)
+	}
+	if v := strings.TrimSpace(os.Getenv("PROXY_SESSION_USERNAME_TEMPLATE")); v != "" {
+		usernameTmpl = v
+	}
+
+	mgr := &proxySessionManager{
+		baseProxy:     u,
+		usernameBase:  cleanBase,
+		password:      pass,
+		usernameTmpl:  usernameTmpl,
+		sesstimeMins:  sesstimeMins,
+		maxRequests:   maxRequests,
+		max403:        max403,
+		max403Rate:    max403Rate,
+		minReqForRate: minReqForRate,
+		maxAge:        maxAge,
+	}
+	mgr.rotateLocked("init")
+	return mgr, nil
+}
+
+func (m *proxySessionManager) ProxyFunc(req *http.Request) (*url.URL, error) {
+	v := m.current.Load()
+	if v == nil {
+		return nil, nil
+	}
+	return v.(*url.URL), nil
+}
+
+func (m *proxySessionManager) BeforeRequest() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.maybeRotateLocked("pre")
+}
+
+func (m *proxySessionManager) AfterResponse(resp *http.Response, err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reqCount++
+	if resp != nil && resp.StatusCode == http.StatusForbidden {
+		m.forbidCount++
+	}
+	m.maybeRotateLocked("post")
+}
+
+func (m *proxySessionManager) maybeRotateLocked(stage string) {
+	now := time.Now()
+	if m.maxAge > 0 && now.Sub(m.sessionBorn) >= m.maxAge {
+		m.rotateLocked("age")
+		return
+	}
+	if m.maxRequests > 0 && m.reqCount >= m.maxRequests {
+		m.rotateLocked("max_requests")
+		return
+	}
+	if m.max403 >= 0 && m.forbidCount >= m.max403 && m.reqCount > 0 {
+		m.rotateLocked("max_403")
+		return
+	}
+	if m.max403Rate > 0 && m.reqCount >= m.minReqForRate {
+		rate := float64(m.forbidCount) / float64(m.reqCount)
+		if rate >= m.max403Rate {
+			m.rotateLocked("403_rate")
+			return
+		}
+	}
+}
+
+func (m *proxySessionManager) rotateLocked(reason string) {
+	m.session = randAlphaNum(16)
+	m.sessionBorn = time.Now()
+	m.reqCount = 0
+	m.forbidCount = 0
+
+	u := *m.baseProxy
+	u.User = url.UserPassword(m.formatUsername(), m.password)
+	m.current.Store(&u)
+
+	host := u.Host
+	log.Printf("[PROXY SESSION] rotate reason=%s session=%s host=%s sesstime_min=%d", reason, m.session, host, m.sesstimeMins)
+}
+
+func (m *proxySessionManager) formatUsername() string {
+	s := strings.ReplaceAll(m.usernameTmpl, "{base}", m.usernameBase)
+	s = strings.ReplaceAll(s, "{session}", m.session)
+	s = strings.ReplaceAll(s, "{sesstime}", strconv.Itoa(m.sesstimeMins))
+	return s
+}
+
+func randAlphaNum(n int) string {
+	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+	if n <= 0 {
+		return ""
+	}
+	b := make([]byte, n)
+	for i := 0; i < n; i++ {
+		b[i] = letters[rand.Intn(len(letters))]
+	}
+	return string(b)
 }
 
 const (
