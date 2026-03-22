@@ -38,7 +38,8 @@ type Config struct {
 }
 
 type WorkerConfig struct {
-	ProxyURL string `yaml:"proxy_url"`
+	ProxyURL        string `yaml:"proxy_url"`
+	ProxyUseSession *bool  `yaml:"proxy_use_session"`
 
 	ProxySessionUsernameTemplate *string  `yaml:"proxy_session_username_template"`
 	ProxySessionSesstimeMinutes  *int     `yaml:"proxy_session_sesstime_minutes"`
@@ -198,14 +199,38 @@ func initClients() {
 
 	if os.Getenv("USE_PROXY") == "true" {
 		if cfg.Worker.ProxyURL != "" {
-			mgr, err := newProxySessionManager(cfg.Worker.ProxyURL, cfg.Worker)
-			if err != nil {
-				log.Printf("Invalid proxy URL: %v", err)
+			useSession := true
+			if cfg.Worker.ProxyUseSession != nil {
+				useSession = *cfg.Worker.ProxyUseSession
+			}
+			if v := strings.TrimSpace(os.Getenv("PROXY_USE_SESSION")); v != "" {
+				if b, err := strconv.ParseBool(v); err == nil {
+					useSession = b
+				}
+			}
+
+			if useSession {
+				mgr, err := newProxySessionManager(cfg.Worker.ProxyURL, cfg.Worker)
+				if err != nil {
+					log.Printf("Invalid proxy URL: %v", err)
+				} else {
+					externalTransport.Proxy = mgr.ProxyFunc
+					externalClient = &http.Client{
+						Transport: &proxyStatsRoundTripper{base: externalTransport, mgr: mgr},
+						Timeout:   10 * time.Minute,
+					}
+				}
 			} else {
-				externalTransport.Proxy = mgr.ProxyFunc
-				externalClient = &http.Client{
-					Transport: &proxyStatsRoundTripper{base: externalTransport, mgr: mgr},
-					Timeout:   10 * time.Minute,
+				proxyURL, err := url.Parse(strings.TrimSpace(cfg.Worker.ProxyURL))
+				if err != nil {
+					log.Printf("Invalid proxy URL: %v", err)
+				} else {
+					externalTransport.Proxy = http.ProxyURL(proxyURL)
+					externalClient = &http.Client{
+						Transport: externalTransport,
+						Timeout:   10 * time.Minute,
+					}
+					log.Printf("[PROXY] use_session=false host=%s", proxyURL.Host)
 				}
 			}
 		}

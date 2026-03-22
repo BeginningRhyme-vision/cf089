@@ -23,6 +23,7 @@ security:
 worker:
   max_threads: 1024
   proxy_url: "http://furion2025-zone-adam:furion2025@ins-g6q3t5d5m2h.grassdata.net:2345"
+  proxy_use_session: true
   proxy_session_username_template: "{base}-session-{session}-sesstime-{sesstime}"
   proxy_session_sesstime_minutes: 10
   proxy_session_max_requests: 1
