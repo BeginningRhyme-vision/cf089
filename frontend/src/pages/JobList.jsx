@@ -346,29 +346,24 @@ const JobList = () => {
     }
   };
 
-  const handleDuplicateJob = async () => {
+  const handleDuplicateJob = () => {
     if (!selectedJob) return;
-    try {
-      const payload = {
-        metadata_id: selectedJob.metadata_id,
-        src_dir: selectedJob.src_dir,
-        dst_dir: selectedJob.dst_dir,
-        include: selectedJob.include || '',
-        exclude: selectedJob.exclude || '',
-        delete_source: !!selectedJob.delete_source,
-        is_incremental: !!selectedJob.is_incremental
-      };
-      if (selectedJob.is_incremental) {
-        payload.periodic_interval = selectedJob.periodic_interval > 0 ? selectedJob.periodic_interval : 600;
-      }
-      const res = await api.post('/jobs/', payload);
-      message.success(`复制任务已创建（ID: ${res.data?.job_id || '-' }）`);
-      setDetailVisible(false);
-      fetchJobs(pagination.current, pagination.pageSize);
-      fetchStatsJobs();
-    } catch (error) {
-      message.error('复制任务创建失败');
+    const payload = {
+      metadata_id: selectedJob.metadata_id,
+      src_dir: selectedJob.src_dir,
+      dst_dir: selectedJob.dst_dir,
+      include: selectedJob.include || '',
+      exclude: selectedJob.exclude || '',
+      delete_source: !!selectedJob.delete_source,
+      is_incremental: !!selectedJob.is_incremental
+    };
+    if (selectedJob.is_incremental) {
+      payload.periodic_interval = selectedJob.periodic_interval > 0 ? selectedJob.periodic_interval : 600;
     }
+    form.resetFields();
+    form.setFieldsValue(payload);
+    setIsModalOpen(true);
+    setDetailVisible(false);
   };
 
   const statusColors = {

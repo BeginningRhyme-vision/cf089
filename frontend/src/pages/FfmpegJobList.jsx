@@ -162,27 +162,22 @@ const FfmpegJobList = () => {
     }
   };
 
-  const handleDuplicateJob = async () => {
+  const handleDuplicateJob = () => {
     if (!selectedJob) return;
-    try {
-      const payload = {
-        metadata_id: selectedJob.metadata_id,
-        s3_prefix: selectedJob.s3_prefix,
-        s3_upload_prefix: selectedJob.s3_upload_prefix,
-        is_incremental: !!selectedJob.is_incremental
-      };
-      if (selectedJob.is_incremental) {
-        payload.periodic_interval = selectedJob.periodic_interval > 0 ? selectedJob.periodic_interval : 600;
-      }
-      const shouldContinue = await confirmIfPublicEndpoint(payload.metadata_id);
-      if (!shouldContinue) return;
-      const res = await api.post('/ffmpeg-jobs/', payload);
-      message.success(`New Copy Job created (ID: ${res.data?.id || '-'})`);
-      setDetailVisible(false);
-      fetchJobs(pagination.current, pagination.pageSize);
-    } catch (error) {
-      message.error('Failed to create copy job');
+    const payload = {
+      metadata_id: selectedJob.metadata_id,
+      s3_prefix: selectedJob.s3_prefix,
+      s3_upload_prefix: selectedJob.s3_upload_prefix,
+      is_incremental: !!selectedJob.is_incremental
+    };
+    if (selectedJob.is_incremental) {
+      payload.periodic_interval = selectedJob.periodic_interval > 0 ? selectedJob.periodic_interval : 600;
     }
+    form.resetFields();
+    form.setFieldsValue(payload);
+    warnIfPublicEndpointSelected(payload.metadata_id);
+    setIsModalOpen(true);
+    setDetailVisible(false);
   };
 
   const handleDelete = async (jobId) => {
