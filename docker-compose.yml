@@ -7,10 +7,11 @@ services:
     volumes:
       - redis_data:/data
     healthcheck:
-      test: ["CMD-SHELL", "redis-cli -a redis_password ping | grep PONG"]
+      test: ["CMD-SHELL", "redis-cli -a redis_password --raw ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 5
+      start_period: 3m
     networks:
       - unbound
     restart: always
