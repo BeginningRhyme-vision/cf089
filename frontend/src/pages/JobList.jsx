@@ -214,7 +214,7 @@ const DailyBarPanel = ({ title, data }) => {
 
 const JobList = () => {
   const [jobs, setJobs] = useState([]);
-  const [statsJobs, setStatsJobs] = useState([]);
+  const [statsData, setStatsData] = useState({ dest: [], daily: [] });
   const [metadataList, setMetadataList] = useState([]);
   const [loading, setLoading] = useState(false);
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -269,25 +269,15 @@ const JobList = () => {
     }
   };
 
-  const fetchStatsJobs = async () => {
+  const fetchStatsData = async () => {
     try {
-      const all = [];
-      const limit = 200;
-      let page = 1;
-      let total = 0;
-      while (true) {
-        const res = await api.get(`/jobs/?page=${page}&limit=${limit}`);
-        const list = Array.isArray(res.data) ? res.data : [];
-        all.push(...list);
-        total = Number(res.headers?.['x-total-count'] || 0);
-        if (list.length < limit || (total > 0 && all.length >= total) || page >= 50) {
-          break;
-        }
-        page += 1;
-      }
-      setStatsJobs(all);
+      const res = await api.get('/jobs/stats');
+      setStatsData({
+        dest: Array.isArray(res.data?.dest) ? res.data.dest : [],
+        daily: Array.isArray(res.data?.daily) ? res.data.daily : [],
+      });
     } catch (error) {
-      setStatsJobs([]);
+      setStatsData({ dest: [], daily: [] });
     }
   };
 
@@ -302,7 +292,7 @@ const JobList = () => {
 
   useEffect(() => {
     fetchJobs(pagination.current, pagination.pageSize);
-    fetchStatsJobs();
+    fetchStatsData();
     fetchMetadata();
   }, [pagination.current, pagination.pageSize]);
 
@@ -318,7 +308,7 @@ const JobList = () => {
       message.success('Job created');
       setIsModalOpen(false);
       fetchJobs(pagination.current, pagination.pageSize);
-      fetchStatsJobs();
+      fetchStatsData();
     } catch (error) {
       console.error(error);
     }
@@ -329,7 +319,7 @@ const JobList = () => {
       await api.post(`/jobs/${jobId}/${action}`);
       message.success(`Job ${action}ed`);
       fetchJobs(pagination.current, pagination.pageSize);
-      fetchStatsJobs();
+      fetchStatsData();
     } catch (error) {
       message.error(`Failed to ${action} job`);
     }
@@ -340,7 +330,7 @@ const JobList = () => {
       await api.delete(`/jobs/${jobId}`);
       message.success('Job deleted');
       fetchJobs(pagination.current, pagination.pageSize);
-      fetchStatsJobs();
+      fetchStatsData();
     } catch (error) {
       message.error('Failed to delete job');
     }
@@ -384,7 +374,11 @@ const JobList = () => {
   }, [metadataList]);
 
   const chartData = useMemo(() => {
-    const source = statsJobs.length > 0 ? statsJobs : jobs;
+    if ((statsData.dest?.length || 0) > 0 || (statsData.daily?.length || 0) > 0) {
+      return statsData;
+    }
+
+    const source = jobs;
     const byMeta = new Map();
     const byDest = new Map();
     const byDay = new Map();
@@ -426,7 +420,7 @@ const JobList = () => {
       dest: topBySize(Array.from(byDest.values())),
       daily
     };
-  }, [jobs, statsJobs, metadataNameMap]);
+  }, [jobs, statsData, metadataNameMap]);
 
   const columns = [
     { title: 'ID', dataIndex: 'job_id', key: 'job_id', width: 60 },
@@ -524,7 +518,7 @@ const JobList = () => {
         <Button type="primary" icon={<PlusOutlined />} onClick={() => { form.resetFields(); setIsModalOpen(true); }}>
           New Transfer Job
         </Button>
-        <Button icon={<ReloadOutlined />} onClick={() => { fetchJobs(pagination.current, pagination.pageSize); fetchStatsJobs(); }}>Refresh</Button>
+        <Button icon={<ReloadOutlined />} onClick={() => { fetchJobs(pagination.current, pagination.pageSize); fetchStatsData(); }}>Refresh</Button>
       </div>
       
       <Table 

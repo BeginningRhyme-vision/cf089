@@ -93,6 +93,64 @@ func ListTransferJobs(c *gin.Context) {
 	c.JSON(http.StatusOK, jobs)
 }
 
+type TransferStatsDestItem struct {
+	Label string `json:"label"`
+	Count int64  `json:"count"`
+	Size  int64  `json:"size"`
+}
+
+type TransferStatsDailyItem struct {
+	Date  string `json:"date"`
+	Count int64  `json:"count"`
+	Size  int64  `json:"size"`
+}
+
+func GetTransferStats(c *gin.Context) {
+	var destItems []TransferStatsDestItem
+	destSQL := `
+		SELECT
+			(COALESCE(tm.client_name, 'meta-' || tj.metadata_id::text) || ' | ' ||
+			CASE
+				WHEN split_part(trim(both '/' from tj.dst_dir), '/', 2) <> '' THEN
+					split_part(trim(both '/' from tj.dst_dir), '/', 1) || '/' || split_part(trim(both '/' from tj.dst_dir), '/', 2)
+				ELSE COALESCE(NULLIF(split_part(trim(both '/' from tj.dst_dir), '/', 1), ''), '-')
+			END
+			) AS label,
+			SUM(COALESCE(tj.success_count, tj.total_count, 0))::bigint AS count,
+			SUM(COALESCE(tj.success_size_bytes, 0))::bigint AS size
+		FROM transfer_jobs tj
+		LEFT JOIN transfer_metadata tm ON tm.id = tj.metadata_id
+		GROUP BY label
+		ORDER BY size DESC
+		LIMIT 10
+	`
+	if err := database.DB.Raw(destSQL).Scan(&destItems).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	var dailyItems []TransferStatsDailyItem
+	dailySQL := `
+		SELECT
+			to_char(date_trunc('day', created_at), 'YYYY-MM-DD') AS date,
+			SUM(COALESCE(success_count, total_count, 0))::bigint AS count,
+			SUM(COALESCE(success_size_bytes, 0))::bigint AS size
+		FROM transfer_jobs
+		WHERE created_at >= NOW() - INTERVAL '14 days'
+		GROUP BY 1
+		ORDER BY 1 ASC
+	`
+	if err := database.DB.Raw(dailySQL).Scan(&dailyItems).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"dest":  destItems,
+		"daily": dailyItems,
+	})
+}
+
 func GetTransferJob(c *gin.Context) {
 	id := c.Param("id")
 	var job models.TransferJob

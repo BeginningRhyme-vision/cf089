@@ -44,6 +44,7 @@ func SetupRouter() *gin.Engine {
 		{
 			jobs.POST("/", handlers.CreateTransferJob)
 			jobs.GET("/", handlers.ListTransferJobs)
+			jobs.GET("/stats", handlers.GetTransferStats)
 			jobs.GET("/pending", handlers.ListPendingTransferJobs)
 			jobs.GET("/:id", handlers.GetTransferJob)
 			jobs.POST("/:id/start", handlers.StartTransferJob)
