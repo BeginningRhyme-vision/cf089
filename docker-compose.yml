@@ -11,7 +11,7 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
-      start_period: 3m
+      start_period: 10m
     networks:
       - unbound
     restart: always
@@ -44,7 +44,7 @@ services:
     volumes:
       - ./config/config.yaml:/app/config.yaml
     healthcheck:
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/metrics || exit 1"]
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8080/metrics >/dev/null"]
       interval: 10s
       start_period: 5s
     depends_on:
