@@ -48,6 +48,7 @@ const (
 	BufferSize     = 1000
 	FetchBatchSize = 100
 	BufferLowWater = 500 // Refill when below this
+	TxFetchBatchSize = 500
 	LockExpiration = 30 * time.Second
 	DedupShards    = 256   // 去重 Hash 分成 256 片
 	TaskBucketSize = 50000 // 任务 ZSet 每 5 万个 ID 分一个桶
@@ -1864,7 +1865,7 @@ func fillShardedTxBuffer(ctx context.Context, jobID int64) {
 	ids, err := database.RDB.ZRangeByScore(ctx, bucketKey, &redis.ZRangeBy{
 		Min:    fmt.Sprintf("%d", startID),
 		Max:    "+inf",
-		Count:  int64(FetchBatchSize),
+		Count:  int64(TxFetchBatchSize),
 		Offset: 0,
 	}).Result()
 
@@ -1880,7 +1881,7 @@ func fillShardedTxBuffer(ctx context.Context, jobID int64) {
 		ids, _ = database.RDB.ZRangeByScore(ctx, nextBucketKey, &redis.ZRangeBy{
 			Min:    fmt.Sprintf("%d", nextStartID),
 			Max:    "+inf",
-			Count:  int64(FetchBatchSize),
+			Count:  int64(TxFetchBatchSize),
 			Offset: 0,
 		}).Result()
 	}
@@ -1978,7 +1979,7 @@ func fillLeagcyTxJobBuffer(jobID int64) {
 
 	jobKey := fmt.Sprintf("tx:job:%d:tasks", jobID)
 	start := offset
-	stop := offset + int64(FetchBatchSize) - 1
+	stop := offset + int64(TxFetchBatchSize) - 1
 
 	ids, err := database.RDB.ZRange(ctx, jobKey, start, stop).Result()
 	if err != nil || len(ids) == 0 {

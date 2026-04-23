@@ -1,5 +1,19 @@
 import { AwsClient } from "aws4fetch";
 
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function backoffMs(attempt) {
+  const base = Math.min(1000 * 2 ** (attempt - 1), 8000);
+  const jitter = Math.floor(Math.random() * 250);
+  return base + jitter;
+}
+
+function isRetryableStatus(status) {
+  return status === 408 || status === 429 || (status >= 500 && status <= 599);
+}
+
 export default {
   /**
    * Handle incoming HTTP requests
@@ -35,9 +49,10 @@ export default {
         };
 
         const result = await processMessage(task, env);
+        const safeKey = redactDestUrl(r2Key, task.partNumber);
 
         return new Response(JSON.stringify({
-          message: `Successfully processed copy for ${r2Key} (Part: ${task.partNumber})`,
+          message: `Successfully processed copy for ${safeKey} (Part: ${task.partNumber})`,
           etag: result.etag
         }), {
           headers: { "Content-Type": "application/json" },
@@ -73,9 +88,10 @@ export default {
         if (!result?.etag) {
           throw createHttpError(502, "Upload succeeded but ETag is missing");
         }
+        const safeKey = redactDestUrl(r2Key, task.partNumber);
 
         return new Response(JSON.stringify({
-          message: `Successfully processed download for ${r2Key} (Part: ${task.partNumber})`,
+          message: `Successfully processed download for ${safeKey} (Part: ${task.partNumber})`,
           etag: result.etag
         }), {
           headers: { "Content-Type": "application/json" },
@@ -104,6 +120,7 @@ async function processDownloadMessage(task, env) {
   const start = offset
   const end = offset + size - 1
   const safeDest = redactDestUrl(r2Key, partNumber)
+  const maxAttempts = Math.max(1, Number.parseInt(env?.UPLOAD_RETRY_ATTEMPTS || "3", 10) || 3)
 
   try {
     console.log(`Download task: part=${partNumber} size=${size} range=${start}-${end} source=${fileUrl} dest=${safeDest}`)
@@ -143,99 +160,102 @@ async function processDownloadMessage(task, env) {
       sourceHeaders['sec-ch-ua-platform'] = platform;
     }
 
-    const sourceResponse = await fetch(fileUrl, {
-      method: 'GET',
-      headers: sourceHeaders,
-      redirect: 'follow'
-    });
-
-    console.log(`Source Response for ${safeDest} (Part: ${partNumber}):`, JSON.stringify({
-      status: sourceResponse.status,
-      headers: Object.fromEntries(sourceResponse.headers.entries()),
-    }, null, 2));
-
-    if (!sourceResponse.ok) {
-      throw createHttpError(502, `Failed to download from source: ${sourceResponse.status} ${sourceResponse.statusText}`);
-    }
-
-    if (!sourceResponse.body) {
-      throw createHttpError(502, "Source response has no body");
-    }
-
     let r2KeyUrl = r2Key;
     const destUrl = new URL(r2KeyUrl);
 
     // Check if r2Key is already a presigned URL (contains X-Amz-Signature)
     const isPresignedUrl = destUrl.searchParams.has("X-Amz-Signature");
 
-    let requestHeaders = {
-      "Content-Length": size.toString(),
-    };
-
-    // If r2Key is already a presigned URL, use it directly without modification
-    // Otherwise, sign it ourselves
-    if (!isPresignedUrl) {
-      // Validate required environment variables
-      if (!env.SOURCE_ACCESS_KEY_ID || !env.SOURCE_SECRET_ACCESS_KEY) {
-        throw new Error("Missing required environment variables: SOURCE_ACCESS_KEY_ID and SOURCE_SECRET_ACCESS_KEY must be set in wrangler.toml or as environment variables");
-      }
-
-      // Initialize AwsClient for Destination (Upload to R2)
-      const destAwsClient = new AwsClient({
-        accessKeyId: env.SOURCE_ACCESS_KEY_ID,
-        secretAccessKey: env.SOURCE_SECRET_ACCESS_KEY,
-        service: "s3",
-        region: "auto",
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const sourceResponse = await fetch(fileUrl, {
+        method: 'GET',
+        headers: sourceHeaders,
+        redirect: 'follow'
       });
 
-      // If partNumber is -1, perform a standard PUT object upload
-      if (partNumber !== -1) {
+      if (!sourceResponse.ok) {
+        if (isRetryableStatus(sourceResponse.status) && attempt < maxAttempts) {
+          console.error(`Source fetch failed for ${safeDest} part=${partNumber} attempt=${attempt}/${maxAttempts} status=${sourceResponse.status}`)
+          await sleep(backoffMs(attempt));
+          continue;
+        }
+        throw createHttpError(502, `Failed to download from source: ${sourceResponse.status} ${sourceResponse.statusText}`);
+      }
+
+      if (!sourceResponse.body) {
+        if (attempt < maxAttempts) {
+          console.error(`Source response missing body for ${safeDest} part=${partNumber} attempt=${attempt}/${maxAttempts}`)
+          await sleep(backoffMs(attempt));
+          continue;
+        }
+        throw createHttpError(502, "Source response has no body");
+      }
+
+      let requestHeaders = {
+        "Content-Length": size.toString(),
+      };
+
+      if (!isPresignedUrl) {
+        if (!env.SOURCE_ACCESS_KEY_ID || !env.SOURCE_SECRET_ACCESS_KEY) {
+          throw new Error("Missing required environment variables: SOURCE_ACCESS_KEY_ID and SOURCE_SECRET_ACCESS_KEY must be set in wrangler.toml or as environment variables");
+        }
+
+        const destAwsClient = new AwsClient({
+          accessKeyId: env.SOURCE_ACCESS_KEY_ID,
+          secretAccessKey: env.SOURCE_SECRET_ACCESS_KEY,
+          service: "s3",
+          region: "auto",
+        });
+
+        if (partNumber !== -1) {
+          destUrl.searchParams.set("partNumber", partNumber);
+          destUrl.searchParams.set("uploadId", uploadId);
+        }
+
+        const signedRequest = await destAwsClient.sign(destUrl.toString(), {
+          method: 'PUT',
+          headers: {
+            ...requestHeaders,
+            "X-Amz-Content-Sha256": "UNSIGNED-PAYLOAD",
+          },
+        });
+        requestHeaders = signedRequest.headers;
+      } else if (partNumber !== -1) {
         destUrl.searchParams.set("partNumber", partNumber);
         destUrl.searchParams.set("uploadId", uploadId);
       }
 
-      // Sign the request
-      const signedRequest = await destAwsClient.sign(destUrl.toString(), {
+      const s3Response = await fetch(destUrl.toString(), {
         method: 'PUT',
-        headers: {
-          ...requestHeaders,
-          "X-Amz-Content-Sha256": "UNSIGNED-PAYLOAD",
-        },
+        body: sourceResponse.body,
+        headers: requestHeaders,
       });
-      requestHeaders = signedRequest.headers;
+
+      if (!s3Response.ok) {
+        const errorText = await s3Response.text();
+        if (isRetryableStatus(s3Response.status) && attempt < maxAttempts) {
+          console.error(`Upload failed for ${safeDest} part=${partNumber} attempt=${attempt}/${maxAttempts} status=${s3Response.status} body=${errorText}`)
+          await sleep(backoffMs(attempt));
+          continue;
+        }
+        throw new Error(`Failed to upload to S3: ${s3Response.status} ${errorText}`);
+      }
+
+      const etag = s3Response.headers.get("etag") || s3Response.headers.get("ETag");
+      if (!etag) {
+        if (attempt < maxAttempts) {
+          console.error(`Upload ok but missing etag for ${safeDest} part=${partNumber} attempt=${attempt}/${maxAttempts}`)
+          await sleep(backoffMs(attempt));
+          continue;
+        }
+        throw createHttpError(502, `No ETag found in S3 response for uploadId=${uploadId} part=${partNumber}`);
+      }
+
+      console.log(`Upload success for ${safeDest} part=${partNumber} etag=${etag}`)
+      return { etag };
     }
 
-    // 1. Upload to R2 (using S3 API)
-    const s3Response = await fetch(destUrl.toString(), {
-      method: 'PUT',
-      body: sourceResponse.body,
-      headers: requestHeaders,
-    });
-
-    if (!s3Response.ok) {
-      const errorText = await s3Response.text();
-      throw new Error(`Failed to upload to S3: ${s3Response.status} ${errorText}`);
-    }
-
-    // Log full S3 response headers and content
-    const s3Headers = Object.fromEntries(s3Response.headers.entries());
-    const s3Body = await s3Response.text();
-    console.log(`S3 Response for ${safeDest} (Part: ${partNumber}):`, JSON.stringify({
-      status: s3Response.status,
-      headers: s3Headers,
-      body: s3Body
-    }, null, 2));
-
-    // 3. Check for ETag presence (D1 update removed)
-    let etag = null;
-    etag = s3Response.headers.get("etag");
-    if (!etag) {
-      throw createHttpError(502, `No ETag found in S3 response for uploadId=${uploadId} part=${partNumber}`);
-    }
-
-    console.log(`Successfully copied ${partNumber === -1 ? 'file (single put)' : `part ${partNumber}`} for ${safeDest} to S3`);
-
-    return { etag };
+    throw createHttpError(502, `Upload failed after retries for ${safeDest} part=${partNumber}`);
   } catch (error) {
     console.error(`Processing failed for ${safeDest} (part ${partNumber}). Error: ${error.message}. source=${fileUrl}`);
     throw error; // Re-throw to be handled by caller
@@ -301,6 +321,17 @@ async function processMessage(task, env) {
     }
 
     let r2KeyUrl = r2Key;
+    let sourceEndpoint = undefined;
+    if (typeof r2KeyUrl === "string" && r2KeyUrl.startsWith("s3://")) {
+      const withoutScheme = r2KeyUrl.slice("s3://".length);
+      const firstSlash = withoutScheme.indexOf("/");
+      if (firstSlash > 0) {
+        const bucket = withoutScheme.slice(0, firstSlash);
+        const key = withoutScheme.slice(firstSlash + 1);
+        sourceEndpoint = `https://${bucket}.s3.amazonaws.com`;
+        r2KeyUrl = `${sourceEndpoint}/${key}`;
+      }
+    }
     const sourceUrl = new URL(r2KeyUrl);
 
     // Initialize AwsClient for Source (Read)
@@ -309,15 +340,16 @@ async function processMessage(task, env) {
       secretAccessKey: env.SOURCE_SECRET_ACCESS_KEY,
       service: "s3",
       region: "auto",
+      ...(sourceEndpoint ? { endpoint: sourceEndpoint } : {}),
     });
 
     // Initialize AwsClient for Destination (Write)
     const s3Host = new URL(s3Url).hostname;
-    const destAccessKey = env[s3Host + "_ak"];
-    const destSecretKey = env[s3Host + "_sk"];
+    const destAccessKey = env[s3Host + "_ak"] || env.AWS_ACCESS_KEY_ID;
+    const destSecretKey = env[s3Host + "_sk"] || env.AWS_SECRET_ACCESS_KEY;
     
     if (!destAccessKey || !destSecretKey) {
-      throw new Error(`Missing required environment variables for destination S3 (${s3Host}): ${s3Host}_ak and ${s3Host}_sk must be set in wrangler.toml or as environment variables`);
+      throw new Error(`Missing required environment variables for destination S3 (${s3Host}): ${s3Host}_ak/${s3Host}_sk or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY`);
     }
 
     const destAwsClient = new AwsClient({
@@ -328,22 +360,6 @@ async function processMessage(task, env) {
     });
 
     // 1. Download range from Source R2 (using S3 API)
-    const sourceResponse = await sourceAwsClient.fetch(sourceUrl, {
-      method: 'GET',
-      headers: {
-        'Range': `bytes=${offset}-${offset + size - 1}`
-      }
-    });
-
-    if (!sourceResponse.ok) {
-      throw new Error(`Failed to download from source: ${sourceResponse.status}`);
-    }
-
-    if (!sourceResponse.body) {
-      throw new Error("Source response has no body");
-    }
-
-    // 2. Upload part to Destination S3 Compatible Storage
     const uploadUrl = new URL(s3Url);
 
     // If partNumber is -1, perform a standard PUT object upload
@@ -352,47 +368,68 @@ async function processMessage(task, env) {
       uploadUrl.searchParams.set("uploadId", uploadId);
     }
 
-    // Sign and execute the PUT request
-    const signedRequest = await destAwsClient.sign(uploadUrl.toString(), {
-      method: "PUT",
-      headers: {
-        "Content-Length": size.toString(),
-        "X-Amz-Content-Sha256": "UNSIGNED-PAYLOAD",
-      },
-    });
+    const safeKey = redactDestUrl(r2Key, partNumber);
+    const maxAttempts = Math.max(1, Number.parseInt(env?.UPLOAD_RETRY_ATTEMPTS || "3", 10) || 3)
 
-    const s3Response = await fetch(uploadUrl.toString(), {
-      method: "PUT",
-      body: sourceResponse.body,
-      headers: signedRequest.headers,
-    });
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const sourceResponse = await sourceAwsClient.fetch(sourceUrl, {
+        method: 'GET',
+        headers: {
+          'Range': `bytes=${offset}-${offset + size - 1}`
+        }
+      });
 
-    if (!s3Response.ok) {
-      const errorText = await s3Response.text();
-      throw new Error(`Failed to upload to S3: ${s3Response.status} ${errorText}`);
+      if (!sourceResponse.ok) {
+        if (isRetryableStatus(sourceResponse.status) && attempt < maxAttempts) {
+          console.error(`Source download failed for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts} status=${sourceResponse.status}`)
+          await sleep(backoffMs(attempt));
+          continue;
+        }
+        throw new Error(`Failed to download from source: ${sourceResponse.status}`);
+      }
+
+      if (!sourceResponse.body) {
+        if (attempt < maxAttempts) {
+          console.error(`Source response missing body for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts}`)
+          await sleep(backoffMs(attempt));
+          continue;
+        }
+        throw new Error("Source response has no body");
+      }
+
+      const signedRequest = await destAwsClient.sign(uploadUrl.toString(), {
+        method: "PUT",
+        headers: {
+          "Content-Length": size.toString(),
+          "X-Amz-Content-Sha256": "UNSIGNED-PAYLOAD",
+        },
+      });
+
+      const s3Response = await fetch(uploadUrl.toString(), {
+        method: "PUT",
+        body: sourceResponse.body,
+        headers: signedRequest.headers,
+      });
+
+      if (!s3Response.ok) {
+        const errorText = await s3Response.text();
+        if (isRetryableStatus(s3Response.status) && attempt < maxAttempts) {
+          console.error(`Upload failed for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts} status=${s3Response.status} body=${errorText}`)
+          await sleep(backoffMs(attempt));
+          continue;
+        }
+        throw new Error(`Failed to upload to S3: ${s3Response.status} ${errorText}`);
+      }
+
+      const etag = s3Response.headers.get("etag") || s3Response.headers.get("ETag");
+      console.log(`Copy success for ${safeKey} part=${partNumber} etag=${etag || ""}`)
+      return { etag };
     }
 
-    // Log full S3 response headers and content
-    const s3Headers = Object.fromEntries(s3Response.headers.entries());
-    const s3Body = await s3Response.text();
-    console.log(`S3 Response for ${r2Key} (Part: ${partNumber}):`, JSON.stringify({
-      status: s3Response.status,
-      headers: s3Headers,
-      body: s3Body
-    }, null, 2));
-
-    // 3. Check for ETag presence (D1 update removed)
-    let etag = null;
-    etag = s3Response.headers.get("etag");
-    if (!etag) {
-      console.warn(`No ETag found in S3 response for ${uploadId} part ${partNumber}`);
-    }
-
-    console.log(`Successfully copied ${partNumber === -1 ? 'file (single put)' : `part ${partNumber}`} for ${r2Key} to S3`);
-
-    return { etag };
+    throw new Error(`Copy failed after retries for ${safeKey} part=${partNumber}`);
   } catch (error) {
-    console.error(`Processing failed for ${r2Key} (part ${partNumber}). Error: ${error.message}`);
+    const safeKey = redactDestUrl(r2Key, partNumber);
+    console.error(`Processing failed for ${safeKey} (part ${partNumber}). Error: ${error.message}`);
     throw error; // Re-throw to be handled by caller
   }
 }

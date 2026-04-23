@@ -161,7 +161,7 @@ services:
     environment:
       - BACKEND_API_URL=http://backend-api:8080/api
       - TRANSFER_MAX_WORKERS=192
-      - TRANSFER_TASK_BUFFER=256
+      - TRANSFER_TASK_BUFFER=1024
       - TRANSFER_PART_CONCURRENCY=8
     volumes:
       - ./config/config.yaml:/app/config.yaml

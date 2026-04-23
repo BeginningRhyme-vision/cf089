@@ -13,6 +13,9 @@ vi.mock('aws4fetch', () => {
         this.config = config;
         mockClients.push(this);
       }
+      async sign(_url, options) {
+        return { headers: options?.headers || {} };
+      }
       async fetch(url, options) {
         mockFetchCalls.push({ client: this, url, options });
         
@@ -56,6 +59,19 @@ describe('Worker HTTP Handler', () => {
     vi.clearAllMocks();
     mockFetchCalls = [];
     mockClients = [];
+
+    globalThis.fetch = vi.fn(async (url, options) => {
+      if (options?.method === 'PUT') {
+        return {
+          ok: true,
+          status: 200,
+          headers: {
+            get: (key) => (key === 'etag' || key === 'ETag') ? '"mock-etag"' : null,
+          }
+        };
+      }
+      return { ok: false, status: 404, text: async () => "Not Found" };
+    });
 
     // Mock Environment
     env = {
@@ -105,16 +121,21 @@ describe('Worker HTTP Handler', () => {
     // Check Source Fetch
     const sourceCall = mockFetchCalls.find(call => call.client === sourceClient);
     expect(sourceCall).toBeDefined();
-    expect(sourceCall.url).toBe('/bucket/video.mp4'); // pathname
+    const sourcePathname = typeof sourceCall.url === 'string'
+      ? new URL(sourceCall.url).pathname
+      : sourceCall.url.pathname;
+    expect(sourcePathname).toBe('/bucket/video.mp4');
     expect(sourceCall.options.headers['Range']).toBe('bytes=0-99');
 
-    // Check Dest Fetch
-    const destCall = mockFetchCalls.find(call => call.client === destClient);
-    expect(destCall).toBeDefined();
-    const destUrl = new URL(destCall.url);
+    expect(destClient).toBeDefined();
+
+    expect(globalThis.fetch).toHaveBeenCalled();
+    const putCall = globalThis.fetch.mock.calls.find(([, opts]) => opts?.method === 'PUT');
+    expect(putCall).toBeDefined();
+    const [putUrl] = putCall;
+    const destUrl = new URL(putUrl);
     expect(destUrl.searchParams.get('partNumber')).toBe('5');
     expect(destUrl.searchParams.get('uploadId')).toBe('upload-123');
-    expect(destCall.options.method).toBe('PUT');
   });
 
   it('should handle s3:// scheme in r2Key', async () => {

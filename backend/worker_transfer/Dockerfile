@@ -11,8 +11,8 @@ RUN go mod download
 COPY *.go ./
 
 # Build the binaries
-RUN go build -o scanner scanner.go
-RUN go build -o transfer transfer.go
+RUN go build -o scanner .
+RUN go build -o transfer .
 
 # Runtime Stage
 FROM alpine:latest

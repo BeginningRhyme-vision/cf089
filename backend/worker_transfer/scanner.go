@@ -22,7 +22,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"gopkg.in/yaml.v3"
 )
 
 // Scanner Worker
@@ -30,20 +29,6 @@ import (
 // 2. Lists Source S3/R2
 // 3. Batches inserts to Backend
 // 4. Updates Status to RUNNING
-
-type Config struct {
-	Storage StorageConfig `yaml:"storage"`
-}
-
-type StorageConfig struct {
-	Src SrcConfig `yaml:"src"`
-}
-
-type SrcConfig struct {
-	Endpoint  string `yaml:"endpoint"`
-	AccessKey string `yaml:"access_key"`
-	SecretKey string `yaml:"secret_key"`
-}
 
 type TransferJob struct {
 	JobID            uint             `json:"job_id"`
@@ -59,13 +44,6 @@ type TransferJob struct {
 	LastScanTime     *time.Time       `json:"last_scan_time"`
 }
 
-type TransferMetadata struct {
-	ID          uint   `json:"id"`
-	Endpoint    string `json:"endpoint"`
-	AK          string `json:"ak"`
-	SKEncrypted string `json:"sk_encrypted"`
-}
-
 type UpdateStatusRequest struct {
 	Status        string     `json:"status"`
 	LastScanTime  *time.Time `json:"last_scan_time,omitempty"`
@@ -73,9 +51,6 @@ type UpdateStatusRequest struct {
 }
 
 var (
-	cfg        *Config
-	apiBaseURL string
-
 	PagesScanned = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "scanner_pages_scanned_total",
 		Help: "Total number of S3 pages scanned",
@@ -87,7 +62,7 @@ var (
 	})
 )
 
-func main() {
+func runScanner() {
 	loadConfig()
 	go func() {
 		http.Handle("/metrics", promhttp.Handler())
@@ -129,33 +104,6 @@ func main() {
 		}
 
 		time.Sleep(5 * time.Second)
-	}
-}
-
-func loadConfig() {
-	paths := []string{"../../config.yaml", "../config.yaml", "config.yaml"}
-	var data []byte
-	var err error
-	for _, p := range paths {
-		data, err = os.ReadFile(p)
-		if err == nil {
-			break
-		}
-	}
-	if data == nil {
-		// Fallback or just empty if we rely on DB for source creds?
-		// Note: The previous r2s3 implementation read Source creds from CLI or Env, OR DB?
-		// The Scanner needs Source Creds.
-		// The Job has Metadata which is for DESTINATION.
-		// Source is usually global in config.yaml?
-		// Checking `config.yaml` content from memory: `storage.src` has endpoint, access_key, secret_key.
-		// Yes, Source is global.
-		log.Fatal("Could not find config.yaml")
-	}
-
-	cfg = &Config{}
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		log.Fatalf("Failed to parse config: %v", err)
 	}
 }
 
@@ -483,22 +431,4 @@ func initSourceS3() (*s3.Client, error) {
 		o.BaseEndpoint = aws.String(baseEndpoint)
 		o.UsePathStyle = false
 	}), nil
-}
-
-func getBucketFromEndpoint(endpoint string) string {
-	// Handle s3:// scheme specifically before normalization
-	if strings.HasPrefix(endpoint, "s3://") {
-		host := strings.TrimPrefix(endpoint, "s3://")
-		parts := strings.Split(host, ".")
-		if len(parts) > 0 {
-			return parts[0]
-		}
-	}
-
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		return ""
-	}
-
-	return strings.Trim(u.Path, "/")
 }

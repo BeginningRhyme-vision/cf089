@@ -24,27 +24,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"gopkg.in/yaml.v3"
 )
 
 // Transfer Worker
 // 1. Acquire Tasks (Transfer)
 // 2. Transfer using external service
-
-type Config struct {
-	Storage StorageConfig `yaml:"storage"`
-}
-
-type StorageConfig struct {
-	Src                SrcConfig `yaml:"src"`
-	TransferServiceURL string    `yaml:"transfer_service_url"`
-}
-
-type SrcConfig struct {
-	Endpoint  string `yaml:"endpoint"`
-	AccessKey string `yaml:"access_key"`
-	SecretKey string `yaml:"secret_key"`
-}
 
 type TransferTask struct {
 	ID     int64  `json:"id"`
@@ -62,12 +46,6 @@ type JobInfo struct {
 	DeleteSource bool             `json:"delete_source"`
 }
 
-type TransferMetadata struct {
-	Endpoint    string `json:"endpoint"`
-	AK          string `json:"ak"`
-	SKEncrypted string `json:"sk_encrypted"`
-}
-
 type cachedJob struct {
 	info   JobInfo
 	expiry time.Time
@@ -79,33 +57,31 @@ type JobStatsDelta struct {
 }
 
 var (
-	cfg        *Config
-	apiBaseURL string
-	jobCache   sync.Map // JobID -> cachedJob
-	httpClient *http.Client
-	transferClient *http.Client
-	workerCount int
-	taskBufferSize int
+	jobCache        sync.Map // JobID -> cachedJob
+	httpClient      *http.Client
+	transferClient  *http.Client
+	workerCount     int
+	taskBufferSize  int
 	partConcurrency int
-	
-	defaultPartSize int64 = 16 * 1024 * 1024
-	s3Clients  sync.Map // Endpoint -> *s3.Client (Cache for Destinations)
-	srcClient  *s3.Client
+
+	defaultPartSize int64    = 16 * 1024 * 1024
+	s3Clients       sync.Map // Endpoint -> *s3.Client (Cache for Destinations)
+	srcClient       *s3.Client
 
 	statsBuffer = make(map[int64]*JobStatsDelta)
 	statsMutex  sync.Mutex
-	
+
 	// Metrics
 	BytesTransferred = promauto.NewCounter(prometheus.CounterOpts{
 		Name: "transfer_bytes_transferred_total",
 		Help: "Total bytes transferred",
 	})
-	
+
 	TasksTransferred = promauto.NewCounterVec(prometheus.CounterOpts{
 		Name: "transfer_tasks_transferred_total",
 		Help: "Total tasks processed",
 	}, []string{"status"})
-	
+
 	TransferDuration = promauto.NewHistogram(prometheus.HistogramOpts{
 		Name: "transfer_duration_seconds",
 		Help: "Duration of transfers",
@@ -119,9 +95,9 @@ const (
 	DefaultPartConcurrency   = 16
 )
 
-func main() {
+func runTransfer() {
 	loadConfig()
-	
+
 	go func() {
 		http.Handle("/metrics", promhttp.Handler())
 		log.Println("Metrics server listening on :9094")
@@ -179,12 +155,12 @@ func main() {
 			tasks, err := acquireTasks()
 			if err != nil {
 				log.Printf("Error acquiring tasks: %v", err)
-				time.Sleep(5 * time.Second)
+				time.Sleep(2 * time.Second)
 				continue
 			}
 
 			if len(tasks) == 0 {
-				time.Sleep(5 * time.Second)
+				time.Sleep(1 * time.Second)
 				continue
 			}
 
@@ -224,7 +200,7 @@ func flushStats() {
 		statsMutex.Unlock()
 		return
 	}
-	
+
 	snapshot := make(map[int64]JobStatsDelta)
 	for k, v := range statsBuffer {
 		if v.Success > 0 || v.Failed > 0 {
@@ -246,7 +222,7 @@ func updateJobStats(jobID int64, incSuccess, incFailed int) {
 	}
 	statsMutex.Lock()
 	defer statsMutex.Unlock()
-	
+
 	if _, ok := statsBuffer[jobID]; !ok {
 		statsBuffer[jobID] = &JobStatsDelta{}
 	}
@@ -285,7 +261,7 @@ func sendJobStatsUpdate(jobID int64, incSuccess, incFailed int) {
 
 func processTask(t TransferTask) {
 	start := time.Now()
-	
+
 	job, err := getJobInfo(t.JobID)
 	if err != nil {
 		log.Printf("Failed to get job info for task %d: %v", t.ID, err)
@@ -305,7 +281,7 @@ func processTask(t TransferTask) {
 	if strings.HasPrefix(sk, "enc_") {
 		sk = strings.TrimPrefix(sk, "enc_")
 	}
-	
+
 	dstClient, err := createS3Client(job.Metadata.Endpoint, job.Metadata.AK, sk)
 	if err != nil {
 		log.Printf("Dst client init failed for task %d: %v", t.ID, err)
@@ -314,7 +290,7 @@ func processTask(t TransferTask) {
 		TasksTransferred.WithLabelValues("failed").Inc()
 		return
 	}
-	
+
 	// 2. Resolve Paths
 	srcKey := t.Src
 	var relKey string
@@ -330,7 +306,7 @@ func processTask(t TransferTask) {
 	} else {
 		relKey = srcKey
 	}
-	
+
 	dstKey := relKey
 	if dstDir != "" {
 		if dstKey == "" {
@@ -339,11 +315,11 @@ func processTask(t TransferTask) {
 			dstKey = strings.TrimSuffix(dstDir, "/") + "/" + dstKey
 		}
 	}
-	
+
 	// 3. Get Object Info (Size) from Src
 	srcBucket := getBucketFromEndpoint(cfg.Storage.Src.Endpoint)
 	size := t.Size
-	
+
 	if size == 0 {
 		head, err := srcClient.HeadObject(context.TODO(), &s3.HeadObjectInput{
 			Bucket: aws.String(srcBucket),
@@ -358,7 +334,7 @@ func processTask(t TransferTask) {
 		}
 		size = *head.ContentLength
 	}
-	
+
 	// 4. Construct Public/Virtual-Hosted URLs for Transfer Service (Matches r2s3.go logic)
 	srcUrl, err := constructVirtualHostURL(cfg.Storage.Src.Endpoint, srcBucket, srcKey)
 	if err != nil {
@@ -368,10 +344,10 @@ func processTask(t TransferTask) {
 		TasksTransferred.WithLabelValues("failed").Inc()
 		return
 	}
-	
+
 	dstBucket := getBucketFromEndpoint(job.Metadata.Endpoint)
 	log.Printf("Task %d: Transferring %d bytes to bucket '%s' key '%s'", t.ID, size, dstBucket, dstKey)
-	
+
 	// 5. Transfer Loop
 	err = transferFile(srcUrl, dstClient, dstBucket, dstKey, size, job.Metadata.Endpoint)
 	if err != nil {
@@ -381,7 +357,7 @@ func processTask(t TransferTask) {
 		TasksTransferred.WithLabelValues("failed").Inc()
 	} else {
 		log.Printf("Task %d completed successfully", t.ID)
-		
+
 		if job.DeleteSource {
 			_, err := srcClient.DeleteObject(context.TODO(), &s3.DeleteObjectInput{
 				Bucket: aws.String(srcBucket),
@@ -396,7 +372,7 @@ func processTask(t TransferTask) {
 
 		updateTaskStatus(t, "COMPLETED", "")
 		updateJobStats(t.JobID, 1, 0)
-		
+
 		// Metrics
 		duration := time.Since(start).Seconds()
 		TransferDuration.Observe(duration)
@@ -415,15 +391,17 @@ func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string,
 		_, err = callTransferService(srcURL, dstUrl, size, 0, "", -1)
 		return err
 	}
-	
+
 	// Multipart
 	createOut, err := dstClient.CreateMultipartUpload(context.TODO(), &s3.CreateMultipartUploadInput{
 		Bucket: aws.String(dstBucket),
 		Key:    aws.String(dstKey),
 	})
-	if err != nil { return err }
+	if err != nil {
+		return err
+	}
 	uploadID := *createOut.UploadId
-	
+
 	partSize := calculatePartSize(size)
 	numParts := int((size-1)/partSize) + 1
 
@@ -431,38 +409,44 @@ func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string,
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 	errAbort := make(chan error, 1)
-	
+
 	sem := make(chan struct{}, partConcurrency)
-	
+
 	for i := 0; i < numParts; i++ {
 		start := int64(i) * partSize
 		end := start + partSize - 1
-		if end >= size { end = size - 1 }
+		if end >= size {
+			end = size - 1
+		}
 		partNum := int32(i + 1)
-		
+
 		wg.Add(1)
 		go func(pNum int32, s, e int64) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			
+
 			// Use clean URLs, no presigning
 			etag, err := callTransferService(srcURL, dstUrl, e-s+1, s, uploadID, int(pNum))
 			if err != nil {
-				select { case errAbort <- err: default: }; return
+				select {
+				case errAbort <- err:
+				default:
+				}
+				return
 			}
-			
+
 			mu.Lock()
 			completedParts = append(completedParts, types.CompletedPart{
-				ETag: aws.String(etag),
+				ETag:       aws.String(etag),
 				PartNumber: aws.Int32(pNum),
 			})
 			mu.Unlock()
 		}(partNum, start, end)
 	}
-	
+
 	wg.Wait()
-	
+
 	select {
 	case err := <-errAbort:
 		dstClient.AbortMultipartUpload(context.TODO(), &s3.AbortMultipartUploadInput{
@@ -471,7 +455,7 @@ func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string,
 		return err
 	default:
 	}
-	
+
 	// Sort
 	for i := 0; i < len(completedParts); i++ {
 		for j := i + 1; j < len(completedParts); j++ {
@@ -480,7 +464,7 @@ func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string,
 			}
 		}
 	}
-	
+
 	_, err = dstClient.CompleteMultipartUpload(context.TODO(), &s3.CompleteMultipartUploadInput{
 		Bucket: aws.String(dstBucket), Key: aws.String(dstKey), UploadId: aws.String(uploadID),
 		MultipartUpload: &types.CompletedMultipartUpload{Parts: completedParts},
@@ -492,7 +476,7 @@ func callTransferService(srcUrl, dstUrl string, size, offset int64, uploadID str
 	// Payload matches r2s3 / downloader logic
 	// But `r2s3` sent `r2Key` and `s3Url`.
 	// We are sending Presigned URLs for both.
-	
+
 	payload := map[string]interface{}{
 		"r2Key":      srcUrl,
 		"s3Url":      dstUrl,
@@ -501,12 +485,12 @@ func callTransferService(srcUrl, dstUrl string, size, offset int64, uploadID str
 		"uploadId":   uploadID,
 		"partNumber": partNum,
 	}
-	
+
 	body, _ := json.Marshal(payload)
-	
+
 	// Retry
 	var lastErr error
-	for i:=0; i<5; i++ {
+	for i := 0; i < 5; i++ {
 		resp, err := transferClient.Post(cfg.Storage.TransferServiceURL, "application/json", bytes.NewBuffer(body))
 		if err != nil {
 			lastErr = err
@@ -515,7 +499,7 @@ func callTransferService(srcUrl, dstUrl string, size, offset int64, uploadID str
 		}
 		respBody, _ := io.ReadAll(resp.Body)
 		resp.Body.Close()
-		
+
 		if resp.StatusCode == 200 {
 			var res map[string]interface{}
 			if err := json.Unmarshal(respBody, &res); err != nil {
@@ -536,27 +520,9 @@ func callTransferService(srcUrl, dstUrl string, size, offset int64, uploadID str
 	return "", fmt.Errorf("service call failed: %v", lastErr)
 }
 
-func getBucketFromEndpoint(endpoint string) string {
-	// Handle s3:// scheme specifically before normalization
-	if strings.HasPrefix(endpoint, "s3://") {
-		host := strings.TrimPrefix(endpoint, "s3://")
-		parts := strings.Split(host, ".")
-		if len(parts) > 0 {
-			return parts[0]
-		}
-	}
-
-	u, err := url.Parse(endpoint)
-	if err != nil {
-		return ""
-	}
-	
-	return strings.Trim(u.Path, "/")
-}
-
 func constructVirtualHostURL(endpointStr, bucket, key string) (string, error) {
 	// Mimic r2s3.go logic for creating scheme://bucket.host/key
-	
+
 	// Normalize just to parse host/scheme cleanly if needed, but r2s3 uses simple parsing
 	normalized := endpointStr
 	isS3 := strings.HasPrefix(endpointStr, "s3://")
@@ -579,31 +545,9 @@ func constructVirtualHostURL(endpointStr, bucket, key string) (string, error) {
 			host = parts[1]
 		}
 	}
-	
+
 	// r2s3 style: fmt.Sprintf("%s://%s.%s/%s", u.Scheme, srcCfg.Bucket, u.Host, obj.Key)
 	return fmt.Sprintf("%s://%s.%s/%s", u.Scheme, bucket, host, key), nil
-}
-
-// Implementations of missing functions
-
-func loadConfig() {
-	paths := []string{"../../config.yaml", "../config.yaml", "config.yaml"}
-	var data []byte
-	var err error
-	for _, p := range paths {
-		data, err = os.ReadFile(p)
-		if err == nil {
-			break
-		}
-	}
-	if data == nil {
-		log.Fatal("Could not find config.yaml")
-	}
-
-	cfg = &Config{}
-	if err := yaml.Unmarshal(data, cfg); err != nil {
-		log.Fatalf("Failed to parse config: %v", err)
-	}
 }
 
 func initSourceClient() {
@@ -703,10 +647,10 @@ func getJobInfo(jobID int64) (*JobInfo, error) {
 
 	// Map backend model to JobInfo
 	info := JobInfo{
-		JobID:    job.JobID,
-		Metadata: job.Metadata,
-		DstDir:   job.DstDir,
-		SrcDir:   job.SrcDir,
+		JobID:        job.JobID,
+		Metadata:     job.Metadata,
+		DstDir:       job.DstDir,
+		SrcDir:       job.SrcDir,
 		DeleteSource: job.DeleteSource,
 	}
 
@@ -725,10 +669,10 @@ type TransferJobStruct struct {
 
 func updateTaskStatus(t TransferTask, status string, msg string) {
 	t.Status = status
-	// msg is ignored by backend currently unless we add a field for it, 
+	// msg is ignored by backend currently unless we add a field for it,
 	// but let's send it anyway? No, backend models.TransferTask doesn't have Msg.
 	// We can ignore msg for now or log it.
-	
+
 	payload := []TransferTask{t}
 	data, _ := json.Marshal(payload)
 
@@ -746,7 +690,7 @@ func updateTaskStatus(t TransferTask, status string, msg string) {
 func calculatePartSize(size int64) int64 {
 	// Max parts: 10000
 	minPartSize := int64(6 * 1024 * 1024) // 5MB
-	
+
 	partSize := size / 10000
 	if partSize < minPartSize {
 		partSize = minPartSize
