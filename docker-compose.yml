@@ -160,9 +160,9 @@ services:
     command: ["transfer"]
     environment:
       - BACKEND_API_URL=http://backend-api:8080/api
-      - TRANSFER_MAX_WORKERS=192
-      - TRANSFER_TASK_BUFFER=1024
-      - TRANSFER_PART_CONCURRENCY=8
+      - TRANSFER_MAX_WORKERS=384
+      - TRANSFER_TASK_BUFFER=2048
+      - TRANSFER_PART_CONCURRENCY=16
     volumes:
       - ./config/config.yaml:/app/config.yaml
     depends_on:
