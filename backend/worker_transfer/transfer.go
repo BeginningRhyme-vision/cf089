@@ -57,16 +57,17 @@ type JobStatsDelta struct {
 }
 
 var (
-	jobCache        sync.Map // JobID -> cachedJob
-	httpClient      *http.Client
-	transferClient  *http.Client
-	workerCount     int
-	taskBufferSize  int
-	partConcurrency int
+	jobCache           sync.Map // JobID -> cachedJob
+	httpClient         *http.Client
+	transferClient     *http.Client
+	workerCount        int
+	taskBufferSize     int
+	partConcurrency    int
+	multipartThreshold int64
+	minPartSize        int64
 
-	defaultPartSize int64    = 16 * 1024 * 1024
-	s3Clients       sync.Map // Endpoint -> *s3.Client (Cache for Destinations)
-	srcClient       *s3.Client
+	s3Clients sync.Map // Endpoint -> *s3.Client (Cache for Destinations)
+	srcClient *s3.Client
 
 	statsBuffer = make(map[int64]*JobStatsDelta)
 	statsMutex  sync.Mutex
@@ -89,10 +90,12 @@ var (
 )
 
 const (
-	WorkerID                 = "go-transfer-1"
-	DefaultConcurrentWorkers = 64
-	DefaultTaskBufferSize    = 128
-	DefaultPartConcurrency   = 16
+	WorkerID                    = "go-transfer-1"
+	DefaultConcurrentWorkers    = 64
+	DefaultTaskBufferSize       = 128
+	DefaultPartConcurrency      = 16
+	DefaultMultipartThresholdMB = 8
+	DefaultMinPartSizeMB        = 5
 )
 
 func runTransfer() {
@@ -111,6 +114,8 @@ func runTransfer() {
 	workerCount = getEnvInt("TRANSFER_MAX_WORKERS", DefaultConcurrentWorkers)
 	taskBufferSize = getEnvInt("TRANSFER_TASK_BUFFER", DefaultTaskBufferSize)
 	partConcurrency = getEnvInt("TRANSFER_PART_CONCURRENCY", DefaultPartConcurrency)
+	multipartThreshold = int64(getEnvInt("TRANSFER_MULTIPART_THRESHOLD_MB", DefaultMultipartThresholdMB)) * 1024 * 1024
+	minPartSize = int64(getEnvInt("TRANSFER_MIN_PART_SIZE_MB", DefaultMinPartSizeMB)) * 1024 * 1024
 	httpClient = &http.Client{
 		Timeout: 20 * time.Second,
 		Transport: &http.Transport{
@@ -387,7 +392,7 @@ func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string,
 		return err
 	}
 
-	if size < defaultPartSize {
+	if size < multipartThreshold {
 		_, err = callTransferService(srcURL, dstUrl, size, 0, "", -1)
 		return err
 	}
@@ -689,8 +694,6 @@ func updateTaskStatus(t TransferTask, status string, msg string) {
 
 func calculatePartSize(size int64) int64 {
 	// Max parts: 10000
-	minPartSize := int64(6 * 1024 * 1024) // 5MB
-
 	partSize := size / 10000
 	if partSize < minPartSize {
 		partSize = minPartSize
