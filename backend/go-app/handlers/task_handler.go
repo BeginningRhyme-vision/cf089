@@ -45,10 +45,10 @@ type JobDelta struct {
 }
 
 const (
-	BufferSize       = 4000
+	BufferSize       = 2000
 	FetchBatchSize   = 100
-	BufferLowWater   = 2000 // Refill when below this
-	TxFetchBatchSize = 2000
+	BufferLowWater   = 100 // Refill when below this
+	TxFetchBatchSize = 1000
 	LockExpiration   = 30 * time.Second
 	DedupShards      = 256   // 去重 Hash 分成 256 片
 	TaskBucketSize   = 50000 // 任务 ZSet 每 5 万个 ID 分一个桶
