@@ -838,6 +838,9 @@ func reportCompletionCompensation(t TransferTask, size int64, dstBucket, dstKey,
 	type completionCompensationRequest struct {
 		JobID     int64  `json:"job_id"`
 		TaskID    int64  `json:"task_id"`
+		RunToken  string `json:"run_token"`
+		Src       string `json:"src"`
+		WorkerID  string `json:"worker_id"`
 		Size      int64  `json:"size"`
 		DstBucket string `json:"dst_bucket"`
 		DstKey    string `json:"dst_key"`
@@ -847,6 +850,9 @@ func reportCompletionCompensation(t TransferTask, size int64, dstBucket, dstKey,
 	payload := completionCompensationRequest{
 		JobID:     t.JobID,
 		TaskID:    t.ID,
+		RunToken:  t.RunToken,
+		Src:       t.Src,
+		WorkerID:  workerID,
 		Size:      size,
 		DstBucket: dstBucket,
 		DstKey:    dstKey,

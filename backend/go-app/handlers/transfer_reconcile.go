@@ -27,6 +27,9 @@ const (
 type transferTaskCompensationDetail struct {
 	JobID     int64     `json:"job_id"`
 	TaskID    int64     `json:"task_id"`
+	RunToken  string    `json:"run_token"`
+	Src       string    `json:"src"`
+	WorkerID  string    `json:"worker_id"`
 	Size      int64     `json:"size"`
 	DstBucket string    `json:"dst_bucket"`
 	DstKey    string    `json:"dst_key"`
@@ -38,29 +41,39 @@ func transferCompletionPendingKey() string {
 	return "tx:completion:pending"
 }
 
-func transferCompletionCompensationKey(jobID, taskID int64) string {
-	return fmt.Sprintf("tx:completion:comp:%d:%d", jobID, taskID)
+func transferCompletionCompensationKey(jobID, taskID int64, runToken string) string {
+	return fmt.Sprintf("tx:completion:comp:%d:%d:%s", jobID, taskID, runToken)
 }
 
-func transferCompletionPendingMember(jobID, taskID int64) string {
-	return fmt.Sprintf("%d:%d", jobID, taskID)
+func transferCompletionPendingMember(jobID, taskID int64, runToken string) string {
+	return fmt.Sprintf("%d:%d:%s", jobID, taskID, runToken)
 }
 
-func parseTransferCompletionPendingMember(member string) (int64, int64, error) {
+func parseTransferCompletionPendingMember(member string) (int64, int64, string, error) {
+	parts := strings.SplitN(member, ":", 3)
+	if len(parts) != 3 || strings.TrimSpace(parts[2]) == "" {
+		return 0, 0, "", fmt.Errorf("invalid transfer completion pending member %q", member)
+	}
 	var jobID, taskID int64
-	if _, err := fmt.Sscanf(member, "%d:%d", &jobID, &taskID); err != nil {
-		return 0, 0, fmt.Errorf("invalid transfer completion pending member %q: %w", member, err)
+	if _, err := fmt.Sscanf(parts[0], "%d", &jobID); err != nil {
+		return 0, 0, "", fmt.Errorf("invalid transfer completion pending member %q: %w", member, err)
+	}
+	if _, err := fmt.Sscanf(parts[1], "%d", &taskID); err != nil {
+		return 0, 0, "", fmt.Errorf("invalid transfer completion pending member %q: %w", member, err)
 	}
 	if jobID <= 0 || taskID <= 0 {
-		return 0, 0, fmt.Errorf("invalid transfer completion pending member %q", member)
+		return 0, 0, "", fmt.Errorf("invalid transfer completion pending member %q", member)
 	}
-	return jobID, taskID, nil
+	return jobID, taskID, parts[2], nil
 }
 
 func RecordTransferTaskCompensation(c *gin.Context) {
 	type request struct {
 		JobID     int64  `json:"job_id"`
 		TaskID    int64  `json:"task_id"`
+		RunToken  string `json:"run_token"`
+		Src       string `json:"src"`
+		WorkerID  string `json:"worker_id"`
 		Size      int64  `json:"size"`
 		DstBucket string `json:"dst_bucket"`
 		DstKey    string `json:"dst_key"`
@@ -72,14 +85,32 @@ func RecordTransferTaskCompensation(c *gin.Context) {
 		c.JSON(400, gin.H{"error": err.Error()})
 		return
 	}
-	if req.JobID <= 0 || req.TaskID <= 0 || req.DstBucket == "" || req.DstKey == "" {
-		c.JSON(400, gin.H{"error": "job_id, task_id, dst_bucket and dst_key are required"})
+	if req.JobID <= 0 || req.TaskID <= 0 || req.RunToken == "" || req.DstBucket == "" || req.DstKey == "" {
+		c.JSON(400, gin.H{"error": "job_id, task_id, run_token, dst_bucket and dst_key are required"})
+		return
+	}
+
+	ctx := context.Background()
+	current, _, err := getCurrentTransferTask(ctx, req.JobID, req.TaskID)
+	if err == redis.Nil {
+		c.JSON(404, gin.H{"error": "transfer task not found"})
+		return
+	}
+	if err != nil {
+		c.JSON(500, gin.H{"error": "load transfer task: " + err.Error()})
+		return
+	}
+	if current.RunToken == "" || current.RunToken != req.RunToken {
+		c.JSON(409, gin.H{"error": "run token mismatch"})
 		return
 	}
 
 	detail := transferTaskCompensationDetail{
 		JobID:     req.JobID,
 		TaskID:    req.TaskID,
+		RunToken:  req.RunToken,
+		Src:       req.Src,
+		WorkerID:  req.WorkerID,
 		Size:      req.Size,
 		DstBucket: req.DstBucket,
 		DstKey:    req.DstKey,
@@ -93,12 +124,11 @@ func RecordTransferTaskCompensation(c *gin.Context) {
 		return
 	}
 
-	ctx := context.Background()
 	pipe := database.RDB.Pipeline()
-	pipe.Set(ctx, transferCompletionCompensationKey(req.JobID, req.TaskID), data, 0)
+	pipe.Set(ctx, transferCompletionCompensationKey(req.JobID, req.TaskID, req.RunToken), data, 0)
 	pipe.ZAdd(ctx, transferCompletionPendingKey(), redis.Z{
 		Score:  float64(time.Now().Unix()),
-		Member: transferCompletionPendingMember(req.JobID, req.TaskID),
+		Member: transferCompletionPendingMember(req.JobID, req.TaskID, req.RunToken),
 	})
 	if _, err := pipe.Exec(ctx); err != nil {
 		c.JSON(500, gin.H{"error": "store compensation detail: " + err.Error()})
@@ -136,13 +166,13 @@ func runTransferCompletionReconcileBatch(ctx context.Context) {
 }
 
 func reconcileTransferCompletionPendingMember(ctx context.Context, member string) error {
-	jobID, taskID, err := parseTransferCompletionPendingMember(member)
+	jobID, taskID, runToken, err := parseTransferCompletionPendingMember(member)
 	if err != nil {
 		database.RDB.ZRem(ctx, transferCompletionPendingKey(), member)
 		return err
 	}
 
-	detailJSON, err := database.RDB.Get(ctx, transferCompletionCompensationKey(jobID, taskID)).Result()
+	detailJSON, err := database.RDB.Get(ctx, transferCompletionCompensationKey(jobID, taskID, runToken)).Result()
 	if err == redis.Nil {
 		database.RDB.ZRem(ctx, transferCompletionPendingKey(), member)
 		return nil
@@ -153,7 +183,7 @@ func reconcileTransferCompletionPendingMember(ctx context.Context, member string
 
 	var detail transferTaskCompensationDetail
 	if err := json.Unmarshal([]byte(detailJSON), &detail); err != nil {
-		database.RDB.Del(ctx, transferCompletionCompensationKey(jobID, taskID))
+		database.RDB.Del(ctx, transferCompletionCompensationKey(jobID, taskID, runToken))
 		database.RDB.ZRem(ctx, transferCompletionPendingKey(), member)
 		return fmt.Errorf("decode compensation detail: %w", err)
 	}
@@ -161,7 +191,7 @@ func reconcileTransferCompletionPendingMember(ctx context.Context, member string
 	taskKey := fmt.Sprintf("tx:task:%d:%d", detail.JobID, detail.TaskID)
 	taskJSON, err := database.RDB.Get(ctx, taskKey).Result()
 	if err == redis.Nil {
-		database.RDB.Del(ctx, transferCompletionCompensationKey(jobID, taskID))
+		database.RDB.Del(ctx, transferCompletionCompensationKey(jobID, taskID, runToken))
 		database.RDB.ZRem(ctx, transferCompletionPendingKey(), member)
 		return nil
 	}
@@ -173,8 +203,12 @@ func reconcileTransferCompletionPendingMember(ctx context.Context, member string
 	if err := json.Unmarshal([]byte(taskJSON), &task); err != nil {
 		return fmt.Errorf("decode task state: %w", err)
 	}
+	if task.RunToken == "" || task.RunToken != runToken {
+		cleanupTransferCompletionPending(ctx, member, detail.JobID, detail.TaskID, runToken)
+		return nil
+	}
 	if task.Status == "COMPLETED" {
-		cleanupTransferCompletionPending(ctx, member, detail.JobID, detail.TaskID)
+		cleanupTransferCompletionPending(ctx, member, detail.JobID, detail.TaskID, runToken)
 		return nil
 	}
 
@@ -195,14 +229,14 @@ func reconcileTransferCompletionPendingMember(ctx context.Context, member string
 		return err
 	}
 
-	cleanupTransferCompletionPending(ctx, member, detail.JobID, detail.TaskID)
-	log.Printf("[TransferReconcile] Reconciled completion compensation job=%d task=%d to COMPLETED", detail.JobID, detail.TaskID)
+	cleanupTransferCompletionPending(ctx, member, detail.JobID, detail.TaskID, runToken)
+	log.Printf("[TransferReconcile] Reconciled completion compensation job=%d task=%d run_token=%s to COMPLETED", detail.JobID, detail.TaskID, runToken)
 	return nil
 }
 
-func cleanupTransferCompletionPending(ctx context.Context, member string, jobID, taskID int64) {
+func cleanupTransferCompletionPending(ctx context.Context, member string, jobID, taskID int64, runToken string) {
 	pipe := database.RDB.Pipeline()
-	pipe.Del(ctx, transferCompletionCompensationKey(jobID, taskID))
+	pipe.Del(ctx, transferCompletionCompensationKey(jobID, taskID, runToken))
 	pipe.ZRem(ctx, transferCompletionPendingKey(), member)
 	_, _ = pipe.Exec(ctx)
 }
@@ -260,6 +294,7 @@ func isTransferReconcileNotFound(err error) bool {
 	}
 	msg := strings.ToLower(err.Error())
 	return strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "nosuchkey") ||
 		strings.Contains(msg, "no such key") ||
 		strings.Contains(msg, "status code: 404") ||
 		strings.Contains(msg, "statuscode: 404") ||
@@ -304,6 +339,8 @@ func applyTransferTaskTerminalUpdate(ctx context.Context, task models.TransferTa
 	if task.RunToken != "" {
 		pipe.ZRem(ctx, transferClaimedRunningKey(), transferClaimedRunningMember(task.JobID, task.ID, task.RunToken))
 		pipe.ZRem(ctx, transferRunningLastSeenKey(), transferRunningLastSeenMember(task.JobID, task.ID, task.RunToken))
+		pipe.Del(ctx, transferCompletionCompensationKey(task.JobID, task.ID, task.RunToken))
+		pipe.ZRem(ctx, transferCompletionPendingKey(), transferCompletionPendingMember(task.JobID, task.ID, task.RunToken))
 	}
 	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("store transfer task terminal state: %w", err)
