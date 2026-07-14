@@ -2052,8 +2052,13 @@ func AcquireTransferTasks(c *gin.Context) {
 	if req.Limit <= 0 {
 		req.Limit = 10
 	}
+	if strings.TrimSpace(req.WorkerID) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "worker_id is required"})
+		return
+	}
 
 	tasks := []models.TransferTask{}
+	ctx := context.Background()
 
 	bufferMutex.RLock()
 	var jobIDs []int64
@@ -2093,7 +2098,15 @@ func AcquireTransferTasks(c *gin.Context) {
 		for len(tasks) < req.Limit {
 			select {
 			case t := <-ch:
-				tasks = append(tasks, t)
+				claimed, ok, err := claimTransferTask(ctx, t, req.WorkerID)
+				if err != nil {
+					log.Printf("[AcquireTransferTasks] failed to claim task %d/%d for worker %s: %v", t.JobID, t.ID, req.WorkerID, err)
+					continue
+				}
+				if !ok {
+					continue
+				}
+				tasks = append(tasks, claimed)
 			default:
 				break loop
 			}
@@ -2124,41 +2137,80 @@ func BatchUpdateTransfer(c *gin.Context) {
 		return
 	}
 	pipe := database.RDB.Pipeline()
-	successSizeIncrements := make(map[int64]int64)
 
 	for i, u := range updates {
-		data, err := json.Marshal(u)
-		if err != nil {
-			continue
-		}
-
 		var taskKey string
 		taskKey = fmt.Sprintf("tx:task:%d:%d", u.JobID, u.ID)
 
+		if existingJSONs[i] == nil {
+			continue
+		}
+
 		val := existingJSONs[i]
-		if str, ok := val.(string); ok && str != "" {
-			var existing models.TransferTask
-			if json.Unmarshal([]byte(str), &existing) == nil {
-				if existing.Status != "COMPLETED" && u.Status == "COMPLETED" && existing.Size > 0 {
-					successSizeIncrements[u.JobID] += existing.Size
-				}
+		str, ok := val.(string)
+		if !ok || str == "" {
+			continue
+		}
+
+		var existing models.TransferTask
+		if err := json.Unmarshal([]byte(str), &existing); err != nil {
+			continue
+		}
+
+		oldStatus := existing.Status
+		newStatus := u.Status
+		if newStatus == "" {
+			newStatus = existing.Status
+		}
+
+		if u.Size > 0 {
+			existing.Size = u.Size
+		}
+		if u.WorkerID != "" {
+			existing.WorkerID = u.WorkerID
+		}
+		if u.RunToken != "" {
+			existing.RunToken = u.RunToken
+		}
+		existing.Status = newStatus
+		existing.ErrorMessage = u.ErrorMessage
+		existing.UpdatedAt = time.Now()
+		if newStatus == "RUNNING" && existing.StartedAt.IsZero() {
+			existing.StartedAt = time.Now()
+		}
+		if (newStatus == "COMPLETED" || newStatus == "FAILED") && existing.CompletedAt.IsZero() {
+			existing.CompletedAt = time.Now()
+		}
+
+		data, err := json.Marshal(existing)
+		if err != nil {
+			continue
+		}
+		pipe.Set(ctx, taskKey, data, 0)
+
+		if newStatus == "COMPLETED" || newStatus == "FAILED" {
+			if existing.RunToken != "" {
+				pipe.ZRem(ctx, transferClaimedRunningKey(), transferClaimedRunningMember(existing.JobID, existing.ID, existing.RunToken))
+				pipe.ZRem(ctx, transferRunningLastSeenKey(), transferRunningLastSeenMember(existing.JobID, existing.ID, existing.RunToken))
 			}
 		}
 
-		pipe.Set(ctx, taskKey, data, 0)
+		if oldStatus != newStatus {
+			var successBytes int64
+			if oldStatus != "COMPLETED" && newStatus == "COMPLETED" && existing.Size > 0 {
+				successBytes = existing.Size
+			}
+			if err := applyTransferTaskDBStatusTransition(existing.JobID, oldStatus, newStatus, successBytes); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+		}
 	}
 
 	_, err = pipe.Exec(ctx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
-	}
-
-	for jobID, bytes := range successSizeIncrements {
-		if bytes > 0 {
-			database.DB.Model(&models.TransferJob{}).Where("job_id = ?", jobID).
-				UpdateColumn("success_size_bytes", gorm.Expr("success_size_bytes + ?", bytes))
-		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"status": "updated"})
@@ -2593,6 +2645,7 @@ func updateCompletedTransferJobs() {
 		WHERE
 			status = ?
 			AND pending_count = 0
+			AND running_count = 0
 			AND periodic_interval = 0
 			AND last_scan_time IS NOT NULL
 	`

@@ -11,7 +11,7 @@ import (
 
 func main() {
 	log.Println("=== Starting Unbound Future Admin Backend ===")
-	
+
 	log.Println("Loading configuration...")
 	cfg, err := config.LoadConfig()
 	if err != nil {
@@ -42,6 +42,9 @@ func main() {
 	// Start transfer job completion monitor.
 	handlers.StartTransferJobMonitor()
 	log.Println("  - Transfer job monitor started")
+
+	handlers.StartTransferCompletionReconciler()
+	log.Println("  - Transfer completion reconciler started")
 
 	log.Println("Setting up routes...")
 	r := routes.SetupRouter()

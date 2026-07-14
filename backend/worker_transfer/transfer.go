@@ -31,11 +31,14 @@ import (
 // 2. Transfer using external service
 
 type TransferTask struct {
-	ID     int64  `json:"id"`
-	JobID  int64  `json:"job_id"`
-	Src    string `json:"src"`
-	Size   int64  `json:"size"`
-	Status string `json:"status"`
+	ID           int64  `json:"id"`
+	JobID        int64  `json:"job_id"`
+	Src          string `json:"src"`
+	Size         int64  `json:"size"`
+	RunToken     string `json:"run_token"`
+	Status       string `json:"status"`
+	ErrorMessage string `json:"error_message"`
+	WorkerID     string `json:"worker_id"`
 }
 
 type JobInfo struct {
@@ -60,6 +63,7 @@ var (
 	jobCache           sync.Map // JobID -> cachedJob
 	httpClient         *http.Client
 	transferClient     *http.Client
+	workerID           string
 	workerCount        int
 	taskBufferSize     int
 	partConcurrency    int
@@ -96,6 +100,8 @@ const (
 	DefaultPartConcurrency      = 16
 	DefaultMultipartThresholdMB = 8
 	DefaultMinPartSizeMB        = 5
+	WorkerHeartbeatInterval     = 30 * time.Second
+	ActiveTouchInterval         = 5 * time.Second
 )
 
 func runTransfer() {
@@ -110,6 +116,10 @@ func runTransfer() {
 	apiBaseURL = os.Getenv("BACKEND_API_URL")
 	if apiBaseURL == "" {
 		apiBaseURL = "http://localhost:8080/api"
+	}
+	workerID = os.Getenv("TRANSFER_WORKER_ID")
+	if strings.TrimSpace(workerID) == "" {
+		workerID = WorkerID
 	}
 	workerCount = getEnvInt("TRANSFER_MAX_WORKERS", DefaultConcurrentWorkers)
 	taskBufferSize = getEnvInt("TRANSFER_TASK_BUFFER", DefaultTaskBufferSize)
@@ -143,8 +153,9 @@ func runTransfer() {
 
 	initSourceClient()
 	initStatsFlusher()
+	initWorkerHeartbeat()
 
-	log.Println("Transfer Worker Started")
+	log.Printf("Transfer Worker Started (worker_id=%s)", workerID)
 
 	taskChan := make(chan TransferTask, taskBufferSize)
 
@@ -199,6 +210,19 @@ func initStatsFlusher() {
 	}()
 }
 
+func initWorkerHeartbeat() {
+	go func() {
+		ticker := time.NewTicker(WorkerHeartbeatInterval)
+		defer ticker.Stop()
+		for {
+			if err := reportTransferWorkerHeartbeat(); err != nil {
+				log.Printf("Failed to report transfer worker heartbeat for %s: %v", workerID, err)
+			}
+			<-ticker.C
+		}
+	}()
+}
+
 func flushStats() {
 	statsMutex.Lock()
 	if len(statsBuffer) == 0 {
@@ -222,17 +246,10 @@ func flushStats() {
 }
 
 func updateJobStats(jobID int64, incSuccess, incFailed int) {
-	if incSuccess == 0 && incFailed == 0 {
-		return
-	}
-	statsMutex.Lock()
-	defer statsMutex.Unlock()
-
-	if _, ok := statsBuffer[jobID]; !ok {
-		statsBuffer[jobID] = &JobStatsDelta{}
-	}
-	statsBuffer[jobID].Success += incSuccess
-	statsBuffer[jobID].Failed += incFailed
+	// Transfer job counters are now driven by task status transitions in backend.
+	_ = jobID
+	_ = incSuccess
+	_ = incFailed
 }
 
 type UpdateJobStatusRequest struct {
@@ -279,6 +296,12 @@ func processTask(t TransferTask) {
 	srcDir := strings.TrimSpace(job.SrcDir)
 	dstDir := strings.TrimSpace(job.DstDir)
 
+	if err := markTaskActive(t); err != nil {
+		log.Printf("Failed to activate task %d/%d: %v", t.JobID, t.ID, err)
+	}
+	stopTouch := startActiveTaskToucher(t)
+	defer stopTouch()
+
 	log.Printf("Processing Task %d (Job %d): %s -> %s", t.ID, t.JobID, t.Src, dstDir)
 
 	// 1. Resolve Dst Client
@@ -298,19 +321,7 @@ func processTask(t TransferTask) {
 
 	// 2. Resolve Paths
 	srcKey := t.Src
-	var relKey string
-	if srcDir != "" {
-		if srcKey == srcDir {
-			relKey = ""
-		} else if strings.HasPrefix(srcKey, srcDir) {
-			relKey = strings.TrimPrefix(srcKey, srcDir)
-			relKey = strings.TrimPrefix(relKey, "/")
-		} else {
-			relKey = srcKey
-		}
-	} else {
-		relKey = srcKey
-	}
+	relKey := buildRelativeKey(srcDir, srcKey)
 
 	dstKey := relKey
 	if dstDir != "" {
@@ -375,7 +386,12 @@ func processTask(t TransferTask) {
 			}
 		}
 
-		updateTaskStatus(t, "COMPLETED", "")
+		if err := updateTaskStatus(t, "COMPLETED", ""); err != nil {
+			log.Printf("Failed to update COMPLETED status for task %d/%d: %v", t.JobID, t.ID, err)
+			if reportErr := reportCompletionCompensation(t, size, dstBucket, dstKey, "final_status_update_failed"); reportErr != nil {
+				log.Printf("Failed to report completion compensation for task %d/%d: %v", t.JobID, t.ID, reportErr)
+			}
+		}
 		updateJobStats(t.JobID, 1, 0)
 
 		// Metrics
@@ -384,6 +400,25 @@ func processTask(t TransferTask) {
 		BytesTransferred.Add(float64(size))
 		TasksTransferred.WithLabelValues("success").Inc()
 	}
+}
+
+func buildRelativeKey(srcDir, srcKey string) string {
+	srcDir = strings.Trim(strings.TrimSpace(srcDir), "/")
+	srcKey = strings.TrimPrefix(srcKey, "/")
+
+	if srcDir == "" {
+		return srcKey
+	}
+	if srcKey == srcDir {
+		return ""
+	}
+
+	dirPrefix := srcDir + "/"
+	if strings.HasPrefix(srcKey, dirPrefix) {
+		return strings.TrimPrefix(srcKey, dirPrefix)
+	}
+
+	return srcKey
 }
 
 func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string, size int64, dstEndpoint string) error {
@@ -604,7 +639,7 @@ func createS3Client(endpoint, ak, sk string) (*s3.Client, error) {
 
 func acquireTasks() ([]TransferTask, error) {
 	payload := map[string]interface{}{
-		"worker_id": WorkerID,
+		"worker_id": workerID,
 		"limit":     taskBufferSize,
 	}
 	data, _ := json.Marshal(payload)
@@ -672,24 +707,169 @@ type TransferJobStruct struct {
 	DeleteSource bool             `json:"delete_source"`
 }
 
-func updateTaskStatus(t TransferTask, status string, msg string) {
+func updateTaskStatus(t TransferTask, status string, msg string) error {
 	t.Status = status
-	// msg is ignored by backend currently unless we add a field for it,
-	// but let's send it anyway? No, backend models.TransferTask doesn't have Msg.
-	// We can ignore msg for now or log it.
+	t.ErrorMessage = msg
 
 	payload := []TransferTask{t}
 	data, _ := json.Marshal(payload)
 
 	resp, err := httpClient.Post(apiBaseURL+"/transfer-tasks/update", "application/json", bytes.NewBuffer(data))
 	if err != nil {
-		log.Printf("Failed to update status for task %d: %v", t.ID, err)
-		return
+		return fmt.Errorf("post transfer task update: %w", err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
-		log.Printf("Failed to update status for task %d: status %d", t.ID, resp.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("transfer task update returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
+	return nil
+}
+
+func markTaskActive(t TransferTask) error {
+	type activateRequest struct {
+		JobID    int64  `json:"job_id"`
+		TaskID   int64  `json:"task_id"`
+		RunToken string `json:"run_token"`
+		WorkerID string `json:"worker_id"`
+	}
+	type activateResponse struct {
+		Status string `json:"status"`
+		Reason string `json:"reason"`
+	}
+
+	payload := activateRequest{
+		JobID:    t.JobID,
+		TaskID:   t.ID,
+		RunToken: t.RunToken,
+		WorkerID: workerID,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal activate request: %w", err)
+	}
+
+	resp, err := httpClient.Post(apiBaseURL+"/transfer-tasks/activate", "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		return fmt.Errorf("post activate request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("activate returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var result activateResponse
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decode activate response: %w", err)
+	}
+	if result.Status != "activated" {
+		return fmt.Errorf("activate not applied: status=%s reason=%s", result.Status, result.Reason)
+	}
+	return nil
+}
+
+func touchActiveTask(t TransferTask) error {
+	payload := map[string]interface{}{
+		"job_id":    t.JobID,
+		"task_id":   t.ID,
+		"run_token": t.RunToken,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal transfer progress payload: %w", err)
+	}
+
+	resp, err := httpClient.Post(apiBaseURL+"/transfer-tasks/progress", "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		return fmt.Errorf("post transfer progress: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("transfer progress returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
+func startActiveTaskToucher(t TransferTask) func() {
+	done := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(ActiveTouchInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				if err := touchActiveTask(t); err != nil {
+					log.Printf("Failed to touch active task %d/%d: %v", t.JobID, t.ID, err)
+				}
+			}
+		}
+	}()
+	return func() {
+		close(done)
+	}
+}
+
+func reportTransferWorkerHeartbeat() error {
+	payload := map[string]string{
+		"worker_id": workerID,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal worker heartbeat payload: %w", err)
+	}
+
+	resp, err := httpClient.Post(apiBaseURL+"/transfer-tasks/heartbeat", "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		return fmt.Errorf("post worker heartbeat: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("worker heartbeat returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
+func reportCompletionCompensation(t TransferTask, size int64, dstBucket, dstKey, reason string) error {
+	type completionCompensationRequest struct {
+		JobID     int64  `json:"job_id"`
+		TaskID    int64  `json:"task_id"`
+		Size      int64  `json:"size"`
+		DstBucket string `json:"dst_bucket"`
+		DstKey    string `json:"dst_key"`
+		Reason    string `json:"reason"`
+	}
+
+	payload := completionCompensationRequest{
+		JobID:     t.JobID,
+		TaskID:    t.ID,
+		Size:      size,
+		DstBucket: dstBucket,
+		DstKey:    dstKey,
+		Reason:    reason,
+	}
+
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal completion compensation payload: %w", err)
+	}
+
+	resp, err := httpClient.Post(apiBaseURL+"/transfer-tasks/compensations", "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		return fmt.Errorf("post completion compensation: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("completion compensation returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	return nil
 }
 
 func calculatePartSize(size int64) int64 {

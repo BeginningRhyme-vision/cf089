@@ -16,7 +16,7 @@ func PrometheusMiddleware() gin.HandlerFunc {
 		c.Next()
 		duration := time.Since(start).Seconds()
 		status := strconv.Itoa(c.Writer.Status())
-		
+
 		metrics.HttpReqDuration.WithLabelValues(c.Request.Method, c.FullPath(), status).Observe(duration)
 		metrics.HttpReqTotal.WithLabelValues(c.Request.Method, c.FullPath(), status).Inc()
 	}
@@ -39,7 +39,7 @@ func SetupRouter() *gin.Engine {
 			auth.POST("/passcode/login", handlers.PasscodeLogin)
 		}
 
-        // Transfer Jobs
+		// Transfer Jobs
 		jobs := api.Group("/jobs")
 		{
 			jobs.POST("/", handlers.CreateTransferJob)
@@ -55,87 +55,91 @@ func SetupRouter() *gin.Engine {
 			jobs.DELETE("/:id", handlers.DeleteTransferJob)
 		}
 
-        // Youtube Jobs
-        ytJobs := api.Group("/youtube-jobs")
-        {
-            ytJobs.POST("/", handlers.CreateYoutubeJob)
-            ytJobs.GET("/", handlers.ListYoutubeJobs)
-            ytJobs.GET("/queue-stats", handlers.GetYoutubeQueueStats)
-            ytJobs.GET("/:id", handlers.GetYoutubeJob)
-            ytJobs.POST("/:id/tasks", handlers.AddTasksToYoutubeJob)
-            ytJobs.POST("/:id/retry", handlers.RetryFailedYoutubeTasks)
-            ytJobs.POST("/:id/retry-non-completed", handlers.RetryNonCompletedYoutubeTasks)
-            ytJobs.POST("/:id/reset-offset", handlers.ResetYoutubeJobOffset)
-            ytJobs.DELETE("/pending", handlers.DeletePendingYoutubeJobs)
-            ytJobs.DELETE("/:id", handlers.DeleteYoutubeJob)
-        }
-        
-        // Metadata
-        meta := api.Group("/metadata")
-        {
-            meta.POST("/", handlers.CreateMetadata)
-            meta.GET("/", handlers.ListMetadata)
-            meta.GET("/:id", handlers.GetMetadata)
-            meta.PUT("/:id", handlers.UpdateMetadata)
-            meta.DELETE("/:id", handlers.DeleteMetadata)
-        }
-        
-        // Tasks (New Batch Interface)
-        tasks := api.Group("/tasks")
-        {
-            tasks.POST("/insert", handlers.BatchInsert)
-            tasks.POST("/update", handlers.BatchUpdate)
-            tasks.POST("/fetch", handlers.BatchFetch)
-            tasks.POST("/acquire", handlers.AcquireTasks)
-            tasks.POST("/delete", handlers.BatchDelete)
-        }
+		// Youtube Jobs
+		ytJobs := api.Group("/youtube-jobs")
+		{
+			ytJobs.POST("/", handlers.CreateYoutubeJob)
+			ytJobs.GET("/", handlers.ListYoutubeJobs)
+			ytJobs.GET("/queue-stats", handlers.GetYoutubeQueueStats)
+			ytJobs.GET("/:id", handlers.GetYoutubeJob)
+			ytJobs.POST("/:id/tasks", handlers.AddTasksToYoutubeJob)
+			ytJobs.POST("/:id/retry", handlers.RetryFailedYoutubeTasks)
+			ytJobs.POST("/:id/retry-non-completed", handlers.RetryNonCompletedYoutubeTasks)
+			ytJobs.POST("/:id/reset-offset", handlers.ResetYoutubeJobOffset)
+			ytJobs.DELETE("/pending", handlers.DeletePendingYoutubeJobs)
+			ytJobs.DELETE("/:id", handlers.DeleteYoutubeJob)
+		}
 
-        // Transfer Tasks
-        txTasks := api.Group("/transfer-tasks")
-        {
-            txTasks.POST("/acquire", handlers.AcquireTransferTasks)
-            txTasks.POST("/update", handlers.BatchUpdateTransfer)
-        }
+		// Metadata
+		meta := api.Group("/metadata")
+		{
+			meta.POST("/", handlers.CreateMetadata)
+			meta.GET("/", handlers.ListMetadata)
+			meta.GET("/:id", handlers.GetMetadata)
+			meta.PUT("/:id", handlers.UpdateMetadata)
+			meta.DELETE("/:id", handlers.DeleteMetadata)
+		}
 
-        // Ffmpeg Jobs
-        ffJobs := api.Group("/ffmpeg-jobs")
-        {
-            ffJobs.POST("/", handlers.CreateFfmpegJob)
-            ffJobs.GET("/", handlers.ListFfmpegJobs)
-            ffJobs.GET("/pending", handlers.ListPendingFfmpegJobs)
-            ffJobs.GET("/:id", handlers.GetFfmpegJob)
-            ffJobs.PATCH("/:id/status", handlers.UpdateFfmpegJobStatus)
-            ffJobs.DELETE("/:id", handlers.DeleteFfmpegJob)
-        }
-        
-        // Ffmpeg Tasks
-        ffTasks := api.Group("/ffmpeg-tasks")
-        {
-            ffTasks.POST("/acquire", handlers.AcquireFfmpegTasks)
-            ffTasks.POST("/update", handlers.BatchUpdateFfmpeg)
-        }
+		// Tasks (New Batch Interface)
+		tasks := api.Group("/tasks")
+		{
+			tasks.POST("/insert", handlers.BatchInsert)
+			tasks.POST("/update", handlers.BatchUpdate)
+			tasks.POST("/fetch", handlers.BatchFetch)
+			tasks.POST("/acquire", handlers.AcquireTasks)
+			tasks.POST("/delete", handlers.BatchDelete)
+		}
 
-        // Pipeline Jobs
-        pipelines := api.Group("/pipelines")
-        {
-            pipelines.POST("/", handlers.CreatePipelineJob)
-            pipelines.GET("/", handlers.ListPipelineJobs)
-            pipelines.GET("/:id", handlers.GetPipelineJob)
-            pipelines.POST("/:id/retry", handlers.RetryPipelineJob)
-        }
+		// Transfer Tasks
+		txTasks := api.Group("/transfer-tasks")
+		{
+			txTasks.POST("/acquire", handlers.AcquireTransferTasks)
+			txTasks.POST("/update", handlers.BatchUpdateTransfer)
+			txTasks.POST("/activate", handlers.MarkTransferTaskActive)
+			txTasks.POST("/progress", handlers.UpdateTransferTaskProgress)
+			txTasks.POST("/compensations", handlers.RecordTransferTaskCompensation)
+			txTasks.POST("/heartbeat", handlers.RecordTransferWorkerHeartbeat)
+		}
 
-        // Worker Cookie Configs
-        cookieConfigs := api.Group("/worker-cookie-configs")
-        {
-            cookieConfigs.GET("", handlers.GetWorkerCookieConfig)
-            cookieConfigs.GET("/machine-names", handlers.ListWorkerMachineNames)
-        }
+		// Ffmpeg Jobs
+		ffJobs := api.Group("/ffmpeg-jobs")
+		{
+			ffJobs.POST("/", handlers.CreateFfmpegJob)
+			ffJobs.GET("/", handlers.ListFfmpegJobs)
+			ffJobs.GET("/pending", handlers.ListPendingFfmpegJobs)
+			ffJobs.GET("/:id", handlers.GetFfmpegJob)
+			ffJobs.PATCH("/:id/status", handlers.UpdateFfmpegJobStatus)
+			ffJobs.DELETE("/:id", handlers.DeleteFfmpegJob)
+		}
 
-        // Youtube Tasks (Database Records)
-        youtubeTasks := api.Group("/youtube-tasks")
-        {
-            youtubeTasks.POST("/update", handlers.UpdateYoutubeTaskRecord)
-        }
+		// Ffmpeg Tasks
+		ffTasks := api.Group("/ffmpeg-tasks")
+		{
+			ffTasks.POST("/acquire", handlers.AcquireFfmpegTasks)
+			ffTasks.POST("/update", handlers.BatchUpdateFfmpeg)
+		}
+
+		// Pipeline Jobs
+		pipelines := api.Group("/pipelines")
+		{
+			pipelines.POST("/", handlers.CreatePipelineJob)
+			pipelines.GET("/", handlers.ListPipelineJobs)
+			pipelines.GET("/:id", handlers.GetPipelineJob)
+			pipelines.POST("/:id/retry", handlers.RetryPipelineJob)
+		}
+
+		// Worker Cookie Configs
+		cookieConfigs := api.Group("/worker-cookie-configs")
+		{
+			cookieConfigs.GET("", handlers.GetWorkerCookieConfig)
+			cookieConfigs.GET("/machine-names", handlers.ListWorkerMachineNames)
+		}
+
+		// Youtube Tasks (Database Records)
+		youtubeTasks := api.Group("/youtube-tasks")
+		{
+			youtubeTasks.POST("/update", handlers.UpdateYoutubeTaskRecord)
+		}
 	}
 
 	return r
