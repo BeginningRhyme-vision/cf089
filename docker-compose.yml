@@ -160,12 +160,12 @@ services:
     command: ["transfer"]
     environment:
       - BACKEND_API_URL=http://backend-api:8080/api
-      - TRANSFER_MAX_WORKERS=96
-      - TRANSFER_TASK_BUFFER=48
+      - TRANSFER_MAX_WORKERS=224
+      - TRANSFER_TASK_BUFFER=72
       - TRANSFER_PART_CONCURRENCY=4
-      - TRANSFER_MULTIPART_THRESHOLD_MB=64
+      - TRANSFER_MULTIPART_THRESHOLD_MB=48
       - TRANSFER_MIN_PART_SIZE_MB=16
-      - TRANSFER_SERVICE_TIMEOUT_SECONDS=120
+      - TRANSFER_SERVICE_TIMEOUT_SECONDS=150
     volumes:
       - ./config/config.yaml:/app/config.yaml
     depends_on:
