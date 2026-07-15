@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -59,6 +60,29 @@ type JobStatsDelta struct {
 	Failed  int
 }
 
+type transferServiceError struct {
+	statusCode int
+	message    string
+	body       string
+	retryable  bool
+}
+
+func (e *transferServiceError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.statusCode > 0 {
+		if e.body != "" {
+			return fmt.Sprintf("transfer service status %d: %s", e.statusCode, e.body)
+		}
+		return fmt.Sprintf("transfer service status %d: %s", e.statusCode, e.message)
+	}
+	if e.body != "" {
+		return e.body
+	}
+	return e.message
+}
+
 var (
 	jobCache           sync.Map // JobID -> cachedJob
 	httpClient         *http.Client
@@ -102,6 +126,7 @@ const (
 	DefaultMinPartSizeMB        = 5
 	WorkerHeartbeatInterval     = 30 * time.Second
 	ActiveTouchInterval         = 5 * time.Second
+	TransferAttemptLimit        = 2
 )
 
 func runTransfer() {
@@ -422,18 +447,21 @@ func buildRelativeKey(srcDir, srcKey string) string {
 }
 
 func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string, size int64, dstEndpoint string) error {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	dstUrl, err := constructVirtualHostURL(dstEndpoint, dstBucket, dstKey)
 	if err != nil {
 		return err
 	}
 
 	if size < multipartThreshold {
-		_, err = callTransferService(srcURL, dstUrl, size, 0, "", -1)
+		_, err = uploadTransferPartWithRetry(ctx, srcURL, dstUrl, size, 0, "", -1)
 		return err
 	}
 
 	// Multipart
-	createOut, err := dstClient.CreateMultipartUpload(context.TODO(), &s3.CreateMultipartUploadInput{
+	createOut, err := dstClient.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
 		Bucket: aws.String(dstBucket),
 		Key:    aws.String(dstKey),
 	})
@@ -445,10 +473,10 @@ func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string,
 	partSize := calculatePartSize(size)
 	numParts := int((size-1)/partSize) + 1
 
-	var completedParts []types.CompletedPart
-	var mu sync.Mutex
+	completedParts := make([]types.CompletedPart, numParts)
 	var wg sync.WaitGroup
-	errAbort := make(chan error, 1)
+	var firstErr error
+	var failOnce sync.Once
 
 	sem := make(chan struct{}, partConcurrency)
 
@@ -461,62 +489,51 @@ func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string,
 		partNum := int32(i + 1)
 
 		wg.Add(1)
-		go func(pNum int32, s, e int64) {
+		go func(idx int, pNum int32, s, e int64) {
 			defer wg.Done()
-			sem <- struct{}{}
+
+			select {
+			case <-ctx.Done():
+				return
+			case sem <- struct{}{}:
+			}
 			defer func() { <-sem }()
 
-			// Use clean URLs, no presigning
-			etag, err := callTransferService(srcURL, dstUrl, e-s+1, s, uploadID, int(pNum))
+			etag, err := uploadTransferPartWithRetry(ctx, srcURL, dstUrl, e-s+1, s, uploadID, int(pNum))
 			if err != nil {
-				select {
-				case errAbort <- err:
-				default:
-				}
+				failOnce.Do(func() {
+					firstErr = err
+					cancel()
+				})
 				return
 			}
 
-			mu.Lock()
-			completedParts = append(completedParts, types.CompletedPart{
+			completedParts[idx] = types.CompletedPart{
 				ETag:       aws.String(etag),
 				PartNumber: aws.Int32(pNum),
-			})
-			mu.Unlock()
-		}(partNum, start, end)
+			}
+		}(i, partNum, start, end)
 	}
 
 	wg.Wait()
 
-	select {
-	case err := <-errAbort:
-		dstClient.AbortMultipartUpload(context.TODO(), &s3.AbortMultipartUploadInput{
+	if firstErr != nil {
+		abortCtx, abortCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer abortCancel()
+		_, _ = dstClient.AbortMultipartUpload(abortCtx, &s3.AbortMultipartUploadInput{
 			Bucket: aws.String(dstBucket), Key: aws.String(dstKey), UploadId: aws.String(uploadID),
 		})
-		return err
-	default:
+		return firstErr
 	}
 
-	// Sort
-	for i := 0; i < len(completedParts); i++ {
-		for j := i + 1; j < len(completedParts); j++ {
-			if *completedParts[i].PartNumber > *completedParts[j].PartNumber {
-				completedParts[i], completedParts[j] = completedParts[j], completedParts[i]
-			}
-		}
-	}
-
-	_, err = dstClient.CompleteMultipartUpload(context.TODO(), &s3.CompleteMultipartUploadInput{
+	_, err = dstClient.CompleteMultipartUpload(ctx, &s3.CompleteMultipartUploadInput{
 		Bucket: aws.String(dstBucket), Key: aws.String(dstKey), UploadId: aws.String(uploadID),
 		MultipartUpload: &types.CompletedMultipartUpload{Parts: completedParts},
 	})
 	return err
 }
 
-func callTransferService(srcUrl, dstUrl string, size, offset int64, uploadID string, partNum int) (string, error) {
-	// Payload matches r2s3 / downloader logic
-	// But `r2s3` sent `r2Key` and `s3Url`.
-	// We are sending Presigned URLs for both.
-
+func callTransferService(ctx context.Context, srcUrl, dstUrl string, size, offset int64, uploadID string, partNum int) (string, error) {
 	payload := map[string]interface{}{
 		"r2Key":      srcUrl,
 		"s3Url":      dstUrl,
@@ -527,37 +544,198 @@ func callTransferService(srcUrl, dstUrl string, size, offset int64, uploadID str
 	}
 
 	body, _ := json.Marshal(payload)
-
-	// Retry
-	var lastErr error
-	for i := 0; i < 5; i++ {
-		resp, err := transferClient.Post(cfg.Storage.TransferServiceURL, "application/json", bytes.NewBuffer(body))
-		if err != nil {
-			lastErr = err
-			time.Sleep(time.Duration(i+1) * time.Second)
-			continue
-		}
-		respBody, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
-
-		if resp.StatusCode == 200 {
-			var res map[string]interface{}
-			if err := json.Unmarshal(respBody, &res); err != nil {
-				lastErr = fmt.Errorf("decode response failed: %w", err)
-				time.Sleep(time.Duration(i+1) * time.Second)
-				continue
-			}
-			if etag, ok := res["etag"].(string); ok {
-				return etag, nil
-			}
-			lastErr = fmt.Errorf("etag missing in response")
-			time.Sleep(time.Duration(i+1) * time.Second)
-			continue
-		}
-		lastErr = fmt.Errorf("status %d body %s", resp.StatusCode, string(respBody))
-		time.Sleep(time.Duration(i+1) * time.Second)
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, cfg.Storage.TransferServiceURL, bytes.NewBuffer(body))
+	if err != nil {
+		return "", classifyTransferTransportError(err)
 	}
-	return "", fmt.Errorf("service call failed: %v", lastErr)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := transferClient.Do(req)
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+		return "", classifyTransferTransportError(err)
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", classifyTransferResponseError(resp.StatusCode, string(respBody))
+	}
+
+	var res map[string]interface{}
+	if err := json.Unmarshal(respBody, &res); err != nil {
+		return "", &transferServiceError{
+			message:   fmt.Sprintf("decode response failed: %v", err),
+			body:      strings.TrimSpace(string(respBody)),
+			retryable: false,
+		}
+	}
+	if etag, ok := res["etag"].(string); ok && strings.TrimSpace(etag) != "" {
+		return etag, nil
+	}
+
+	return "", &transferServiceError{
+		message:   "etag missing in response",
+		body:      strings.TrimSpace(string(respBody)),
+		retryable: false,
+	}
+}
+
+func uploadTransferPartWithRetry(ctx context.Context, srcUrl, dstUrl string, size, offset int64, uploadID string, partNum int) (string, error) {
+	var lastErr error
+
+	for attempt := 1; attempt <= TransferAttemptLimit; attempt++ {
+		if ctx.Err() != nil {
+			return "", ctx.Err()
+		}
+
+		etag, err := callTransferService(ctx, srcUrl, dstUrl, size, offset, uploadID, partNum)
+		if err == nil {
+			return etag, nil
+		}
+
+		lastErr = err
+		if !isRetryableTransferError(err) || attempt == TransferAttemptLimit {
+			return "", lastErr
+		}
+
+		if err := waitForTransferRetry(ctx, attempt); err != nil {
+			return "", err
+		}
+	}
+
+	return "", lastErr
+}
+
+func waitForTransferRetry(ctx context.Context, attempt int) error {
+	backoff := time.Duration(attempt) * time.Second
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
+
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
+func isRetryableTransferError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var svcErr *transferServiceError
+	if errors.As(err, &svcErr) {
+		return svcErr.retryable
+	}
+
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		return netErr.Timeout()
+	}
+
+	return false
+}
+
+func classifyTransferTransportError(err error) error {
+	if err == nil {
+		return nil
+	}
+
+	retryable := true
+	lower := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(lower, "unsupported protocol scheme"),
+		strings.Contains(lower, "no host in request url"),
+		strings.Contains(lower, "invalid control character"),
+		strings.Contains(lower, "invalid url escape"),
+		strings.Contains(lower, "missing port in address"):
+		retryable = false
+	case errors.Is(err, context.Canceled):
+		retryable = false
+	}
+
+	return &transferServiceError{
+		message:   fmt.Sprintf("transfer service request failed: %v", err),
+		retryable: retryable,
+	}
+}
+
+func classifyTransferResponseError(statusCode int, body string) error {
+	body = strings.TrimSpace(body)
+	retryable := isRetryableTransferStatus(statusCode)
+
+	if hasFatalTransferBody(body) {
+		retryable = false
+	}
+
+	return &transferServiceError{
+		statusCode: statusCode,
+		body:       body,
+		retryable:  retryable,
+	}
+}
+
+func isRetryableTransferStatus(statusCode int) bool {
+	switch statusCode {
+	case http.StatusRequestTimeout, http.StatusTooEarly, http.StatusTooManyRequests,
+		http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+		return true
+	default:
+		return false
+	}
+}
+
+func hasFatalTransferBody(body string) bool {
+	if strings.TrimSpace(body) == "" {
+		return false
+	}
+
+	lower := strings.ToLower(body)
+	fatalMarkers := []string{
+		"missing required environment variables",
+		"missing required parameters",
+		"missing required parameter",
+		"signaturedoesnotmatch",
+		"invalidaccesskeyid",
+		"accessdenied",
+		"access denied",
+		"forbidden",
+		"authorizationheadermalformed",
+		"invalidargument",
+		"invalidrequest",
+		"invalid token",
+		"expiredtoken",
+		"request has expired",
+		"nosuchbucket",
+		"no such bucket",
+		"nosuchkey",
+		"no such key",
+		"nosuchupload",
+		"entitytoosmall",
+		"invalidpart",
+		"invalidpartorder",
+		"etag missing",
+		"no etag found",
+	}
+
+	for _, marker := range fatalMarkers {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func constructVirtualHostURL(endpointStr, bucket, key string) (string, error) {
