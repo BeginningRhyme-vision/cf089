@@ -64,6 +64,8 @@ type transferServiceError struct {
 	statusCode int
 	message    string
 	body       string
+	code       string
+	stage      string
 	retryable  bool
 }
 
@@ -673,8 +675,22 @@ func classifyTransferTransportError(err error) error {
 
 func classifyTransferResponseError(statusCode int, body string) error {
 	body = strings.TrimSpace(body)
-	retryable := isRetryableTransferStatus(statusCode)
+	if parsed, ok := parseStructuredTransferError(body); ok {
+		retryable := parsed.Error.Retryable
+		if hasFatalTransferBody(parsed.Error.Message) || hasFatalTransferBody(parsed.Error.Code) {
+			retryable = false
+		}
+		return &transferServiceError{
+			statusCode: statusCode,
+			message:    parsed.Error.Message,
+			body:       body,
+			code:       parsed.Error.Code,
+			stage:      parsed.Error.Stage,
+			retryable:  retryable,
+		}
+	}
 
+	retryable := isRetryableTransferStatus(statusCode)
 	if hasFatalTransferBody(body) {
 		retryable = false
 	}
@@ -736,6 +752,31 @@ func hasFatalTransferBody(body string) bool {
 	}
 
 	return false
+}
+
+type transferErrorEnvelope struct {
+	Error struct {
+		Code      string `json:"code"`
+		Stage     string `json:"stage"`
+		Message   string `json:"message"`
+		Retryable bool   `json:"retryable"`
+	} `json:"error"`
+}
+
+func parseStructuredTransferError(body string) (transferErrorEnvelope, bool) {
+	var envelope transferErrorEnvelope
+	if strings.TrimSpace(body) == "" {
+		return envelope, false
+	}
+	if err := json.Unmarshal([]byte(body), &envelope); err != nil {
+		return envelope, false
+	}
+	if strings.TrimSpace(envelope.Error.Code) == "" &&
+		strings.TrimSpace(envelope.Error.Stage) == "" &&
+		strings.TrimSpace(envelope.Error.Message) == "" {
+		return envelope, false
+	}
+	return envelope, true
 }
 
 func constructVirtualHostURL(endpointStr, bucket, key string) (string, error) {

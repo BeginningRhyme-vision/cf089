@@ -14,6 +14,167 @@ function isRetryableStatus(status) {
   return status === 408 || status === 429 || (status >= 500 && status <= 599);
 }
 
+class TransferError extends Error {
+  constructor({ statusCode, code, stage, message, retryable, details }) {
+    super(message);
+    this.name = "TransferError";
+    this.statusCode = statusCode;
+    this.code = code;
+    this.stage = stage;
+    this.retryable = retryable;
+    this.details = details || null;
+  }
+}
+
+function createTransferError(statusCode, code, stage, message, retryable, details = null) {
+  return new TransferError({ statusCode, code, stage, message, retryable, details });
+}
+
+function normalizeTransferError(error, fallbackStage = "unknown") {
+  if (error instanceof TransferError) {
+    return error;
+  }
+
+  const message = error?.message || "Unknown transfer error";
+  return createTransferError(500, "UnhandledError", fallbackStage, message, false);
+}
+
+function transferErrorResponse(error) {
+  const normalized = normalizeTransferError(error);
+  return new Response(JSON.stringify({
+    error: {
+      code: normalized.code,
+      stage: normalized.stage,
+      message: normalized.message,
+      retryable: normalized.retryable,
+      status_code: normalized.statusCode,
+      details: normalized.details,
+    },
+  }), {
+    status: normalized.statusCode,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Transfer-Error-Code": normalized.code,
+      "X-Transfer-Error-Stage": normalized.stage,
+      "X-Transfer-Retryable": normalized.retryable ? "true" : "false",
+    },
+  });
+}
+
+function parseS3Error(text) {
+  const body = typeof text === "string" ? text : "";
+  const codeMatch = body.match(/<Code>([^<]+)<\/Code>/i);
+  const messageMatch = body.match(/<Message>([^<]+)<\/Message>/i);
+  const code = codeMatch?.[1] || null;
+  const message = messageMatch?.[1] || null;
+  return { code, message };
+}
+
+function classifyRouteValidationError(message) {
+  return createTransferError(400, "MissingParams", "request_decode", message, false);
+}
+
+function classifyConfigError(stage, message, details = null) {
+  return createTransferError(500, "MissingEnv", stage, message, false, details);
+}
+
+function classifySourceResponseError(stage, status, statusText = "") {
+  if (status === 404) {
+    return createTransferError(404, "SourceNotFound", stage, `Source fetch returned ${status} ${statusText}`.trim(), false);
+  }
+  if (status === 403) {
+    return createTransferError(403, "SourceAccessDenied", stage, `Source fetch returned ${status} ${statusText}`.trim(), false);
+  }
+  if (status === 416) {
+    return createTransferError(416, "SourceInvalidRange", stage, `Source fetch returned ${status} ${statusText}`.trim(), false);
+  }
+  if (status === 429) {
+    return createTransferError(429, "SourceRateLimited", stage, `Source fetch returned ${status} ${statusText}`.trim(), true);
+  }
+  if (status === 408) {
+    return createTransferError(408, "SourceTimeout", stage, `Source fetch returned ${status} ${statusText}`.trim(), true);
+  }
+  if (status >= 500 && status <= 599) {
+    return createTransferError(502, "SourceUpstreamError", stage, `Source fetch returned ${status} ${statusText}`.trim(), true);
+  }
+  return createTransferError(502, "SourceFetchFailed", stage, `Source fetch returned ${status} ${statusText}`.trim(), false);
+}
+
+function classifyFetchFailure(stage, error) {
+  const message = error?.message || String(error);
+  const lower = message.toLowerCase();
+
+  if (lower.includes("timed out") || lower.includes("timeout")) {
+    return createTransferError(504, "NetworkTimeout", stage, message, true);
+  }
+  if (lower.includes("connection reset") || lower.includes("socket hang up") || lower.includes("econnreset")) {
+    return createTransferError(502, "NetworkReset", stage, message, true);
+  }
+  if (lower.includes("dns") || lower.includes("enotfound")) {
+    return createTransferError(502, "DnsFailure", stage, message, true);
+  }
+  if (lower.includes("invalid url") || lower.includes("unsupported protocol")) {
+    return createTransferError(400, "InvalidUrl", stage, message, false);
+  }
+
+  return createTransferError(502, "FetchFailed", stage, message, true);
+}
+
+function classifyDestinationResponseError(status, errorText) {
+  const parsed = parseS3Error(errorText);
+  const code = parsed.code || "";
+  const message = parsed.message || errorText || `Destination upload returned ${status}`;
+
+  switch (code) {
+    case "NoSuchBucket":
+      return createTransferError(404, "DestNoSuchBucket", "dest_put", message, false, { s3_code: code });
+    case "NoSuchKey":
+      return createTransferError(404, "DestNoSuchKey", "dest_put", message, false, { s3_code: code });
+    case "AccessDenied":
+    case "InvalidAccessKeyId":
+    case "SignatureDoesNotMatch":
+    case "AuthorizationHeaderMalformed":
+    case "ExpiredToken":
+      return createTransferError(403, code, "dest_put", message, false, { s3_code: code });
+    case "NoSuchUpload":
+      return createTransferError(404, "DestNoSuchUpload", "dest_put", message, false, { s3_code: code });
+    case "InvalidPart":
+      return createTransferError(409, "DestInvalidPart", "dest_put", message, false, { s3_code: code });
+    case "InvalidPartOrder":
+      return createTransferError(409, "DestInvalidPartOrder", "dest_put", message, false, { s3_code: code });
+    case "EntityTooSmall":
+      return createTransferError(422, "DestEntityTooSmall", "dest_put", message, false, { s3_code: code });
+    case "SlowDown":
+      return createTransferError(429, "DestSlowDown", "dest_put", message, true, { s3_code: code });
+    case "RequestTimeout":
+      return createTransferError(504, "DestRequestTimeout", "dest_put", message, true, { s3_code: code });
+    case "InternalError":
+    case "ServiceUnavailable":
+      return createTransferError(503, code, "dest_put", message, true, { s3_code: code });
+  }
+
+  if (status === 429) {
+    return createTransferError(429, "DestRateLimited", "dest_put", message, true, { s3_code: code || null });
+  }
+  if (status === 408) {
+    return createTransferError(504, "DestTimeout", "dest_put", message, true, { s3_code: code || null });
+  }
+  if (status >= 500 && status <= 599) {
+    return createTransferError(503, "DestUpstreamError", "dest_put", message, true, { s3_code: code || null });
+  }
+  if (status === 404) {
+    return createTransferError(404, "DestNotFound", "dest_put", message, false, { s3_code: code || null });
+  }
+  if (status === 403) {
+    return createTransferError(403, "DestAccessDenied", "dest_put", message, false, { s3_code: code || null });
+  }
+  if (status === 400) {
+    return createTransferError(400, "DestBadRequest", "dest_put", message, false, { s3_code: code || null });
+  }
+
+  return createTransferError(502, "DestUploadFailed", "dest_put", message, false, { s3_code: code || null });
+}
+
 export default {
   /**
    * Handle incoming HTTP requests
@@ -35,7 +196,7 @@ export default {
         const { r2Key, s3Url, size, offset, uploadId, partNumber } = await request.json();
 
         if (!r2Key || !s3Url) {
-          return new Response("Missing required parameters", { status: 400 });
+          return transferErrorResponse(classifyRouteValidationError("Missing required parameters"));
         }
 
         const task = {
@@ -61,7 +222,7 @@ export default {
 
       } catch (error) {
         console.error("Copy error:", error);
-        return new Response(`Error processing copy: ${error.message}`, { status: 500 });
+        return transferErrorResponse(normalizeTransferError(error, "copy_handler"));
       }
     } else if (pathname === "/upload-part") {
       if (request.method !== "POST") {
@@ -120,7 +281,7 @@ async function processDownloadMessage(task, env) {
   const start = offset
   const end = offset + size - 1
   const safeDest = redactDestUrl(r2Key, partNumber)
-  const maxAttempts = Math.max(1, Number.parseInt(env?.UPLOAD_RETRY_ATTEMPTS || "3", 10) || 3)
+  const maxAttempts = 3
 
   try {
     console.log(`Download task: part=${partNumber} size=${size} range=${start}-${end} source=${fileUrl} dest=${safeDest}`)
@@ -317,7 +478,7 @@ async function processMessage(task, env) {
   try {
     // Validate required environment variables for source
     if (!env.SOURCE_ACCESS_KEY_ID || !env.SOURCE_SECRET_ACCESS_KEY) {
-      throw new Error("Missing required environment variables: SOURCE_ACCESS_KEY_ID and SOURCE_SECRET_ACCESS_KEY must be set in wrangler.toml or as environment variables");
+      throw classifyConfigError("config", "Missing required environment variables: SOURCE_ACCESS_KEY_ID and SOURCE_SECRET_ACCESS_KEY must be set in wrangler.toml or as environment variables");
     }
 
     let r2KeyUrl = r2Key;
@@ -349,7 +510,7 @@ async function processMessage(task, env) {
     const destSecretKey = env[s3Host + "_sk"] || env.AWS_SECRET_ACCESS_KEY;
     
     if (!destAccessKey || !destSecretKey) {
-      throw new Error(`Missing required environment variables for destination S3 (${s3Host}): ${s3Host}_ak/${s3Host}_sk or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY`);
+      throw classifyConfigError("config", `Missing required environment variables for destination S3 (${s3Host}): ${s3Host}_ak/${s3Host}_sk or AWS_ACCESS_KEY_ID/AWS_SECRET_ACCESS_KEY`);
     }
 
     const destAwsClient = new AwsClient({
@@ -369,23 +530,35 @@ async function processMessage(task, env) {
     }
 
     const safeKey = redactDestUrl(r2Key, partNumber);
-    const maxAttempts = Math.max(1, Number.parseInt(env?.UPLOAD_RETRY_ATTEMPTS || "3", 10) || 3)
+    const maxAttempts = Math.max(1, Number.parseInt(env?.UPLOAD_RETRY_ATTEMPTS || "1", 10) || 1)
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const sourceResponse = await sourceAwsClient.fetch(sourceUrl, {
-        method: 'GET',
-        headers: {
-          'Range': `bytes=${offset}-${offset + size - 1}`
+      let sourceResponse;
+      try {
+        sourceResponse = await sourceAwsClient.fetch(sourceUrl, {
+          method: 'GET',
+          headers: {
+            'Range': `bytes=${offset}-${offset + size - 1}`
+          }
+        });
+      } catch (error) {
+        const sourceErr = classifyFetchFailure("source_fetch", error);
+        if (sourceErr.retryable && attempt < maxAttempts) {
+          console.error(`Source download failed for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts} err=${sourceErr.message}`)
+          await sleep(backoffMs(attempt));
+          continue;
         }
-      });
+        throw sourceErr;
+      }
 
       if (!sourceResponse.ok) {
-        if (isRetryableStatus(sourceResponse.status) && attempt < maxAttempts) {
+        const sourceErr = classifySourceResponseError("source_fetch", sourceResponse.status, sourceResponse.statusText || "");
+        if (sourceErr.retryable && attempt < maxAttempts) {
           console.error(`Source download failed for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts} status=${sourceResponse.status}`)
           await sleep(backoffMs(attempt));
           continue;
         }
-        throw new Error(`Failed to download from source: ${sourceResponse.status}`);
+        throw sourceErr;
       }
 
       if (!sourceResponse.body) {
@@ -394,42 +567,62 @@ async function processMessage(task, env) {
           await sleep(backoffMs(attempt));
           continue;
         }
-        throw new Error("Source response has no body");
+        throw createTransferError(502, "SourceBodyMissing", "source_fetch", "Source response has no body", true);
       }
 
-      const signedRequest = await destAwsClient.sign(uploadUrl.toString(), {
-        method: "PUT",
-        headers: {
-          "Content-Length": size.toString(),
-          "X-Amz-Content-Sha256": "UNSIGNED-PAYLOAD",
-        },
-      });
+      let signedRequest;
+      try {
+        signedRequest = await destAwsClient.sign(uploadUrl.toString(), {
+          method: "PUT",
+          headers: {
+            "Content-Length": size.toString(),
+            "X-Amz-Content-Sha256": "UNSIGNED-PAYLOAD",
+          },
+        });
+      } catch (error) {
+        throw createTransferError(403, "DestSignFailed", "dest_sign", error?.message || "Failed to sign destination request", false);
+      }
 
-      const s3Response = await fetch(uploadUrl.toString(), {
-        method: "PUT",
-        body: sourceResponse.body,
-        headers: signedRequest.headers,
-      });
+      let s3Response;
+      try {
+        s3Response = await fetch(uploadUrl.toString(), {
+          method: "PUT",
+          body: sourceResponse.body,
+          headers: signedRequest.headers,
+        });
+      } catch (error) {
+        const destErr = classifyFetchFailure("dest_put", error);
+        if (destErr.retryable && attempt < maxAttempts) {
+          console.error(`Upload failed for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts} err=${destErr.message}`)
+          await sleep(backoffMs(attempt));
+          continue;
+        }
+        throw destErr;
+      }
 
       if (!s3Response.ok) {
         const errorText = await s3Response.text();
-        if (isRetryableStatus(s3Response.status) && attempt < maxAttempts) {
+        const destErr = classifyDestinationResponseError(s3Response.status, errorText);
+        if (destErr.retryable && attempt < maxAttempts) {
           console.error(`Upload failed for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts} status=${s3Response.status} body=${errorText}`)
           await sleep(backoffMs(attempt));
           continue;
         }
-        throw new Error(`Failed to upload to S3: ${s3Response.status} ${errorText}`);
+        throw destErr;
       }
 
       const etag = s3Response.headers.get("etag") || s3Response.headers.get("ETag");
+      if (!etag) {
+        throw createTransferError(502, "DestMissingETag", "response_parse", `No ETag found in S3 response for part=${partNumber}`, false);
+      }
       console.log(`Copy success for ${safeKey} part=${partNumber} etag=${etag || ""}`)
       return { etag };
     }
 
-    throw new Error(`Copy failed after retries for ${safeKey} part=${partNumber}`);
+    throw createTransferError(502, "CopyRetryExhausted", "dest_put", `Copy failed after retries for ${safeKey} part=${partNumber}`, false);
   } catch (error) {
     const safeKey = redactDestUrl(r2Key, partNumber);
     console.error(`Processing failed for ${safeKey} (part ${partNumber}). Error: ${error.message}`);
-    throw error; // Re-throw to be handled by caller
+    throw normalizeTransferError(error, "copy_pipeline");
   }
 }

@@ -108,6 +108,14 @@ func TestClassifyTransferResponseError(t *testing.T) {
 	}
 }
 
+func TestClassifyTransferResponseError_StructuredJSON(t *testing.T) {
+	body := `{"error":{"code":"DestNoSuchUpload","stage":"dest_put","message":"The specified upload does not exist.","retryable":false,"status_code":404}}`
+	err := classifyTransferResponseError(http.StatusNotFound, body)
+	if isRetryableTransferError(err) {
+		t.Fatalf("expected structured JSON error to be fatal, got retryable: %v", err)
+	}
+}
+
 func TestUploadTransferPartWithRetry_RetryableSecondChanceSucceeds(t *testing.T) {
 	var calls int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

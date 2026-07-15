@@ -173,4 +173,64 @@ describe('Worker HTTP Handler', () => {
     const response = await worker.fetch(request, env, ctx);
     expect(response.status).toBe(400);
   });
+
+  it('should return structured fatal error for missing destination credentials', async () => {
+    delete env.AWS_ACCESS_KEY_ID;
+    delete env.AWS_SECRET_ACCESS_KEY;
+
+    request = new Request('http://worker/initiate-copy', {
+      method: 'POST',
+      body: JSON.stringify({
+        r2Key: 'https://account.r2.cloudflarestorage.com/bucket/video.mp4',
+        s3Url: 'https://target-bucket.oss.com/video.mp4',
+        size: 100,
+        offset: 0,
+      }),
+    });
+
+    const response = await worker.fetch(request, env, ctx);
+    expect(response.status).toBe(500);
+    expect(response.headers.get('X-Transfer-Retryable')).toBe('false');
+
+    const body = await response.json();
+    expect(body.error.code).toBe('MissingEnv');
+    expect(body.error.retryable).toBe(false);
+  });
+
+  it('should classify destination NoSuchUpload as fatal', async () => {
+    globalThis.fetch = vi.fn(async (_url, options) => {
+      if (options?.method === 'PUT') {
+        return {
+          ok: false,
+          status: 404,
+          text: async () => '<Error><Code>NoSuchUpload</Code><Message>The specified upload does not exist.</Message></Error>',
+          headers: {
+            get: () => null,
+          }
+        };
+      }
+      return { ok: false, status: 404, text: async () => "Not Found" };
+    });
+
+    request = new Request('http://worker/initiate-copy', {
+      method: 'POST',
+      body: JSON.stringify({
+        r2Key: 'https://account.r2.cloudflarestorage.com/bucket/video.mp4',
+        s3Url: 'https://target-bucket.oss.com/video.mp4',
+        size: 100,
+        offset: 0,
+        uploadId: 'upload-123',
+        partNumber: 1,
+      }),
+    });
+
+    const response = await worker.fetch(request, env, ctx);
+    expect(response.status).toBe(404);
+    expect(response.headers.get('X-Transfer-Retryable')).toBe('false');
+
+    const body = await response.json();
+    expect(body.error.code).toBe('DestNoSuchUpload');
+    expect(body.error.stage).toBe('dest_put');
+    expect(body.error.retryable).toBe(false);
+  });
 });
