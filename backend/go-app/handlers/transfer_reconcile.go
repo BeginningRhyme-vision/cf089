@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"strings"
 	"time"
 
@@ -266,26 +267,50 @@ func transferCompletionEvidenceExists(ctx context.Context, job models.TransferJo
 
 func createTransferReconcileS3Client(endpoint, ak, skEncrypted string) (*s3.Client, error) {
 	sk := strings.TrimPrefix(skEncrypted, "enc_")
-	resolver := aws.EndpointResolverWithOptionsFunc(func(service, region string, options ...interface{}) (aws.Endpoint, error) {
-		return aws.Endpoint{
-			URL:               endpoint,
-			HostnameImmutable: true,
-		}, nil
-	})
+	baseEndpoint, err := buildTransferReconcileBaseEndpoint(endpoint)
+	if err != nil {
+		return nil, err
+	}
 
 	cfg, err := awsconfig.LoadDefaultConfig(
 		context.Background(),
 		awsconfig.WithRegion("auto"),
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(ak, sk, "")),
-		awsconfig.WithEndpointResolverWithOptions(resolver),
 	)
 	if err != nil {
 		return nil, err
 	}
 
 	return s3.NewFromConfig(cfg, func(o *s3.Options) {
+		o.BaseEndpoint = aws.String(baseEndpoint)
 		o.UsePathStyle = false
 	}), nil
+}
+
+func buildTransferReconcileBaseEndpoint(endpoint string) (string, error) {
+	normalized := strings.TrimSpace(endpoint)
+	isS3 := strings.HasPrefix(normalized, "s3://")
+	if isS3 {
+		normalized = "http://" + strings.TrimPrefix(normalized, "s3://")
+	}
+	if !strings.Contains(normalized, "://") {
+		normalized = "http://" + normalized
+	}
+
+	u, err := url.Parse(normalized)
+	if err != nil {
+		return "", err
+	}
+
+	host := u.Host
+	if isS3 {
+		parts := strings.SplitN(u.Host, ".", 2)
+		if len(parts) == 2 {
+			host = parts[1]
+		}
+	}
+
+	return fmt.Sprintf("%s://%s", u.Scheme, host), nil
 }
 
 func isTransferReconcileNotFound(err error) bool {
@@ -520,13 +545,18 @@ func buildRelativeKeyForReconcile(srcDir, srcKey string) string {
 }
 
 func getBucketFromEndpoint(endpoint string) string {
-	normalized := strings.TrimSpace(endpoint)
-	normalized = strings.TrimPrefix(normalized, "https://")
-	normalized = strings.TrimPrefix(normalized, "http://")
-	normalized = strings.TrimPrefix(normalized, "s3://")
-	parts := strings.Split(normalized, ".")
-	if len(parts) > 0 {
-		return parts[0]
+	if strings.HasPrefix(endpoint, "s3://") {
+		host := strings.TrimPrefix(endpoint, "s3://")
+		parts := strings.Split(host, ".")
+		if len(parts) > 0 {
+			return parts[0]
+		}
 	}
-	return normalized
+
+	u, err := url.Parse(endpoint)
+	if err != nil {
+		return ""
+	}
+
+	return strings.Trim(u.Path, "/")
 }
