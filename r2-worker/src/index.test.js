@@ -233,4 +233,33 @@ describe('Worker HTTP Handler', () => {
     expect(body.error.stage).toBe('dest_put');
     expect(body.error.retryable).toBe(false);
   });
+
+  it('should classify network connection lost as retryable', async () => {
+    globalThis.fetch = vi.fn(async (_url, options) => {
+      if (options?.method === 'PUT') {
+        throw new Error('Network connection lost.');
+      }
+      return { ok: false, status: 404, text: async () => "Not Found" };
+    });
+
+    request = new Request('http://worker/initiate-copy', {
+      method: 'POST',
+      body: JSON.stringify({
+        r2Key: 'https://account.r2.cloudflarestorage.com/bucket/video.mp4',
+        s3Url: 'https://target-bucket.oss.com/video.mp4',
+        size: 100,
+        offset: 0,
+        uploadId: 'upload-123',
+        partNumber: 1,
+      }),
+    });
+
+    const response = await worker.fetch(request, env, ctx);
+    expect(response.status).toBe(502);
+    expect(response.headers.get('X-Transfer-Retryable')).toBe('true');
+
+    const body = await response.json();
+    expect(body.error.code).toBe('NetworkConnectionLost');
+    expect(body.error.retryable).toBe(true);
+  });
 });

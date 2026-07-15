@@ -165,6 +165,7 @@ services:
       - TRANSFER_PART_CONCURRENCY=4
       - TRANSFER_MULTIPART_THRESHOLD_MB=64
       - TRANSFER_MIN_PART_SIZE_MB=16
+      - TRANSFER_SERVICE_TIMEOUT_SECONDS=120
     volumes:
       - ./config/config.yaml:/app/config.yaml
     depends_on:

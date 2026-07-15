@@ -30,12 +30,46 @@ function createTransferError(statusCode, code, stage, message, retryable, detail
   return new TransferError({ statusCode, code, stage, message, retryable, details });
 }
 
+function classifyLooseNetworkError(stage, message) {
+  const lower = (message || "").toLowerCase();
+
+  if (lower.includes("timed out") || lower.includes("timeout")) {
+    return createTransferError(504, "NetworkTimeout", stage, message, true);
+  }
+  if (
+    lower.includes("network connection lost") ||
+    lower.includes("connection lost") ||
+    lower.includes("connection closed") ||
+    lower.includes("stream closed") ||
+    lower.includes("socket closed") ||
+    lower.includes("socket hang up") ||
+    lower.includes("connection reset") ||
+    lower.includes("econnreset") ||
+    lower.includes("upstream connect error") ||
+    lower.includes("fetch failed")
+  ) {
+    return createTransferError(502, "NetworkConnectionLost", stage, message, true);
+  }
+  if (lower.includes("dns") || lower.includes("enotfound")) {
+    return createTransferError(502, "DnsFailure", stage, message, true);
+  }
+  if (lower.includes("invalid url") || lower.includes("unsupported protocol")) {
+    return createTransferError(400, "InvalidUrl", stage, message, false);
+  }
+
+  return null;
+}
+
 function normalizeTransferError(error, fallbackStage = "unknown") {
   if (error instanceof TransferError) {
     return error;
   }
 
   const message = error?.message || "Unknown transfer error";
+  const inferred = classifyLooseNetworkError(fallbackStage, message);
+  if (inferred) {
+    return inferred;
+  }
   return createTransferError(500, "UnhandledError", fallbackStage, message, false);
 }
 
@@ -102,19 +136,9 @@ function classifySourceResponseError(stage, status, statusText = "") {
 
 function classifyFetchFailure(stage, error) {
   const message = error?.message || String(error);
-  const lower = message.toLowerCase();
-
-  if (lower.includes("timed out") || lower.includes("timeout")) {
-    return createTransferError(504, "NetworkTimeout", stage, message, true);
-  }
-  if (lower.includes("connection reset") || lower.includes("socket hang up") || lower.includes("econnreset")) {
-    return createTransferError(502, "NetworkReset", stage, message, true);
-  }
-  if (lower.includes("dns") || lower.includes("enotfound")) {
-    return createTransferError(502, "DnsFailure", stage, message, true);
-  }
-  if (lower.includes("invalid url") || lower.includes("unsupported protocol")) {
-    return createTransferError(400, "InvalidUrl", stage, message, false);
+  const inferred = classifyLooseNetworkError(stage, message);
+  if (inferred) {
+    return inferred;
   }
 
   return createTransferError(502, "FetchFailed", stage, message, true);

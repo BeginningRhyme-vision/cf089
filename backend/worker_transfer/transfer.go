@@ -126,6 +126,7 @@ const (
 	DefaultPartConcurrency      = 16
 	DefaultMultipartThresholdMB = 8
 	DefaultMinPartSizeMB        = 5
+	DefaultTransferTimeoutSec   = 120
 	WorkerHeartbeatInterval     = 30 * time.Second
 	ActiveTouchInterval         = 5 * time.Second
 	TransferAttemptLimit        = 2
@@ -165,8 +166,9 @@ func runTransfer() {
 			}).DialContext,
 		},
 	}
+	transferTimeout := time.Duration(getEnvInt("TRANSFER_SERVICE_TIMEOUT_SECONDS", DefaultTransferTimeoutSec)) * time.Second
 	transferClient = &http.Client{
-		Timeout: 60 * time.Second,
+		Timeout: transferTimeout,
 		Transport: &http.Transport{
 			MaxIdleConns:        512,
 			MaxIdleConnsPerHost: 512,

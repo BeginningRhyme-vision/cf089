@@ -116,6 +116,14 @@ func TestClassifyTransferResponseError_StructuredJSON(t *testing.T) {
 	}
 }
 
+func TestClassifyTransferResponseError_StructuredRetryableJSON(t *testing.T) {
+	body := `{"error":{"code":"NetworkConnectionLost","stage":"copy_pipeline","message":"Network connection lost.","retryable":true,"status_code":502}}`
+	err := classifyTransferResponseError(http.StatusBadGateway, body)
+	if !isRetryableTransferError(err) {
+		t.Fatalf("expected structured JSON error to be retryable, got: %v", err)
+	}
+}
+
 func TestUploadTransferPartWithRetry_RetryableSecondChanceSucceeds(t *testing.T) {
 	var calls int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
