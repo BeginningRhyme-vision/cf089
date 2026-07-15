@@ -19,7 +19,7 @@ routes = [
 
 # Internal retry attempts inside r2-worker.
 # Keep this low so worker_transfer remains the main retry controller.
-UPLOAD_RETRY_ATTEMPTS = "1"
+UPLOAD_RETRY_ATTEMPTS = "2"
 
 # Source R2/S3 Credentials
 # SOURCE_ACCESS_KEY_ID = "source_access_key"
