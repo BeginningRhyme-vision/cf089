@@ -89,6 +89,8 @@ var (
 	jobCache           sync.Map // JobID -> cachedJob
 	httpClient         *http.Client
 	transferClient     *http.Client
+	transferProtoLog   sync.Once
+	s3ProtoLog         sync.Once
 	workerID           string
 	workerCount        int
 	taskBufferSize     int
@@ -181,20 +183,24 @@ func runTransfer() {
 	}
 	transferTimeout := time.Duration(getEnvInt("TRANSFER_SERVICE_TIMEOUT_SECONDS", DefaultTransferTimeoutSec)) * time.Second
 	transferMaxConnsPerHost := getEnvInt("TRANSFER_MAX_CONNS_PER_HOST", DefaultTransferMaxConns)
-	transferClient = &http.Client{
-		Timeout: transferTimeout,
-		Transport: &http.Transport{
-			MaxIdleConns:        384,
-			MaxIdleConnsPerHost: 256,
-			MaxConnsPerHost:     transferMaxConnsPerHost,
-			IdleConnTimeout:     120 * time.Second,
-			TLSHandshakeTimeout: DefaultTransferTLSHandshake * time.Second,
-			DialContext: (&net.Dialer{
-				Timeout:   8 * time.Second,
-				KeepAlive: 30 * time.Second,
-			}).DialContext,
-		},
+	transferForceHTTP2 := getEnvBool("TRANSFER_FORCE_HTTP2", false)
+	transferTransport := &http.Transport{
+		MaxIdleConns:        384,
+		MaxIdleConnsPerHost: 256,
+		MaxConnsPerHost:     transferMaxConnsPerHost,
+		ForceAttemptHTTP2:   transferForceHTTP2,
+		IdleConnTimeout:     120 * time.Second,
+		TLSHandshakeTimeout: DefaultTransferTLSHandshake * time.Second,
+		DialContext: (&net.Dialer{
+			Timeout:   8 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
 	}
+	transferClient = &http.Client{
+		Timeout:   transferTimeout,
+		Transport: &protocolLoggingRoundTripper{base: transferTransport, once: &transferProtoLog, label: "Transfer service"},
+	}
+	log.Printf("Transfer client config: force_http2=%t max_conns_per_host=%d timeout=%s", transferForceHTTP2, transferMaxConnsPerHost, transferTimeout)
 
 	initSourceClient()
 	initStatsFlusher()
@@ -355,7 +361,7 @@ func processTask(t TransferTask) {
 		sk = strings.TrimPrefix(sk, "enc_")
 	}
 
-	dstClient, err := createS3Client(job.Metadata.Endpoint, job.Metadata.AK, sk)
+	dstClient, err := createDestS3Client(job.Metadata.Endpoint, job.Metadata.AK, sk)
 	if err != nil {
 		log.Printf("Dst client init failed for task %d: %v", t.ID, err)
 		updateTaskStatus(t, "FAILED", "Dst client init failed")
@@ -797,6 +803,22 @@ func parseStructuredTransferError(body string) (transferErrorEnvelope, bool) {
 	return envelope, true
 }
 
+type protocolLoggingRoundTripper struct {
+	base  http.RoundTripper
+	once  *sync.Once
+	label string
+}
+
+func (p *protocolLoggingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	resp, err := p.base.RoundTrip(req)
+	if err == nil && resp != nil {
+		p.once.Do(func() {
+			log.Printf("%s protocol negotiated: %s host=%s", p.label, resp.Proto, req.URL.Host)
+		})
+	}
+	return resp, err
+}
+
 func constructVirtualHostURL(endpointStr, bucket, key string) (string, error) {
 	// Mimic r2s3.go logic for creating scheme://bucket.host/key
 
@@ -828,14 +850,23 @@ func constructVirtualHostURL(endpointStr, bucket, key string) (string, error) {
 }
 
 func initSourceClient() {
-	c, err := createS3Client(cfg.Storage.Src.Endpoint, cfg.Storage.Src.AccessKey, cfg.Storage.Src.SecretKey)
+	c, err := createSourceS3Client(cfg.Storage.Src.Endpoint, cfg.Storage.Src.AccessKey, cfg.Storage.Src.SecretKey)
 	if err != nil {
 		log.Fatalf("Failed to init source client: %v", err)
 	}
 	srcClient = c
 }
 
-func createS3Client(endpoint, ak, sk string) (*s3.Client, error) {
+func createSourceS3Client(endpoint, ak, sk string) (*s3.Client, error) {
+	return createS3Client(endpoint, ak, sk, 0)
+}
+
+func createDestS3Client(endpoint, ak, sk string) (*s3.Client, error) {
+	timeoutSeconds := getEnvInt("TRANSFER_DEST_S3_TIMEOUT_SECONDS", 60)
+	return createS3Client(endpoint, ak, sk, time.Duration(timeoutSeconds)*time.Second)
+}
+
+func createS3Client(endpoint, ak, sk string, requestTimeout time.Duration) (*s3.Client, error) {
 	normalized := endpoint
 	isS3 := strings.HasPrefix(normalized, "s3://")
 	if isS3 {
@@ -860,9 +891,29 @@ func createS3Client(endpoint, ak, sk string) (*s3.Client, error) {
 
 	baseEndpoint := fmt.Sprintf("%s://%s", u.Scheme, host)
 
+	forceHTTP2 := getEnvBool("TRANSFER_FORCE_HTTP2", false)
+	s3Transport := &http.Transport{
+		MaxIdleConns:        128,
+		MaxIdleConnsPerHost: 128,
+		ForceAttemptHTTP2:   forceHTTP2,
+		IdleConnTimeout:     120 * time.Second,
+		TLSHandshakeTimeout: DefaultTransferTLSHandshake * time.Second,
+		DialContext: (&net.Dialer{
+			Timeout:   8 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+	}
+	s3HTTPClient := &http.Client{
+		Transport: &protocolLoggingRoundTripper{base: s3Transport, once: &s3ProtoLog, label: "S3 client"},
+	}
+	if requestTimeout > 0 {
+		s3HTTPClient.Timeout = requestTimeout
+	}
+
 	c, err := awsconfig.LoadDefaultConfig(context.TODO(),
 		awsconfig.WithCredentialsProvider(credentials.NewStaticCredentialsProvider(ak, sk, "")),
 		awsconfig.WithRegion("auto"),
+		awsconfig.WithHTTPClient(s3HTTPClient),
 	)
 	if err != nil {
 		return nil, err
@@ -1134,4 +1185,20 @@ func getEnvInt(key string, defaultValue int) int {
 		return defaultValue
 	}
 	return n
+}
+
+func getEnvBool(key string, defaultValue bool) bool {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return defaultValue
+	}
+
+	switch strings.ToLower(v) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return defaultValue
+	}
 }

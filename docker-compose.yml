@@ -166,6 +166,8 @@ services:
       - TRANSFER_MULTIPART_THRESHOLD_MB=48
       - TRANSFER_MIN_PART_SIZE_MB=16
       - TRANSFER_MAX_CONNS_PER_HOST=384
+      - TRANSFER_FORCE_HTTP2=true
+      - TRANSFER_DEST_S3_TIMEOUT_SECONDS=60
       - TRANSFER_SERVICE_TIMEOUT_SECONDS=180
     volumes:
       - ./config/config.yaml:/app/config.yaml
