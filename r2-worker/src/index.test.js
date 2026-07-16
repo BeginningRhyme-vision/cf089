@@ -364,7 +364,7 @@ describe('Worker HTTP Handler', () => {
 
     const response = await worker.fetch(request, env, ctx);
     expect(response.status).toBe(200);
-    expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 1000);
+    expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 3000);
 
     timeoutSpy.mockRestore();
     Math.random = originalRandom;

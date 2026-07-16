@@ -12,6 +12,7 @@ function backoffMs(attempt) {
 
 const retryAfterMinMs = 1000;
 const retryAfterMaxMs = 10000;
+const retryFallbackExtraMs = 2000;
 
 function clampRetryDelayMs(ms) {
   if (!Number.isFinite(ms) || ms <= 0) {
@@ -45,7 +46,11 @@ function parseRetryAfterMs(headers) {
 }
 
 function getRetryDelayMs(attempt, headers) {
-  return parseRetryAfterMs(headers) ?? backoffMs(attempt);
+  const retryAfterMs = parseRetryAfterMs(headers);
+  if (retryAfterMs !== null) {
+    return retryAfterMs;
+  }
+  return backoffMs(attempt) + retryFallbackExtraMs;
 }
 
 function isRetryableStatus(status) {
