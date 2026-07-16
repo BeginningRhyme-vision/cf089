@@ -230,10 +230,30 @@ func RetryTransferTasksLogic(jobID int, initialStatus models.JobStatus) {
 	}
 }
 
+func shouldRetryTransferTask(task models.TransferTask) bool {
+	if task.Status != "FAILED" {
+		return false
+	}
+
+	msg := strings.ToLower(strings.TrimSpace(task.ErrorMessage))
+	if msg == "" {
+		return true
+	}
+
+	// Keep the first filter intentionally narrow to avoid suppressing
+	// retryable failures that only happen to mention 404-like wording.
+	if strings.Contains(msg, "sourcenotfound") || strings.Contains(msg, "source fetch returned 404") {
+		return false
+	}
+
+	return true
+}
+
 // 【旧逻辑】保持原样，专门处理旧任务
 // 【新逻辑】处理分片任务
 func retryShardedTransferTasks(ctx context.Context, jobID int, initialStatus models.JobStatus) {
 	resetCount := 0
+	skippedCount := 0
 
 	// 遍历所有可能的 Bucket
 	// 由于我们不知道具体有多少个 Bucket，可以尝试遍历直到连续空 Bucket 出现，或者设置一个较大的安全上限
@@ -287,7 +307,7 @@ func retryShardedTransferTasks(ctx context.Context, jobID int, initialStatus mod
 
 				var task models.TransferTask
 				if err := json.Unmarshal([]byte(str), &task); err == nil {
-					if task.Status == "FAILED" {
+					if shouldRetryTransferTask(task) {
 						task.Status = "PENDING"
 						task.UpdatedAt = time.Now()
 						task.ErrorMessage = ""
@@ -296,6 +316,8 @@ func retryShardedTransferTasks(ctx context.Context, jobID int, initialStatus mod
 						pipe.Set(ctx, batchKeys[k], data, 0)
 						hasUpdates = true
 						resetCount++
+					} else if task.Status == "FAILED" {
+						skippedCount++
 					}
 				}
 			}
@@ -315,6 +337,10 @@ func retryShardedTransferTasks(ctx context.Context, jobID int, initialStatus mod
 			database.DB.Model(&models.TransferJob{JobID: uint(jobID)}).Update("status", models.StatusPending)
 		}
 	}
+
+	if skippedCount > 0 {
+		log.Printf("[RetryFailedTransferTasks] job %d skipped %d SourceNotFound transfer tasks", jobID, skippedCount)
+	}
 }
 func retryLegacyTransferTasks(jobID int, initialStatus models.JobStatus) {
 	ctx := context.Background()
@@ -323,6 +349,7 @@ func retryLegacyTransferTasks(jobID int, initialStatus models.JobStatus) {
 	batchSize := 1000
 	var cursor int64 = 0
 	resetCount := 0
+	skippedCount := 0
 
 	for {
 		ids, err := database.RDB.ZRange(ctx, jobKey, cursor, cursor+int64(batchSize)-1).Result()
@@ -355,7 +382,7 @@ func retryLegacyTransferTasks(jobID int, initialStatus models.JobStatus) {
 
 			var task models.TransferTask
 			if err := json.Unmarshal([]byte(str), &task); err == nil {
-				if task.Status == "FAILED" {
+				if shouldRetryTransferTask(task) {
 					task.Status = "PENDING"
 					task.UpdatedAt = time.Now()
 					task.ErrorMessage = ""
@@ -364,6 +391,8 @@ func retryLegacyTransferTasks(jobID int, initialStatus models.JobStatus) {
 					pipe.Set(ctx, keys[i], data, 0)
 					hasUpdates = true
 					resetCount++
+				} else if task.Status == "FAILED" {
+					skippedCount++
 				}
 			}
 		}
@@ -386,6 +415,10 @@ func retryLegacyTransferTasks(jobID int, initialStatus models.JobStatus) {
 		if initialStatus == models.StatusCompleted || initialStatus == models.StatusFailed {
 			database.DB.Model(&models.TransferJob{JobID: uint(jobID)}).Update("status", models.StatusPending)
 		}
+	}
+
+	if skippedCount > 0 {
+		log.Printf("[RetryFailedTransferTasks] job %d skipped %d SourceNotFound transfer tasks", jobID, skippedCount)
 	}
 }
 
