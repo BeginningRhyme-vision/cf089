@@ -132,6 +132,20 @@ const (
 	TransferAttemptLimit        = 2
 )
 
+func buildWorkerID() string {
+	base := strings.TrimSpace(os.Getenv("TRANSFER_WORKER_ID"))
+	if base == "" {
+		base = WorkerID
+	}
+
+	host, err := os.Hostname()
+	if err != nil || strings.TrimSpace(host) == "" {
+		host = "unknown-host"
+	}
+
+	return fmt.Sprintf("%s@%s-%d", base, host, time.Now().UTC().UnixNano())
+}
+
 func runTransfer() {
 	loadConfig()
 
@@ -145,10 +159,7 @@ func runTransfer() {
 	if apiBaseURL == "" {
 		apiBaseURL = "http://localhost:8080/api"
 	}
-	workerID = os.Getenv("TRANSFER_WORKER_ID")
-	if strings.TrimSpace(workerID) == "" {
-		workerID = WorkerID
-	}
+	workerID = buildWorkerID()
 	workerCount = getEnvInt("TRANSFER_MAX_WORKERS", DefaultConcurrentWorkers)
 	taskBufferSize = getEnvInt("TRANSFER_TASK_BUFFER", DefaultTaskBufferSize)
 	partConcurrency = getEnvInt("TRANSFER_PART_CONCURRENCY", DefaultPartConcurrency)

@@ -430,10 +430,6 @@ func reconcileClaimedTransferTask(ctx context.Context, member string) error {
 		database.RDB.ZRem(ctx, transferClaimedRunningKey(), member)
 		return nil
 	}
-	if transferWorkerAlive(ctx, task.WorkerID) {
-		return nil
-	}
-
 	var job models.TransferJob
 	if err := database.DB.Preload("Metadata").Where("job_id = ?", jobID).First(&job).Error; err != nil {
 		return err
@@ -458,7 +454,7 @@ func reconcileClaimedTransferTask(ctx context.Context, member string) error {
 		return nil
 	}
 
-	if err := applyTransferTaskTerminalUpdate(ctx, task, "FAILED", "reconciler marked claimed RUNNING task as FAILED: worker heartbeat expired before activation", 0); err != nil {
+	if err := applyTransferTaskTerminalUpdate(ctx, task, "FAILED", "reconciler marked claimed RUNNING task as FAILED: activation was never observed before the stale threshold", 0); err != nil {
 		return err
 	}
 	log.Printf("[TransferReconcile] Reconciled claimed RUNNING task job=%d task=%d run_token=%s to FAILED", task.JobID, task.ID, task.RunToken)
