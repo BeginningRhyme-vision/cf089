@@ -80,6 +80,7 @@ describe('Worker HTTP Handler', () => {
       AWS_ACCESS_KEY_ID: 'dest-ak',
       AWS_SECRET_ACCESS_KEY: 'dest-sk',
       AWS_REGION: 'us-east-1',
+      UPLOAD_RETRY_ATTEMPTS: '2',
     };
 
     // Mock ExecutionContext
@@ -261,5 +262,112 @@ describe('Worker HTTP Handler', () => {
     const body = await response.json();
     expect(body.error.code).toBe('NetworkConnectionLost');
     expect(body.error.retryable).toBe(true);
+  });
+
+  it('should honor Retry-After header for retryable destination responses', async () => {
+    const originalSetTimeout = globalThis.setTimeout;
+    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation((fn, ms, ...args) => {
+      fn(...args);
+      return 0;
+    });
+
+    let putAttempts = 0;
+    globalThis.fetch = vi.fn(async (_url, options) => {
+      if (options?.method === 'PUT') {
+        putAttempts += 1;
+        if (putAttempts === 1) {
+          return {
+            ok: false,
+            status: 429,
+            text: async () => '<Error><Code>SlowDown</Code><Message>retry later</Message></Error>',
+            headers: {
+              get: (key) => (key === 'Retry-After' || key === 'retry-after') ? '6' : null,
+            }
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          headers: {
+            get: (key) => (key === 'etag' || key === 'ETag') ? '"mock-etag"' : null,
+          }
+        };
+      }
+      return { ok: false, status: 404, text: async () => "Not Found" };
+    });
+
+    request = new Request('http://worker/initiate-copy', {
+      method: 'POST',
+      body: JSON.stringify({
+        r2Key: 'https://account.r2.cloudflarestorage.com/bucket/video.mp4',
+        s3Url: 'https://target-bucket.oss.com/video.mp4',
+        size: 100,
+        offset: 0,
+        uploadId: 'upload-123',
+        partNumber: 1,
+      }),
+    });
+
+    const response = await worker.fetch(request, env, ctx);
+    expect(response.status).toBe(200);
+    expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 6000);
+
+    timeoutSpy.mockRestore();
+    globalThis.setTimeout = originalSetTimeout;
+  });
+
+  it('should fall back to exponential backoff when Retry-After is invalid', async () => {
+    const originalSetTimeout = globalThis.setTimeout;
+    const originalRandom = Math.random;
+    Math.random = vi.fn(() => 0);
+    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation((fn, ms, ...args) => {
+      fn(...args);
+      return 0;
+    });
+
+    let putAttempts = 0;
+    globalThis.fetch = vi.fn(async (_url, options) => {
+      if (options?.method === 'PUT') {
+        putAttempts += 1;
+        if (putAttempts === 1) {
+          return {
+            ok: false,
+            status: 429,
+            text: async () => '<Error><Code>SlowDown</Code><Message>retry later</Message></Error>',
+            headers: {
+              get: (key) => (key === 'Retry-After' || key === 'retry-after') ? 'not-a-number' : null,
+            }
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          headers: {
+            get: (key) => (key === 'etag' || key === 'ETag') ? '"mock-etag"' : null,
+          }
+        };
+      }
+      return { ok: false, status: 404, text: async () => "Not Found" };
+    });
+
+    request = new Request('http://worker/initiate-copy', {
+      method: 'POST',
+      body: JSON.stringify({
+        r2Key: 'https://account.r2.cloudflarestorage.com/bucket/video.mp4',
+        s3Url: 'https://target-bucket.oss.com/video.mp4',
+        size: 100,
+        offset: 0,
+        uploadId: 'upload-123',
+        partNumber: 1,
+      }),
+    });
+
+    const response = await worker.fetch(request, env, ctx);
+    expect(response.status).toBe(200);
+    expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 1000);
+
+    timeoutSpy.mockRestore();
+    Math.random = originalRandom;
+    globalThis.setTimeout = originalSetTimeout;
   });
 });

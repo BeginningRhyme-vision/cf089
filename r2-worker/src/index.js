@@ -10,6 +10,44 @@ function backoffMs(attempt) {
   return base + jitter;
 }
 
+const retryAfterMinMs = 1000;
+const retryAfterMaxMs = 10000;
+
+function clampRetryDelayMs(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return null;
+  }
+  return Math.min(Math.max(Math.ceil(ms), retryAfterMinMs), retryAfterMaxMs);
+}
+
+function parseRetryAfterMs(headers) {
+  const raw = headers?.get?.("Retry-After") || headers?.get?.("retry-after");
+  if (!raw) {
+    return null;
+  }
+
+  const trimmed = String(raw).trim();
+  if (!trimmed) {
+    return null;
+  }
+
+  const seconds = Number.parseFloat(trimmed);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return clampRetryDelayMs(seconds * 1000);
+  }
+
+  const at = Date.parse(trimmed);
+  if (Number.isNaN(at)) {
+    return null;
+  }
+
+  return clampRetryDelayMs(at - Date.now());
+}
+
+function getRetryDelayMs(attempt, headers) {
+  return parseRetryAfterMs(headers) ?? backoffMs(attempt);
+}
+
 function isRetryableStatus(status) {
   return status === 408 || status === 429 || (status >= 500 && status <= 599);
 }
@@ -361,7 +399,7 @@ async function processDownloadMessage(task, env) {
       if (!sourceResponse.ok) {
         if (isRetryableStatus(sourceResponse.status) && attempt < maxAttempts) {
           console.error(`Source fetch failed for ${safeDest} part=${partNumber} attempt=${attempt}/${maxAttempts} status=${sourceResponse.status}`)
-          await sleep(backoffMs(attempt));
+          await sleep(getRetryDelayMs(attempt, sourceResponse.headers));
           continue;
         }
         throw createHttpError(502, `Failed to download from source: ${sourceResponse.status} ${sourceResponse.statusText}`);
@@ -420,7 +458,7 @@ async function processDownloadMessage(task, env) {
         const errorText = await s3Response.text();
         if (isRetryableStatus(s3Response.status) && attempt < maxAttempts) {
           console.error(`Upload failed for ${safeDest} part=${partNumber} attempt=${attempt}/${maxAttempts} status=${s3Response.status} body=${errorText}`)
-          await sleep(backoffMs(attempt));
+          await sleep(getRetryDelayMs(attempt, s3Response.headers));
           continue;
         }
         throw new Error(`Failed to upload to S3: ${s3Response.status} ${errorText}`);
@@ -579,7 +617,7 @@ async function processMessage(task, env) {
         const sourceErr = classifySourceResponseError("source_fetch", sourceResponse.status, sourceResponse.statusText || "");
         if (sourceErr.retryable && attempt < maxAttempts) {
           console.error(`Source download failed for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts} status=${sourceResponse.status}`)
-          await sleep(backoffMs(attempt));
+          await sleep(getRetryDelayMs(attempt, sourceResponse.headers));
           continue;
         }
         throw sourceErr;
@@ -629,7 +667,7 @@ async function processMessage(task, env) {
         const destErr = classifyDestinationResponseError(s3Response.status, errorText);
         if (destErr.retryable && attempt < maxAttempts) {
           console.error(`Upload failed for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts} status=${s3Response.status} body=${errorText}`)
-          await sleep(backoffMs(attempt));
+          await sleep(getRetryDelayMs(attempt, s3Response.headers));
           continue;
         }
         throw destErr;
