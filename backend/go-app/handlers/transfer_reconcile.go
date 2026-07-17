@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/url"
@@ -18,6 +19,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/s3"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
+	"gorm.io/gorm"
 )
 
 const (
@@ -242,6 +244,14 @@ func cleanupTransferCompletionPending(ctx context.Context, member string, jobID,
 	_, _ = pipe.Exec(ctx)
 }
 
+func cleanupTransferClaimedRunning(ctx context.Context, member string) {
+	database.RDB.ZRem(ctx, transferClaimedRunningKey(), member)
+}
+
+func cleanupTransferRunningLastSeen(ctx context.Context, member string) {
+	database.RDB.ZRem(ctx, transferRunningLastSeenKey(), member)
+}
+
 func transferCompletionEvidenceExists(ctx context.Context, job models.TransferJob, detail transferTaskCompensationDetail) (bool, error) {
 	client, err := createTransferReconcileS3Client(job.Metadata.Endpoint, job.Metadata.AK, job.Metadata.SKEncrypted)
 	if err != nil {
@@ -414,24 +424,29 @@ func runTransferStaleRunningBatch(ctx context.Context) {
 func reconcileClaimedTransferTask(ctx context.Context, member string) error {
 	jobID, taskID, runToken, err := parseTransferRuntimeMember(member)
 	if err != nil {
-		database.RDB.ZRem(ctx, transferClaimedRunningKey(), member)
+		cleanupTransferClaimedRunning(ctx, member)
 		return err
 	}
 
 	task, _, err := getCurrentTransferTask(ctx, jobID, taskID)
 	if err == redis.Nil {
-		database.RDB.ZRem(ctx, transferClaimedRunningKey(), member)
+		cleanupTransferClaimedRunning(ctx, member)
 		return nil
 	}
 	if err != nil {
 		return err
 	}
 	if task.RunToken != runToken || task.Status != "RUNNING" {
-		database.RDB.ZRem(ctx, transferClaimedRunningKey(), member)
+		cleanupTransferClaimedRunning(ctx, member)
 		return nil
 	}
 	var job models.TransferJob
 	if err := database.DB.Preload("Metadata").Where("job_id = ?", jobID).First(&job).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			cleanupTransferClaimedRunning(ctx, member)
+			log.Printf("[TransferReconcile] Dropped claimed RUNNING member %s because transfer job %d no longer exists", member, jobID)
+			return nil
+		}
 		return err
 	}
 
@@ -464,25 +479,30 @@ func reconcileClaimedTransferTask(ctx context.Context, member string) error {
 func reconcileStaleRunningTransferTask(ctx context.Context, member string) error {
 	jobID, taskID, runToken, err := parseTransferRuntimeMember(member)
 	if err != nil {
-		database.RDB.ZRem(ctx, transferRunningLastSeenKey(), member)
+		cleanupTransferRunningLastSeen(ctx, member)
 		return err
 	}
 
 	task, _, err := getCurrentTransferTask(ctx, jobID, taskID)
 	if err == redis.Nil {
-		database.RDB.ZRem(ctx, transferRunningLastSeenKey(), member)
+		cleanupTransferRunningLastSeen(ctx, member)
 		return nil
 	}
 	if err != nil {
 		return err
 	}
 	if task.RunToken != runToken || task.Status != "RUNNING" {
-		database.RDB.ZRem(ctx, transferRunningLastSeenKey(), member)
+		cleanupTransferRunningLastSeen(ctx, member)
 		return nil
 	}
 
 	var job models.TransferJob
 	if err := database.DB.Preload("Metadata").Where("job_id = ?", jobID).First(&job).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			cleanupTransferRunningLastSeen(ctx, member)
+			log.Printf("[TransferReconcile] Dropped stale RUNNING member %s because transfer job %d no longer exists", member, jobID)
+			return nil
+		}
 		return err
 	}
 
