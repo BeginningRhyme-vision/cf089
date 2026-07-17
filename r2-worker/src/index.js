@@ -53,6 +53,17 @@ function getRetryDelayMs(attempt, headers) {
   return backoffMs(attempt) + retryFallbackExtraMs;
 }
 
+function elapsedMs(startedAt) {
+  return Math.max(0, Date.now() - startedAt);
+}
+
+function formatTimingMs(ms) {
+  if (!Number.isFinite(ms)) {
+    return "na";
+  }
+  return String(Math.max(0, Math.round(ms)));
+}
+
 function isRetryableStatus(status) {
   return status === 408 || status === 429 || (status >= 500 && status <= 599);
 }
@@ -541,6 +552,15 @@ function redactDestUrl(r2Key, partNumber) {
  */
 async function processMessage(task, env) {
   const { r2Key, size, offset, s3Url, uploadId, partNumber } = task;
+  const safeKey = redactDestUrl(r2Key, partNumber);
+  const maxAttempts = Math.max(1, Number.parseInt(env?.UPLOAD_RETRY_ATTEMPTS || "1", 10) || 1);
+  const copyStartedAt = Date.now();
+  let attemptsUsed = 0;
+  let retryWaitMsTotal = 0;
+  let lastSourceFetchMs = null;
+  let lastDestUploadMs = null;
+  let sourceFetchMsTotal = 0;
+  let destUploadMsTotal = 0;
 
   try {
     // Validate required environment variables for source
@@ -596,11 +616,10 @@ async function processMessage(task, env) {
       uploadUrl.searchParams.set("uploadId", uploadId);
     }
 
-    const safeKey = redactDestUrl(r2Key, partNumber);
-    const maxAttempts = Math.max(1, Number.parseInt(env?.UPLOAD_RETRY_ATTEMPTS || "1", 10) || 1)
-
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      attemptsUsed = attempt;
       let sourceResponse;
+      const sourceFetchStartedAt = Date.now();
       try {
         sourceResponse = await sourceAwsClient.fetch(sourceUrl, {
           method: 'GET',
@@ -608,11 +627,17 @@ async function processMessage(task, env) {
             'Range': `bytes=${offset}-${offset + size - 1}`
           }
         });
+        lastSourceFetchMs = elapsedMs(sourceFetchStartedAt);
+        sourceFetchMsTotal += lastSourceFetchMs;
       } catch (error) {
+        lastSourceFetchMs = elapsedMs(sourceFetchStartedAt);
+        sourceFetchMsTotal += lastSourceFetchMs;
         const sourceErr = classifyFetchFailure("source_fetch", error);
         if (sourceErr.retryable && attempt < maxAttempts) {
           console.error(`Source download failed for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts} err=${sourceErr.message}`)
-          await sleep(backoffMs(attempt));
+          const retryDelayMs = backoffMs(attempt);
+          retryWaitMsTotal += retryDelayMs;
+          await sleep(retryDelayMs);
           continue;
         }
         throw sourceErr;
@@ -622,7 +647,9 @@ async function processMessage(task, env) {
         const sourceErr = classifySourceResponseError("source_fetch", sourceResponse.status, sourceResponse.statusText || "");
         if (sourceErr.retryable && attempt < maxAttempts) {
           console.error(`Source download failed for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts} status=${sourceResponse.status}`)
-          await sleep(getRetryDelayMs(attempt, sourceResponse.headers));
+          const retryDelayMs = getRetryDelayMs(attempt, sourceResponse.headers);
+          retryWaitMsTotal += retryDelayMs;
+          await sleep(retryDelayMs);
           continue;
         }
         throw sourceErr;
@@ -631,7 +658,9 @@ async function processMessage(task, env) {
       if (!sourceResponse.body) {
         if (attempt < maxAttempts) {
           console.error(`Source response missing body for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts}`)
-          await sleep(backoffMs(attempt));
+          const retryDelayMs = backoffMs(attempt);
+          retryWaitMsTotal += retryDelayMs;
+          await sleep(retryDelayMs);
           continue;
         }
         throw createTransferError(502, "SourceBodyMissing", "source_fetch", "Source response has no body", true);
@@ -651,17 +680,24 @@ async function processMessage(task, env) {
       }
 
       let s3Response;
+      const destUploadStartedAt = Date.now();
       try {
         s3Response = await fetch(uploadUrl.toString(), {
           method: "PUT",
           body: sourceResponse.body,
           headers: signedRequest.headers,
         });
+        lastDestUploadMs = elapsedMs(destUploadStartedAt);
+        destUploadMsTotal += lastDestUploadMs;
       } catch (error) {
+        lastDestUploadMs = elapsedMs(destUploadStartedAt);
+        destUploadMsTotal += lastDestUploadMs;
         const destErr = classifyFetchFailure("dest_put", error);
         if (destErr.retryable && attempt < maxAttempts) {
           console.error(`Upload failed for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts} err=${destErr.message}`)
-          await sleep(backoffMs(attempt));
+          const retryDelayMs = backoffMs(attempt);
+          retryWaitMsTotal += retryDelayMs;
+          await sleep(retryDelayMs);
           continue;
         }
         throw destErr;
@@ -672,7 +708,9 @@ async function processMessage(task, env) {
         const destErr = classifyDestinationResponseError(s3Response.status, errorText);
         if (destErr.retryable && attempt < maxAttempts) {
           console.error(`Upload failed for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts} status=${s3Response.status} body=${errorText}`)
-          await sleep(getRetryDelayMs(attempt, s3Response.headers));
+          const retryDelayMs = getRetryDelayMs(attempt, s3Response.headers);
+          retryWaitMsTotal += retryDelayMs;
+          await sleep(retryDelayMs);
           continue;
         }
         throw destErr;
@@ -682,14 +720,27 @@ async function processMessage(task, env) {
       if (!etag) {
         throw createTransferError(502, "DestMissingETag", "response_parse", `No ETag found in S3 response for part=${partNumber}`, false);
       }
+      console.log(
+        `Copy timing success for ${safeKey} part=${partNumber} attempts=${attemptsUsed}/${maxAttempts} ` +
+        `source_fetch_ms=${formatTimingMs(lastSourceFetchMs)} source_fetch_ms_total=${formatTimingMs(sourceFetchMsTotal)} ` +
+        `dest_upload_ms=${formatTimingMs(lastDestUploadMs)} dest_upload_ms_total=${formatTimingMs(destUploadMsTotal)} ` +
+        `retry_wait_ms_total=${formatTimingMs(retryWaitMsTotal)} total_copy_ms=${formatTimingMs(elapsedMs(copyStartedAt))}`
+      );
       console.log(`Copy success for ${safeKey} part=${partNumber} etag=${etag || ""}`)
       return { etag };
     }
 
     throw createTransferError(502, "CopyRetryExhausted", "dest_put", `Copy failed after retries for ${safeKey} part=${partNumber}`, false);
   } catch (error) {
-    const safeKey = redactDestUrl(r2Key, partNumber);
-    console.error(`Processing failed for ${safeKey} (part ${partNumber}). Error: ${error.message}`);
-    throw normalizeTransferError(error, "copy_pipeline");
+    const normalized = normalizeTransferError(error, "copy_pipeline");
+    console.error(
+      `Copy timing failed for ${safeKey} part=${partNumber} attempts=${attemptsUsed}/${maxAttempts} ` +
+      `failed_stage=${normalized.stage} error_code=${normalized.code} ` +
+      `source_fetch_ms=${formatTimingMs(lastSourceFetchMs)} source_fetch_ms_total=${formatTimingMs(sourceFetchMsTotal)} ` +
+      `dest_upload_ms=${formatTimingMs(lastDestUploadMs)} dest_upload_ms_total=${formatTimingMs(destUploadMsTotal)} ` +
+      `retry_wait_ms_total=${formatTimingMs(retryWaitMsTotal)} total_copy_ms=${formatTimingMs(elapsedMs(copyStartedAt))}`
+    );
+    console.error(`Processing failed for ${safeKey} (part ${partNumber}). Error: ${normalized.message}`);
+    throw normalized;
   }
 }

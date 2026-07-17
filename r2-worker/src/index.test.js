@@ -160,6 +160,36 @@ describe('Worker HTTP Handler', () => {
     expect(sourceClient.config.endpoint).toBe('https://source-bucket.s3.amazonaws.com');
   });
 
+  it('should log stage timing for successful copy requests', async () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    request = new Request('http://worker/initiate-copy', {
+      method: 'POST',
+      body: JSON.stringify({
+        r2Key: 'https://account.r2.cloudflarestorage.com/bucket/video.mp4',
+        s3Url: 'https://target-bucket.oss.com/video.mp4',
+        size: 100,
+        offset: 0,
+        uploadId: 'upload-123',
+        partNumber: 5,
+      }),
+    });
+
+    const response = await worker.fetch(request, env, ctx);
+    expect(response.status).toBe(200);
+
+    const timingLog = logSpy.mock.calls
+      .map((call) => call.join(' '))
+      .find((msg) => msg.includes('Copy timing success for '));
+
+    expect(timingLog).toBeDefined();
+    expect(timingLog).toContain('source_fetch_ms=');
+    expect(timingLog).toContain('dest_upload_ms=');
+    expect(timingLog).toContain('total_copy_ms=');
+
+    logSpy.mockRestore();
+  });
+
   it('should return 400 for missing parameters', async () => {
     const payload = {
       // Missing r2Key
