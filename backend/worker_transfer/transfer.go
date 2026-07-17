@@ -329,7 +329,18 @@ func sendJobStatsUpdate(jobID int64, incSuccess, incFailed int) {
 	defer resp.Body.Close()
 	if resp.StatusCode != 200 {
 		log.Printf("Failed to update job stats for job %d: status %d", jobID, resp.StatusCode)
+		return
 	}
+	drainAndCloseResponseBody(resp)
+}
+
+func drainAndCloseResponseBody(resp *http.Response) {
+	if resp == nil || resp.Body == nil {
+		return
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	resp.Body = http.NoBody
 }
 
 func processTask(t TransferTask) {
@@ -1011,6 +1022,7 @@ func updateTaskStatus(t TransferTask, status string, msg string) error {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("transfer task update returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
+	drainAndCloseResponseBody(resp)
 	return nil
 }
 
@@ -1077,6 +1089,7 @@ func touchActiveTask(t TransferTask) error {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("transfer progress returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
+	drainAndCloseResponseBody(resp)
 	return nil
 }
 
@@ -1119,6 +1132,7 @@ func reportTransferWorkerHeartbeat() error {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		return fmt.Errorf("worker heartbeat returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
+	drainAndCloseResponseBody(resp)
 	return nil
 }
 
@@ -1163,6 +1177,7 @@ func reportCompletionCompensation(t TransferTask, size int64, dstBucket, dstKey,
 		return fmt.Errorf("completion compensation returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
+	drainAndCloseResponseBody(resp)
 	return nil
 }
 
