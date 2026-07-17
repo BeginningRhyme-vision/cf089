@@ -64,6 +64,38 @@ function formatTimingMs(ms) {
   return String(Math.max(0, Math.round(ms)));
 }
 
+function getEnvTimeoutMs(env, key, defaultSeconds) {
+  const raw = env?.[key];
+  const parsed = Number.parseInt(raw || "", 10);
+  const seconds = Number.isFinite(parsed) && parsed > 0 ? parsed : defaultSeconds;
+  return seconds * 1000;
+}
+
+function isAbortError(error) {
+  if (!error) {
+    return false;
+  }
+  if (error.name === "AbortError") {
+    return true;
+  }
+  const message = String(error?.message || "");
+  const lower = message.toLowerCase();
+  return lower.includes("aborted") || lower.includes("aborterror") || lower.includes("operation was aborted");
+}
+
+async function fetchWithTimeout(fetcher, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => {
+    controller.abort();
+  }, timeoutMs);
+
+  try {
+    return await fetcher(controller.signal);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function isRetryableStatus(status) {
   return status === 408 || status === 429 || (status >= 500 && status <= 599);
 }
@@ -554,6 +586,8 @@ async function processMessage(task, env) {
   const { r2Key, size, offset, s3Url, uploadId, partNumber } = task;
   const safeKey = redactDestUrl(r2Key, partNumber);
   const maxAttempts = Math.max(1, Number.parseInt(env?.UPLOAD_RETRY_ATTEMPTS || "1", 10) || 1);
+  const sourceFetchTimeoutMs = getEnvTimeoutMs(env, "SOURCE_FETCH_TIMEOUT_SECONDS", 5);
+  const destUploadTimeoutMs = getEnvTimeoutMs(env, "DEST_UPLOAD_TIMEOUT_SECONDS", 180);
   const copyStartedAt = Date.now();
   let attemptsUsed = 0;
   let retryWaitMsTotal = 0;
@@ -621,17 +655,29 @@ async function processMessage(task, env) {
       let sourceResponse;
       const sourceFetchStartedAt = Date.now();
       try {
-        sourceResponse = await sourceAwsClient.fetch(sourceUrl, {
-          method: 'GET',
-          headers: {
-            'Range': `bytes=${offset}-${offset + size - 1}`
-          }
-        });
+        sourceResponse = await fetchWithTimeout((signal) => {
+          return sourceAwsClient.fetch(sourceUrl, {
+            method: 'GET',
+            headers: {
+              'Range': `bytes=${offset}-${offset + size - 1}`
+            },
+            signal,
+          });
+        }, sourceFetchTimeoutMs);
         lastSourceFetchMs = elapsedMs(sourceFetchStartedAt);
         sourceFetchMsTotal += lastSourceFetchMs;
       } catch (error) {
         lastSourceFetchMs = elapsedMs(sourceFetchStartedAt);
         sourceFetchMsTotal += lastSourceFetchMs;
+        if (isAbortError(error)) {
+          error = createTransferError(
+            408,
+            "SourceTimeout",
+            "source_fetch",
+            `Source fetch timed out after ${Math.floor(sourceFetchTimeoutMs / 1000)}s`,
+            true,
+          );
+        }
         const sourceErr = classifyFetchFailure("source_fetch", error);
         if (sourceErr.retryable && attempt < maxAttempts) {
           console.error(`Source download failed for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts} err=${sourceErr.message}`)
@@ -682,16 +728,28 @@ async function processMessage(task, env) {
       let s3Response;
       const destUploadStartedAt = Date.now();
       try {
-        s3Response = await fetch(uploadUrl.toString(), {
-          method: "PUT",
-          body: sourceResponse.body,
-          headers: signedRequest.headers,
-        });
+        s3Response = await fetchWithTimeout((signal) => {
+          return fetch(uploadUrl.toString(), {
+            method: "PUT",
+            body: sourceResponse.body,
+            headers: signedRequest.headers,
+            signal,
+          });
+        }, destUploadTimeoutMs);
         lastDestUploadMs = elapsedMs(destUploadStartedAt);
         destUploadMsTotal += lastDestUploadMs;
       } catch (error) {
         lastDestUploadMs = elapsedMs(destUploadStartedAt);
         destUploadMsTotal += lastDestUploadMs;
+        if (isAbortError(error)) {
+          error = createTransferError(
+            504,
+            "DestTimeout",
+            "dest_put",
+            `Destination upload timed out after ${Math.floor(destUploadTimeoutMs / 1000)}s`,
+            true,
+          );
+        }
         const destErr = classifyFetchFailure("dest_put", error);
         if (destErr.retryable && attempt < maxAttempts) {
           console.error(`Upload failed for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts} err=${destErr.message}`)

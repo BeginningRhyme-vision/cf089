@@ -190,6 +190,36 @@ describe('Worker HTTP Handler', () => {
     logSpy.mockRestore();
   });
 
+  it('should pass timeout signals to source fetch and destination upload', async () => {
+    env.SOURCE_FETCH_TIMEOUT_SECONDS = '5';
+    env.DEST_UPLOAD_TIMEOUT_SECONDS = '180';
+
+    request = new Request('http://worker/initiate-copy', {
+      method: 'POST',
+      body: JSON.stringify({
+        r2Key: 'https://account.r2.cloudflarestorage.com/bucket/video.mp4',
+        s3Url: 'https://target-bucket.oss.com/video.mp4',
+        size: 100,
+        offset: 0,
+        uploadId: 'upload-123',
+        partNumber: 5,
+      }),
+    });
+
+    const response = await worker.fetch(request, env, ctx);
+    expect(response.status).toBe(200);
+
+    const sourceCall = mockFetchCalls.find((call) => call.options?.method === 'GET');
+    expect(sourceCall).toBeDefined();
+    expect(sourceCall.options.signal).toBeDefined();
+    expect(typeof sourceCall.options.signal.aborted).toBe('boolean');
+
+    const putCall = globalThis.fetch.mock.calls.find(([, opts]) => opts?.method === 'PUT');
+    expect(putCall).toBeDefined();
+    expect(putCall[1].signal).toBeDefined();
+    expect(typeof putCall[1].signal.aborted).toBe('boolean');
+  });
+
   it('should return 400 for missing parameters', async () => {
     const payload = {
       // Missing r2Key

@@ -21,6 +21,11 @@ routes = [
 # Keep this low so worker_transfer remains the main retry controller.
 UPLOAD_RETRY_ATTEMPTS = "2"
 
+# Stage-specific business timeouts for copy_pipeline.
+# Source fetch is expected to be very fast; destination upload is much slower.
+SOURCE_FETCH_TIMEOUT_SECONDS = "5"
+DEST_UPLOAD_TIMEOUT_SECONDS = "180"
+
 # Source R2/S3 Credentials
 # SOURCE_ACCESS_KEY_ID = "source_access_key"
 # SOURCE_SECRET_ACCESS_KEY = "source_secret_key"
