@@ -386,6 +386,10 @@ func applyTransferTaskTerminalUpdate(ctx context.Context, task models.TransferTa
 	if terminalStatus == "COMPLETED" {
 		pipe.Del(ctx, transferMultipartCheckpointKey(task.JobID, task.ID))
 	}
+	clearTransferAutoRetrySchedule(pipe, ctx, task.JobID, task.ID)
+	if terminalStatus == "FAILED" {
+		scheduleTransferAutoRetryAfterFailure(pipe, ctx, task)
+	}
 	if task.RunToken != "" {
 		pipe.ZRem(ctx, transferClaimedRunningKey(), transferClaimedRunningMember(task.JobID, task.ID, task.RunToken))
 		pipe.ZRem(ctx, transferRunningLastSeenKey(), transferRunningLastSeenMember(task.JobID, task.ID, task.RunToken))

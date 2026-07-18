@@ -271,6 +271,201 @@ func TestTransferResumeCandidateHelpers(t *testing.T) {
 	}
 }
 
+func TestTransferAutoRetryScheduleHelpers(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+
+	oldRDB := database.RDB
+	database.RDB = client
+	defer func() {
+		_ = client.Close()
+		database.RDB = oldRDB
+	}()
+
+	ctx := context.Background()
+	dueAt := time.Now().Add(2 * time.Minute)
+	pipe := client.Pipeline()
+	setTransferAutoRetryScheduled(pipe, ctx, 700, 800, dueAt)
+	if _, err := pipe.Exec(ctx); err != nil {
+		t.Fatalf("set auto retry schedule: %v", err)
+	}
+
+	scheduled, err := isTransferAutoRetryScheduled(ctx, 700, 800)
+	if err != nil {
+		t.Fatalf("check auto retry scheduled: %v", err)
+	}
+	if !scheduled {
+		t.Fatal("expected task to be marked as auto retry scheduled")
+	}
+	if client.ZScore(ctx, transferAutoRetryDueKey(), transferAutoRetryMember(700, 800)).Err() != nil {
+		t.Fatal("expected task to be present in auto retry due queue")
+	}
+
+	pipe = client.Pipeline()
+	clearTransferAutoRetrySchedule(pipe, ctx, 700, 800)
+	if _, err := pipe.Exec(ctx); err != nil {
+		t.Fatalf("clear auto retry schedule: %v", err)
+	}
+
+	scheduled, err = isTransferAutoRetryScheduled(ctx, 700, 800)
+	if err != nil {
+		t.Fatalf("re-check auto retry scheduled: %v", err)
+	}
+	if scheduled {
+		t.Fatal("expected auto retry scheduled marker to be removed")
+	}
+	if client.ZScore(ctx, transferAutoRetryDueKey(), transferAutoRetryMember(700, 800)).Err() != redis.Nil {
+		t.Fatal("expected auto retry due member to be removed")
+	}
+}
+
+func TestReleaseTransferAutoRetryLockKeepsForeignOwner(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+
+	oldRDB := database.RDB
+	database.RDB = client
+	defer func() {
+		_ = client.Close()
+		database.RDB = oldRDB
+	}()
+
+	ctx := context.Background()
+	lockKey := transferAutoRetryLockKey()
+	if err := client.Set(ctx, lockKey, "owner-b", time.Minute).Err(); err != nil {
+		t.Fatalf("seed foreign lock owner: %v", err)
+	}
+
+	if err := releaseTransferAutoRetryLock(ctx, "owner-a"); err != nil {
+		t.Fatalf("release foreign lock owner: %v", err)
+	}
+	value, err := client.Get(ctx, lockKey).Result()
+	if err != nil {
+		t.Fatalf("load lock after foreign release: %v", err)
+	}
+	if value != "owner-b" {
+		t.Fatalf("foreign lock owner should be preserved, got %q", value)
+	}
+
+	if err := releaseTransferAutoRetryLock(ctx, "owner-b"); err != nil {
+		t.Fatalf("release matching lock owner: %v", err)
+	}
+	if client.Exists(ctx, lockKey).Val() != 0 {
+		t.Fatal("matching lock owner should be able to release lock")
+	}
+}
+
+func TestResolveTransferAutoRetryManualStateClearsScheduledMarkerWhenDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("TRANSFER_AUTO_RETRY_FAILED_ENABLED", "false")
+
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+
+	oldRDB := database.RDB
+	database.RDB = client
+	defer func() {
+		_ = client.Close()
+		database.RDB = oldRDB
+	}()
+
+	ctx := context.Background()
+	pipe := client.Pipeline()
+	setTransferAutoRetryScheduled(pipe, ctx, 710, 810, time.Now().Add(time.Minute))
+	if _, err := pipe.Exec(ctx); err != nil {
+		t.Fatalf("seed auto retry schedule: %v", err)
+	}
+
+	pipe = client.Pipeline()
+	skip, err := resolveTransferAutoRetryManualState(ctx, 710, 810, pipe)
+	if err != nil {
+		t.Fatalf("resolve manual auto retry state: %v", err)
+	}
+	if skip {
+		t.Fatal("manual retry should not be skipped when auto retry is disabled")
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		t.Fatalf("clear disabled auto retry schedule: %v", err)
+	}
+
+	scheduled, err := isTransferAutoRetryScheduled(ctx, 710, 810)
+	if err != nil {
+		t.Fatalf("check scheduled marker after disabled resolution: %v", err)
+	}
+	if scheduled {
+		t.Fatal("disabled auto retry should clear stale scheduled marker for manual retry")
+	}
+	if client.ZScore(ctx, transferAutoRetryDueKey(), transferAutoRetryMember(710, 810)).Err() != redis.Nil {
+		t.Fatal("disabled auto retry should clear stale due member for manual retry")
+	}
+}
+
+func TestRunTransferAutoRetryBatchReleasesSchedulerLock(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("TRANSFER_AUTO_RETRY_FAILED_ENABLED", "true")
+
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+
+	oldRDB := database.RDB
+	database.RDB = client
+	defer func() {
+		_ = client.Close()
+		database.RDB = oldRDB
+	}()
+
+	ctx := context.Background()
+	runTransferAutoRetryBatch()
+
+	if client.Exists(ctx, transferAutoRetryLockKey()).Val() != 0 {
+		t.Fatal("scheduler lock should be released after batch completes")
+	}
+}
+
+func TestResolveTransferAutoRetryManualStateSkipsScheduledTaskWhenEnabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("TRANSFER_AUTO_RETRY_FAILED_ENABLED", "true")
+
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+
+	oldRDB := database.RDB
+	database.RDB = client
+	defer func() {
+		_ = client.Close()
+		database.RDB = oldRDB
+	}()
+
+	ctx := context.Background()
+	pipe := client.Pipeline()
+	setTransferAutoRetryScheduled(pipe, ctx, 903, 904, time.Now().Add(time.Minute))
+	if _, err := pipe.Exec(ctx); err != nil {
+		t.Fatalf("seed auto retry schedule: %v", err)
+	}
+
+	pipe = client.Pipeline()
+	skip, err := resolveTransferAutoRetryManualState(ctx, 903, 904, pipe)
+	if err != nil {
+		t.Fatalf("resolve enabled auto retry manual state: %v", err)
+	}
+	if !skip {
+		t.Fatal("manual retry should skip task when auto retry remains enabled and scheduled")
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		t.Fatalf("exec no-op pipeline for enabled auto retry: %v", err)
+	}
+
+	scheduled, err := isTransferAutoRetryScheduled(ctx, 903, 904)
+	if err != nil {
+		t.Fatalf("check scheduled marker after enabled resolution: %v", err)
+	}
+	if !scheduled {
+		t.Fatal("manual retry should not clear auto retry schedule for skipped task")
+	}
+}
+
 func TestTransferAcquireCapacityRules(t *testing.T) {
 	t.Parallel()
 
@@ -497,6 +692,15 @@ func TestCleanupTransferJobRuntimeStateRemovesRuntimeMarkers(t *testing.T) {
 	if err := client.Set(ctx, transferCompletionCompensationKey(jobID, taskID, runToken), "{}", time.Hour).Err(); err != nil {
 		t.Fatalf("seed completion comp: %v", err)
 	}
+	if err := client.Set(ctx, transferAutoRetryScheduledKey(jobID, taskID), "1", time.Hour).Err(); err != nil {
+		t.Fatalf("seed auto retry scheduled: %v", err)
+	}
+	if err := client.ZAdd(ctx, transferAutoRetryDueKey(), redis.Z{
+		Score:  float64(time.Now().Add(time.Hour).Unix()),
+		Member: transferAutoRetryMember(jobID, taskID),
+	}).Err(); err != nil {
+		t.Fatalf("seed auto retry due: %v", err)
+	}
 	if err := client.SAdd(ctx, transferPoolInFlightKey(TransferPoolDefault), transferPoolInFlightMember(jobID, taskID, runToken)).Err(); err != nil {
 		t.Fatalf("seed default inflight: %v", err)
 	}
@@ -527,6 +731,12 @@ func TestCleanupTransferJobRuntimeStateRemovesRuntimeMarkers(t *testing.T) {
 	}
 	if client.Exists(ctx, transferCompletionCompensationKey(jobID, taskID, runToken)).Val() != 0 {
 		t.Fatal("completion compensation key should be removed")
+	}
+	if client.Exists(ctx, transferAutoRetryScheduledKey(jobID, taskID)).Val() != 0 {
+		t.Fatal("auto retry scheduled key should be removed")
+	}
+	if client.ZScore(ctx, transferAutoRetryDueKey(), transferAutoRetryMember(jobID, taskID)).Err() != redis.Nil {
+		t.Fatal("auto retry due member should be removed")
 	}
 	if client.SIsMember(ctx, transferPoolInFlightKey(TransferPoolDefault), transferPoolInFlightMember(jobID, taskID, runToken)).Val() {
 		t.Fatal("default inflight run-token member should be removed")
@@ -575,6 +785,122 @@ func TestRecoverDeferredTransferTasksRewindsOffsetToEarliestContendedTask(t *tes
 	}
 	if offset != "321" {
 		t.Fatalf("expected offset rewind to earliest contended task, got %s", offset)
+	}
+}
+
+func TestProcessTransferAutoRetryMemberClearsScheduleForNonFailedTask(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+
+	oldRDB := database.RDB
+	database.RDB = client
+	defer func() {
+		_ = client.Close()
+		database.RDB = oldRDB
+	}()
+
+	ctx := context.Background()
+	task := models.TransferTask{
+		ID:       901,
+		JobID:    902,
+		Status:   "PENDING",
+		Src:      "foo/bar.mp4",
+		Size:     123,
+		WorkerID: "",
+	}
+	raw, err := json.Marshal(task)
+	if err != nil {
+		t.Fatalf("marshal task: %v", err)
+	}
+	taskKey := fmt.Sprintf("tx:task:%d:%d", task.JobID, task.ID)
+	if err := client.Set(ctx, taskKey, raw, 0).Err(); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	pipe := client.Pipeline()
+	setTransferAutoRetryScheduled(pipe, ctx, task.JobID, task.ID, time.Now().Add(-time.Minute))
+	if _, err := pipe.Exec(ctx); err != nil {
+		t.Fatalf("seed auto retry schedule: %v", err)
+	}
+
+	if err := processTransferAutoRetryMember(ctx, transferAutoRetryMember(task.JobID, task.ID)); err != nil {
+		t.Fatalf("process auto retry member: %v", err)
+	}
+
+	scheduled, err := isTransferAutoRetryScheduled(ctx, task.JobID, task.ID)
+	if err != nil {
+		t.Fatalf("check scheduled marker after processing: %v", err)
+	}
+	if scheduled {
+		t.Fatal("expected scheduled marker to be cleared for non-failed task")
+	}
+	if client.ZScore(ctx, transferAutoRetryDueKey(), transferAutoRetryMember(task.JobID, task.ID)).Err() != redis.Nil {
+		t.Fatal("expected due member to be cleared for non-failed task")
+	}
+}
+
+func TestProcessTransferAutoRetryMemberSkipsFutureRescheduledTask(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	t.Setenv("TRANSFER_AUTO_RETRY_FAILED_ENABLED", "true")
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+
+	oldRDB := database.RDB
+	database.RDB = client
+	defer func() {
+		_ = client.Close()
+		database.RDB = oldRDB
+	}()
+
+	ctx := context.Background()
+	task := models.TransferTask{
+		ID:           905,
+		JobID:        906,
+		Status:       "FAILED",
+		Src:          "foo/bar-future.bin",
+		ErrorMessage: "temporary upstream 500",
+	}
+	raw, err := json.Marshal(task)
+	if err != nil {
+		t.Fatalf("marshal task: %v", err)
+	}
+	taskKey := fmt.Sprintf("tx:task:%d:%d", task.JobID, task.ID)
+	if err := client.Set(ctx, taskKey, raw, 0).Err(); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+
+	pipe := client.Pipeline()
+	setTransferAutoRetryScheduled(pipe, ctx, task.JobID, task.ID, time.Now().Add(2*time.Minute))
+	if _, err := pipe.Exec(ctx); err != nil {
+		t.Fatalf("seed future auto retry schedule: %v", err)
+	}
+
+	if err := processTransferAutoRetryMember(ctx, transferAutoRetryMember(task.JobID, task.ID)); err != nil {
+		t.Fatalf("process future auto retry member: %v", err)
+	}
+
+	storedRaw, err := client.Get(ctx, taskKey).Result()
+	if err != nil {
+		t.Fatalf("load task after processing future due member: %v", err)
+	}
+	var stored models.TransferTask
+	if err := json.Unmarshal([]byte(storedRaw), &stored); err != nil {
+		t.Fatalf("decode stored task: %v", err)
+	}
+	if stored.Status != "FAILED" {
+		t.Fatalf("future rescheduled task should remain FAILED, got %s", stored.Status)
+	}
+
+	scheduled, err := isTransferAutoRetryScheduled(ctx, task.JobID, task.ID)
+	if err != nil {
+		t.Fatalf("check scheduled marker after future processing: %v", err)
+	}
+	if !scheduled {
+		t.Fatal("future rescheduled task should keep scheduled marker")
+	}
+	if client.ZScore(ctx, transferAutoRetryDueKey(), transferAutoRetryMember(task.JobID, task.ID)).Err() != nil {
+		t.Fatal("future rescheduled task should keep due member")
 	}
 }
 

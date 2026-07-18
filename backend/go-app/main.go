@@ -43,6 +43,9 @@ func main() {
 	handlers.StartTransferJobMonitor()
 	log.Println("  - Transfer job monitor started")
 
+	handlers.StartTransferAutoRetryScheduler()
+	log.Println("  - Transfer auto retry scheduler started")
+
 	handlers.StartTransferCompletionReconciler()
 	log.Println("  - Transfer completion reconciler started")
 

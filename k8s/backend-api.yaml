@@ -30,6 +30,14 @@ spec:
           value: "72"
         - name: TRANSFER_RESUME_RESERVED_WORKERS
           value: "0"
+        - name: TRANSFER_AUTO_RETRY_FAILED_ENABLED
+          value: "false"
+        - name: TRANSFER_AUTO_RETRY_FAILED_COOLDOWN_SECONDS
+          value: "60"
+        - name: TRANSFER_AUTO_RETRY_FAILED_BATCH_SIZE
+          value: "200"
+        - name: TRANSFER_AUTO_RETRY_FAILED_POLL_SECONDS
+          value: "5"
         ports:
         - containerPort: 8080
         volumeMounts:
