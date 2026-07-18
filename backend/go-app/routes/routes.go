@@ -99,6 +99,9 @@ func SetupRouter() *gin.Engine {
 			txTasks.POST("/progress", handlers.UpdateTransferTaskProgress)
 			txTasks.POST("/compensations", handlers.RecordTransferTaskCompensation)
 			txTasks.POST("/heartbeat", handlers.RecordTransferWorkerHeartbeat)
+			txTasks.POST("/checkpoint/load", handlers.LoadTransferMultipartCheckpoint)
+			txTasks.POST("/checkpoint/save", handlers.SaveTransferMultipartCheckpoint)
+			txTasks.POST("/checkpoint/clear", handlers.ClearTransferMultipartCheckpoint)
 		}
 
 		// Ffmpeg Jobs

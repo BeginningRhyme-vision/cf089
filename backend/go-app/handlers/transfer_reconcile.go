@@ -371,6 +371,9 @@ func applyTransferTaskTerminalUpdate(ctx context.Context, task models.TransferTa
 
 	pipe := database.RDB.Pipeline()
 	pipe.Set(ctx, fmt.Sprintf("tx:task:%d:%d", task.JobID, task.ID), data, 0)
+	if terminalStatus == "COMPLETED" {
+		pipe.Del(ctx, transferMultipartCheckpointKey(task.JobID, task.ID))
+	}
 	if task.RunToken != "" {
 		pipe.ZRem(ctx, transferClaimedRunningKey(), transferClaimedRunningMember(task.JobID, task.ID, task.RunToken))
 		pipe.ZRem(ctx, transferRunningLastSeenKey(), transferRunningLastSeenMember(task.JobID, task.ID, task.RunToken))

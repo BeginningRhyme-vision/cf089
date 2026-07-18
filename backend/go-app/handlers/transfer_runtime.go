@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,11 +20,12 @@ import (
 )
 
 const (
-	TransferWorkerHeartbeatTTL  = 2 * time.Minute
-	TransferClaimedStaleAfter   = 20 * time.Minute
-	TransferRunningStaleAfter   = 15 * time.Minute
-	TransferHeartbeatInterval   = 30 * time.Second
-	TransferActiveTouchInterval = 5 * time.Second
+	TransferWorkerHeartbeatTTL            = 2 * time.Minute
+	TransferClaimedStaleAfter             = 20 * time.Minute
+	TransferRunningStaleAfter             = 15 * time.Minute
+	TransferHeartbeatInterval             = 30 * time.Second
+	TransferActiveTouchInterval           = 5 * time.Second
+	DefaultTransferMultipartCheckpointTTL = 72 * time.Hour
 )
 
 func transferClaimedRunningKey() string {
@@ -35,6 +38,10 @@ func transferRunningLastSeenKey() string {
 
 func transferWorkerHeartbeatKey(workerID string) string {
 	return fmt.Sprintf("tx:worker:heartbeat:%s", workerID)
+}
+
+func transferMultipartCheckpointKey(jobID, taskID int64) string {
+	return fmt.Sprintf("tx:mpu:ckpt:%d:%d", jobID, taskID)
 }
 
 func transferClaimedRunningMember(jobID, taskID int64, runToken string) string {
@@ -264,6 +271,153 @@ func RecordTransferWorkerHeartbeat(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+
+type transferMultipartCheckpoint struct {
+	JobID                  int64     `json:"job_id"`
+	TaskID                 int64     `json:"task_id"`
+	Src                    string    `json:"src"`
+	Size                   int64     `json:"size"`
+	SourceETag             string    `json:"source_etag"`
+	SrcIdentity            string    `json:"src_identity"`
+	DstBucket              string    `json:"dst_bucket"`
+	DstKey                 string    `json:"dst_key"`
+	UploadID               string    `json:"upload_id"`
+	PartSize               int64     `json:"part_size"`
+	NumParts               int       `json:"num_parts"`
+	AttemptCount           int       `json:"attempt_count"`
+	LastRunToken           string    `json:"last_run_token"`
+	LastError              string    `json:"last_error"`
+	ResumeFailStreak       int       `json:"resume_fail_streak"`
+	LastKnownUploadedParts int       `json:"last_known_uploaded_parts"`
+	CreatedAt              time.Time `json:"created_at"`
+	UpdatedAt              time.Time `json:"updated_at"`
+}
+
+func transferMultipartCheckpointTTL() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("TRANSFER_MULTIPART_CHECKPOINT_TTL_HOURS"))
+	if raw == "" {
+		return DefaultTransferMultipartCheckpointTTL
+	}
+	hours, err := strconv.Atoi(raw)
+	if err != nil || hours <= 0 {
+		return DefaultTransferMultipartCheckpointTTL
+	}
+	return time.Duration(hours) * time.Hour
+}
+
+func loadTransferMultipartCheckpointRecord(ctx context.Context, jobID, taskID int64) (*transferMultipartCheckpoint, error) {
+	raw, err := database.RDB.Get(ctx, transferMultipartCheckpointKey(jobID, taskID)).Result()
+	if err == redis.Nil {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	var checkpoint transferMultipartCheckpoint
+	if err := json.Unmarshal([]byte(raw), &checkpoint); err != nil {
+		return nil, fmt.Errorf("decode checkpoint: %w", err)
+	}
+	return &checkpoint, nil
+}
+
+func clearTransferMultipartCheckpointRecord(ctx context.Context, jobID, taskID int64) error {
+	return database.RDB.Del(ctx, transferMultipartCheckpointKey(jobID, taskID)).Err()
+}
+
+func LoadTransferMultipartCheckpoint(c *gin.Context) {
+	type loadRequest struct {
+		JobID  int64 `json:"job_id"`
+		TaskID int64 `json:"task_id"`
+	}
+
+	var req loadRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.JobID <= 0 || req.TaskID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "job_id and task_id are required"})
+		return
+	}
+
+	ctx := context.Background()
+	checkpoint, err := loadTransferMultipartCheckpointRecord(ctx, req.JobID, req.TaskID)
+	if err == redis.Nil || checkpoint == nil {
+		c.JSON(http.StatusOK, gin.H{"found": false})
+		return
+	}
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"found":      true,
+		"checkpoint": checkpoint,
+	})
+}
+
+func SaveTransferMultipartCheckpoint(c *gin.Context) {
+	var checkpoint transferMultipartCheckpoint
+	if err := c.ShouldBindJSON(&checkpoint); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if checkpoint.JobID <= 0 || checkpoint.TaskID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "job_id and task_id are required"})
+		return
+	}
+	if strings.TrimSpace(checkpoint.UploadID) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "upload_id is required"})
+		return
+	}
+
+	now := time.Now().UTC()
+	if checkpoint.CreatedAt.IsZero() {
+		checkpoint.CreatedAt = now
+	}
+	checkpoint.UpdatedAt = now
+
+	data, err := json.Marshal(checkpoint)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("marshal checkpoint: %v", err)})
+		return
+	}
+
+	ctx := context.Background()
+	if err := database.RDB.Set(ctx, transferMultipartCheckpointKey(checkpoint.JobID, checkpoint.TaskID), data, transferMultipartCheckpointTTL()).Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "saved"})
+}
+
+func ClearTransferMultipartCheckpoint(c *gin.Context) {
+	type clearRequest struct {
+		JobID  int64 `json:"job_id"`
+		TaskID int64 `json:"task_id"`
+	}
+
+	var req clearRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	if req.JobID <= 0 || req.TaskID <= 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "job_id and task_id are required"})
+		return
+	}
+
+	ctx := context.Background()
+	if err := clearTransferMultipartCheckpointRecord(ctx, req.JobID, req.TaskID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "cleared"})
 }
 
 func applyTransferTaskDBStatusTransition(jobID int64, oldStatus, newStatus string, successBytes int64) error {

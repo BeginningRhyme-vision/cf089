@@ -173,3 +173,11 @@ func TestUploadTransferPartWithRetry_FatalErrorStopsImmediately(t *testing.T) {
 		t.Fatalf("call count = %d, want 1", got)
 	}
 }
+
+func TestBuildSrcIdentityIncludesETagWhenAvailable(t *testing.T) {
+	got := buildSrcIdentity("https://src.example/object", 123, `"etag-1"`)
+	want := "https://src.example/object|123|etag-1"
+	if got != want {
+		t.Fatalf("buildSrcIdentity with etag = %q, want %q", got, want)
+	}
+}

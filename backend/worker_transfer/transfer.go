@@ -86,17 +86,18 @@ func (e *transferServiceError) Error() string {
 }
 
 var (
-	jobCache           sync.Map // JobID -> cachedJob
-	httpClient         *http.Client
-	transferClient     *http.Client
-	transferProtoLog   sync.Once
-	s3ProtoLog         sync.Once
-	workerID           string
-	workerCount        int
-	taskBufferSize     int
-	partConcurrency    int
-	multipartThreshold int64
-	minPartSize        int64
+	jobCache              sync.Map // JobID -> cachedJob
+	httpClient            *http.Client
+	transferClient        *http.Client
+	transferProtoLog      sync.Once
+	s3ProtoLog            sync.Once
+	workerID              string
+	workerCount           int
+	taskBufferSize        int
+	partConcurrency       int
+	resumeFailStreakLimit int
+	multipartThreshold    int64
+	minPartSize           int64
 
 	s3Clients sync.Map // Endpoint -> *s3.Client (Cache for Destinations)
 	srcClient *s3.Client
@@ -122,18 +123,19 @@ var (
 )
 
 const (
-	WorkerID                    = "go-transfer-1"
-	DefaultConcurrentWorkers    = 64
-	DefaultTaskBufferSize       = 128
-	DefaultPartConcurrency      = 16
-	DefaultMultipartThresholdMB = 8
-	DefaultMinPartSizeMB        = 5
-	DefaultTransferMaxConns     = 384
-	DefaultTransferTimeoutSec   = 120
-	DefaultTransferTLSHandshake = 10
-	WorkerHeartbeatInterval     = 30 * time.Second
-	ActiveTouchInterval         = 5 * time.Second
-	TransferAttemptLimit        = 2
+	WorkerID                     = "go-transfer-1"
+	DefaultConcurrentWorkers     = 64
+	DefaultTaskBufferSize        = 128
+	DefaultPartConcurrency       = 16
+	DefaultMultipartThresholdMB  = 8
+	DefaultMinPartSizeMB         = 5
+	DefaultTransferMaxConns      = 384
+	DefaultTransferTimeoutSec    = 120
+	DefaultTransferTLSHandshake  = 10
+	DefaultResumeFailStreakLimit = 2
+	WorkerHeartbeatInterval      = 30 * time.Second
+	ActiveTouchInterval          = 5 * time.Second
+	TransferAttemptLimit         = 2
 )
 
 func buildWorkerID() string {
@@ -167,6 +169,7 @@ func runTransfer() {
 	workerCount = getEnvInt("TRANSFER_MAX_WORKERS", DefaultConcurrentWorkers)
 	taskBufferSize = getEnvInt("TRANSFER_TASK_BUFFER", DefaultTaskBufferSize)
 	partConcurrency = getEnvInt("TRANSFER_PART_CONCURRENCY", DefaultPartConcurrency)
+	resumeFailStreakLimit = getEnvInt("TRANSFER_RESUME_FAIL_STREAK_LIMIT", DefaultResumeFailStreakLimit)
 	multipartThreshold = int64(getEnvInt("TRANSFER_MULTIPART_THRESHOLD_MB", DefaultMultipartThresholdMB)) * 1024 * 1024
 	minPartSize = int64(getEnvInt("TRANSFER_MIN_PART_SIZE_MB", DefaultMinPartSizeMB)) * 1024 * 1024
 	httpClient = &http.Client{
@@ -396,22 +399,29 @@ func processTask(t TransferTask) {
 
 	// 3. Get Object Info (Size) from Src
 	srcBucket := getBucketFromEndpoint(cfg.Storage.Src.Endpoint)
-	size := t.Size
-
-	if size == 0 {
-		head, err := srcClient.HeadObject(context.TODO(), &s3.HeadObjectInput{
-			Bucket: aws.String(srcBucket),
-			Key:    aws.String(srcKey),
-		})
-		if err != nil {
-			log.Printf("HeadObject failed for %s/%s: %v", srcBucket, srcKey, err)
-			updateTaskStatus(t, "FAILED", "HeadObject failed: "+err.Error())
-			updateJobStats(t.JobID, 0, 1)
-			TasksTransferred.WithLabelValues("failed").Inc()
-			return
+	dstBucket := getBucketFromEndpoint(job.Metadata.Endpoint)
+	head, err := srcClient.HeadObject(context.TODO(), &s3.HeadObjectInput{
+		Bucket: aws.String(srcBucket),
+		Key:    aws.String(srcKey),
+	})
+	if err != nil {
+		log.Printf("HeadObject failed for %s/%s: %v", srcBucket, srcKey, err)
+		errMsg := "HeadObject failed: " + err.Error()
+		if isSourceHeadNotFound(err) {
+			log.Printf("Task %d/%d source object missing at %s/%s; cleaning multipart artifacts before marking FAILED", t.JobID, t.ID, srcBucket, srcKey)
+			if cleanupErr := cleanupMultipartArtifactsForTask(t, dstClient, dstBucket, dstKey); cleanupErr != nil {
+				errMsg = "SourceMissing cleanup failed: " + cleanupErr.Error()
+			} else {
+				errMsg = "SourceNotFound: source head returned 404"
+			}
 		}
-		size = *head.ContentLength
+		updateTaskStatus(t, "FAILED", errMsg)
+		updateJobStats(t.JobID, 0, 1)
+		TasksTransferred.WithLabelValues("failed").Inc()
+		return
 	}
+	size := aws.ToInt64(head.ContentLength)
+	sourceETag := aws.ToString(head.ETag)
 
 	// 4. Construct Public/Virtual-Hosted URLs for Transfer Service (Matches r2s3.go logic)
 	srcUrl, err := constructVirtualHostURL(cfg.Storage.Src.Endpoint, srcBucket, srcKey)
@@ -423,11 +433,10 @@ func processTask(t TransferTask) {
 		return
 	}
 
-	dstBucket := getBucketFromEndpoint(job.Metadata.Endpoint)
 	log.Printf("Task %d: Transferring %d bytes to bucket '%s' key '%s'", t.ID, size, dstBucket, dstKey)
 
 	// 5. Transfer Loop
-	err = transferFile(srcUrl, dstClient, dstBucket, dstKey, size, job.Metadata.Endpoint)
+	err = transferFile(t, srcUrl, dstClient, dstBucket, dstKey, size, job.Metadata.Endpoint, sourceETag)
 	if err != nil {
 		log.Printf("Transfer failed for task %d: %v", t.ID, err)
 		updateTaskStatus(t, "FAILED", err.Error())
@@ -483,7 +492,264 @@ func buildRelativeKey(srcDir, srcKey string) string {
 	return srcKey
 }
 
-func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string, size int64, dstEndpoint string) error {
+type multipartCheckpoint struct {
+	JobID                  int64     `json:"job_id"`
+	TaskID                 int64     `json:"task_id"`
+	Src                    string    `json:"src"`
+	Size                   int64     `json:"size"`
+	SourceETag             string    `json:"source_etag"`
+	SrcIdentity            string    `json:"src_identity"`
+	DstBucket              string    `json:"dst_bucket"`
+	DstKey                 string    `json:"dst_key"`
+	UploadID               string    `json:"upload_id"`
+	PartSize               int64     `json:"part_size"`
+	NumParts               int       `json:"num_parts"`
+	AttemptCount           int       `json:"attempt_count"`
+	LastRunToken           string    `json:"last_run_token"`
+	LastError              string    `json:"last_error"`
+	ResumeFailStreak       int       `json:"resume_fail_streak"`
+	LastKnownUploadedParts int       `json:"last_known_uploaded_parts"`
+	CreatedAt              time.Time `json:"created_at"`
+	UpdatedAt              time.Time `json:"updated_at"`
+}
+
+func buildSrcIdentity(srcURL string, size int64, sourceETag string) string {
+	sourceETag = strings.Trim(strings.TrimSpace(sourceETag), `"`)
+	if sourceETag == "" {
+		return fmt.Sprintf("%s|%d", srcURL, size)
+	}
+	return fmt.Sprintf("%s|%d|%s", srcURL, size, sourceETag)
+}
+
+func loadMultipartCheckpoint(jobID, taskID int64) (*multipartCheckpoint, error) {
+	payload := map[string]int64{
+		"job_id":  jobID,
+		"task_id": taskID,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("marshal checkpoint load payload: %w", err)
+	}
+
+	resp, err := httpClient.Post(apiBaseURL+"/transfer-tasks/checkpoint/load", "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		return nil, fmt.Errorf("post checkpoint load: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("checkpoint load returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+
+	var result struct {
+		Found      bool                `json:"found"`
+		Checkpoint multipartCheckpoint `json:"checkpoint"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode checkpoint load response: %w", err)
+	}
+	if !result.Found {
+		return nil, nil
+	}
+	return &result.Checkpoint, nil
+}
+
+func saveMultipartCheckpoint(ckpt *multipartCheckpoint) error {
+	if ckpt == nil {
+		return nil
+	}
+	data, err := json.Marshal(ckpt)
+	if err != nil {
+		return fmt.Errorf("marshal checkpoint save payload: %w", err)
+	}
+
+	resp, err := httpClient.Post(apiBaseURL+"/transfer-tasks/checkpoint/save", "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		return fmt.Errorf("post checkpoint save: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("checkpoint save returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	drainAndCloseResponseBody(resp)
+	return nil
+}
+
+func clearMultipartCheckpoint(jobID, taskID int64) error {
+	payload := map[string]int64{
+		"job_id":  jobID,
+		"task_id": taskID,
+	}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal checkpoint clear payload: %w", err)
+	}
+
+	resp, err := httpClient.Post(apiBaseURL+"/transfer-tasks/checkpoint/clear", "application/json", bytes.NewBuffer(data))
+	if err != nil {
+		return fmt.Errorf("post checkpoint clear: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("checkpoint clear returned status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	drainAndCloseResponseBody(resp)
+	return nil
+}
+
+func shouldReuseMultipartCheckpoint(ckpt *multipartCheckpoint, srcIdentity, dstBucket, dstKey string, size, partSize int64, numParts int) bool {
+	if ckpt == nil {
+		return false
+	}
+	if strings.TrimSpace(ckpt.UploadID) == "" {
+		return false
+	}
+	if ckpt.SrcIdentity != srcIdentity {
+		return false
+	}
+	if ckpt.Size != size {
+		return false
+	}
+	if ckpt.DstBucket != dstBucket || ckpt.DstKey != dstKey {
+		return false
+	}
+	if ckpt.PartSize != partSize || ckpt.NumParts != numParts {
+		return false
+	}
+	return true
+}
+
+func listUploadedParts(ctx context.Context, dstClient *s3.Client, dstBucket, dstKey, uploadID string) (map[int32]types.CompletedPart, error) {
+	result := make(map[int32]types.CompletedPart)
+	paginator := s3.NewListPartsPaginator(dstClient, &s3.ListPartsInput{
+		Bucket:   aws.String(dstBucket),
+		Key:      aws.String(dstKey),
+		UploadId: aws.String(uploadID),
+	})
+
+	for paginator.HasMorePages() {
+		page, err := paginator.NextPage(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for _, part := range page.Parts {
+			if part.PartNumber == nil || part.ETag == nil {
+				continue
+			}
+			result[*part.PartNumber] = types.CompletedPart{
+				ETag:       part.ETag,
+				PartNumber: part.PartNumber,
+			}
+		}
+	}
+
+	return result, nil
+}
+
+func countCompletedParts(parts []types.CompletedPart) int {
+	count := 0
+	for _, part := range parts {
+		if part.PartNumber != nil && part.ETag != nil && strings.TrimSpace(*part.ETag) != "" {
+			count++
+		}
+	}
+	return count
+}
+
+func abortMultipartUpload(dstClient *s3.Client, dstBucket, dstKey, uploadID string) error {
+	if strings.TrimSpace(uploadID) == "" {
+		return nil
+	}
+	abortCtx, abortCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer abortCancel()
+	if _, err := dstClient.AbortMultipartUpload(abortCtx, &s3.AbortMultipartUploadInput{
+		Bucket:   aws.String(dstBucket),
+		Key:      aws.String(dstKey),
+		UploadId: aws.String(uploadID),
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
+func abortMultipartUploadBestEffort(dstClient *s3.Client, dstBucket, dstKey, uploadID string) {
+	if err := abortMultipartUpload(dstClient, dstBucket, dstKey, uploadID); err != nil {
+		log.Printf("AbortMultipartUpload failed for %s/%s upload=%s: %v", dstBucket, dstKey, uploadID, err)
+	}
+}
+
+func abandonMultipartCheckpoint(t TransferTask, dstClient *s3.Client, dstBucket, dstKey, uploadID, reason string) error {
+	log.Printf("Abandoning multipart upload for task %d/%d reason=%s upload_id=%s bucket=%s key=%s",
+		t.JobID, t.ID, reason, uploadID, dstBucket, dstKey)
+	if err := abortMultipartUpload(dstClient, dstBucket, dstKey, uploadID); err != nil {
+		log.Printf("Failed to abort multipart upload for task %d/%d reason=%s upload_id=%s; preserving checkpoint for inspection/retry: %v",
+			t.JobID, t.ID, reason, uploadID, err)
+		return fmt.Errorf("abort multipart upload_id=%s reason=%s: %w", uploadID, reason, err)
+	}
+	log.Printf("Aborted multipart upload for task %d/%d reason=%s upload_id=%s", t.JobID, t.ID, reason, uploadID)
+	if clearErr := clearMultipartCheckpoint(t.JobID, t.ID); clearErr != nil {
+		log.Printf("Aborted multipart upload for task %d/%d upload_id=%s but failed to clear checkpoint: %v",
+			t.JobID, t.ID, uploadID, clearErr)
+		return nil
+	}
+	log.Printf("Cleared multipart checkpoint for task %d/%d reason=%s upload_id=%s", t.JobID, t.ID, reason, uploadID)
+	return nil
+}
+
+func cleanupMultipartArtifactsForTask(t TransferTask, dstClient *s3.Client, fallbackBucket, fallbackKey string) error {
+	ckpt, err := loadMultipartCheckpoint(t.JobID, t.ID)
+	if err != nil {
+		log.Printf("Failed to load multipart checkpoint for cleanup task %d/%d: %v", t.JobID, t.ID, err)
+		return err
+	}
+	if ckpt == nil {
+		return nil
+	}
+
+	dstBucket := fallbackBucket
+	if strings.TrimSpace(ckpt.DstBucket) != "" {
+		dstBucket = ckpt.DstBucket
+	}
+	dstKey := fallbackKey
+	if strings.TrimSpace(ckpt.DstKey) != "" {
+		dstKey = ckpt.DstKey
+	}
+
+	if err := abandonMultipartCheckpoint(t, dstClient, dstBucket, dstKey, ckpt.UploadID, "source_head_not_found"); err != nil {
+		log.Printf("Multipart cleanup deferred for task %d/%d after source disappearance: %v", t.JobID, t.ID, err)
+		return err
+	}
+	return nil
+}
+
+func isMultipartUploadNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "nosuchupload") ||
+		strings.Contains(lower, "no such upload") ||
+		strings.Contains(lower, "status code: 404") ||
+		strings.Contains(lower, "statuscode: 404") ||
+		strings.Contains(lower, "statuscode:404")
+}
+
+func isSourceHeadNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	lower := strings.ToLower(err.Error())
+	return strings.Contains(lower, "nosuchkey") ||
+		strings.Contains(lower, "no such key") ||
+		strings.Contains(lower, "not found") ||
+		strings.Contains(lower, "status code: 404") ||
+		strings.Contains(lower, "statuscode: 404") ||
+		strings.Contains(lower, "statuscode:404")
+}
+
+func transferFile(t TransferTask, srcURL string, dstClient *s3.Client, dstBucket, dstKey string, size int64, dstEndpoint string, sourceETag string) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -492,25 +758,121 @@ func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string,
 		return err
 	}
 
+	var (
+		ckpt             *multipartCheckpoint
+		uploadID         string
+		uploadedParts    map[int32]types.CompletedPart
+		reusedCheckpoint bool
+	)
+
+	if loaded, loadErr := loadMultipartCheckpoint(t.JobID, t.ID); loadErr != nil {
+		log.Printf("Failed to load multipart checkpoint for task %d/%d: %v", t.JobID, t.ID, loadErr)
+	} else {
+		ckpt = loaded
+	}
+
 	if size < multipartThreshold {
+		if ckpt != nil {
+			log.Printf("Task %d/%d switched to single-part upload because size=%d is below multipart threshold=%d, cleaning stale multipart upload_id=%s",
+				t.JobID, t.ID, size, multipartThreshold, ckpt.UploadID)
+			if err := abandonMultipartCheckpoint(t, dstClient, ckpt.DstBucket, ckpt.DstKey, ckpt.UploadID, "single_part_fallback_threshold"); err != nil {
+				return err
+			}
+		}
 		_, err = uploadTransferPartWithRetry(ctx, srcURL, dstUrl, size, 0, "", -1)
 		return err
 	}
 
 	// Multipart
-	createOut, err := dstClient.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
-		Bucket: aws.String(dstBucket),
-		Key:    aws.String(dstKey),
-	})
-	if err != nil {
-		return err
-	}
-	uploadID := *createOut.UploadId
-
 	partSize := calculatePartSize(size)
 	numParts := int((size-1)/partSize) + 1
+	srcIdentity := buildSrcIdentity(srcURL, size, sourceETag)
+
+	if shouldReuseMultipartCheckpoint(ckpt, srcIdentity, dstBucket, dstKey, size, partSize, numParts) {
+		listCtx, listCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		parts, listErr := listUploadedParts(listCtx, dstClient, dstBucket, dstKey, ckpt.UploadID)
+		listCancel()
+		switch {
+		case listErr == nil:
+			uploadID = ckpt.UploadID
+			uploadedParts = parts
+			reusedCheckpoint = true
+			ckpt.AttemptCount++
+			ckpt.LastRunToken = t.RunToken
+			ckpt.LastKnownUploadedParts = len(uploadedParts)
+			log.Printf("Resuming multipart upload for task %d/%d upload_id=%s uploaded_parts=%d part_size=%d num_parts=%d attempt=%d",
+				t.JobID, t.ID, ckpt.UploadID, len(uploadedParts), ckpt.PartSize, ckpt.NumParts, ckpt.AttemptCount)
+			if saveErr := saveMultipartCheckpoint(ckpt); saveErr != nil {
+				log.Printf("Failed to refresh multipart checkpoint for task %d/%d: %v", t.JobID, t.ID, saveErr)
+			}
+		case isMultipartUploadNotFound(listErr):
+			log.Printf("Multipart checkpoint upload missing for task %d/%d, clearing stale upload_id=%s", t.JobID, t.ID, ckpt.UploadID)
+			if clearErr := clearMultipartCheckpoint(t.JobID, t.ID); clearErr != nil {
+				log.Printf("Failed to clear stale multipart checkpoint for task %d/%d: %v", t.JobID, t.ID, clearErr)
+			}
+			ckpt = nil
+		default:
+			log.Printf("Failed to list multipart parts for task %d/%d upload_id=%s before fresh upload: %v", t.JobID, t.ID, ckpt.UploadID, listErr)
+			if err := abandonMultipartCheckpoint(t, dstClient, ckpt.DstBucket, ckpt.DstKey, ckpt.UploadID, "list_parts_error"); err != nil {
+				return err
+			}
+			ckpt = nil
+		}
+	} else if ckpt != nil {
+		log.Printf("Multipart checkpoint mismatch for task %d/%d, abandoning old upload_id=%s", t.JobID, t.ID, ckpt.UploadID)
+		if err := abandonMultipartCheckpoint(t, dstClient, ckpt.DstBucket, ckpt.DstKey, ckpt.UploadID, "checkpoint_mismatch"); err != nil {
+			return err
+		}
+		ckpt = nil
+	}
+
+	if uploadID == "" {
+		createOut, createErr := dstClient.CreateMultipartUpload(ctx, &s3.CreateMultipartUploadInput{
+			Bucket: aws.String(dstBucket),
+			Key:    aws.String(dstKey),
+		})
+		if createErr != nil {
+			return createErr
+		}
+		uploadID = *createOut.UploadId
+		log.Printf("Created multipart upload for task %d/%d upload_id=%s bucket=%s key=%s part_size=%d num_parts=%d",
+			t.JobID, t.ID, uploadID, dstBucket, dstKey, partSize, numParts)
+		uploadedParts = make(map[int32]types.CompletedPart)
+		ckpt = &multipartCheckpoint{
+			JobID:                  t.JobID,
+			TaskID:                 t.ID,
+			Src:                    srcURL,
+			Size:                   size,
+			SourceETag:             strings.Trim(strings.TrimSpace(sourceETag), `"`),
+			SrcIdentity:            srcIdentity,
+			DstBucket:              dstBucket,
+			DstKey:                 dstKey,
+			UploadID:               uploadID,
+			PartSize:               partSize,
+			NumParts:               numParts,
+			AttemptCount:           1,
+			LastRunToken:           t.RunToken,
+			ResumeFailStreak:       0,
+			LastKnownUploadedParts: 0,
+			CreatedAt:              time.Now().UTC(),
+			UpdatedAt:              time.Now().UTC(),
+		}
+		if saveErr := saveMultipartCheckpoint(ckpt); saveErr != nil {
+			log.Printf("Failed to save initial multipart checkpoint for task %d/%d upload_id=%s; aborting fresh multipart upload: %v", t.JobID, t.ID, uploadID, saveErr)
+			abortMultipartUploadBestEffort(dstClient, dstBucket, dstKey, uploadID)
+			return fmt.Errorf("save initial multipart checkpoint for task %d/%d upload_id=%s: %w", t.JobID, t.ID, uploadID, saveErr)
+		}
+		log.Printf("Saved initial multipart checkpoint for task %d/%d upload_id=%s", t.JobID, t.ID, uploadID)
+	}
 
 	completedParts := make([]types.CompletedPart, numParts)
+	for partNumber, part := range uploadedParts {
+		idx := int(partNumber) - 1
+		if idx >= 0 && idx < len(completedParts) {
+			completedParts[idx] = part
+		}
+	}
+	beforeCount := countCompletedParts(completedParts)
 	var wg sync.WaitGroup
 	var firstErr error
 	var failOnce sync.Once
@@ -524,6 +886,9 @@ func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string,
 			end = size - 1
 		}
 		partNum := int32(i + 1)
+		if existing := completedParts[i]; existing.PartNumber != nil && existing.ETag != nil {
+			continue
+		}
 
 		wg.Add(1)
 		go func(idx int, pNum int32, s, e int64) {
@@ -555,11 +920,34 @@ func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string,
 	wg.Wait()
 
 	if firstErr != nil {
-		abortCtx, abortCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer abortCancel()
-		_, _ = dstClient.AbortMultipartUpload(abortCtx, &s3.AbortMultipartUploadInput{
-			Bucket: aws.String(dstBucket), Key: aws.String(dstKey), UploadId: aws.String(uploadID),
-		})
+		if ckpt != nil {
+			afterCount := countCompletedParts(completedParts)
+			ckpt.LastRunToken = t.RunToken
+			ckpt.LastError = firstErr.Error()
+			if afterCount > ckpt.LastKnownUploadedParts {
+				ckpt.LastKnownUploadedParts = afterCount
+			}
+			if reusedCheckpoint {
+				if afterCount > beforeCount {
+					ckpt.ResumeFailStreak = 0
+				} else {
+					ckpt.ResumeFailStreak++
+				}
+			} else {
+				ckpt.ResumeFailStreak = 0
+			}
+			if ckpt.ResumeFailStreak >= resumeFailStreakLimit {
+				log.Printf("Abandoning multipart checkpoint for task %d/%d after %d no-progress resume failures", t.JobID, t.ID, ckpt.ResumeFailStreak)
+				if err := abandonMultipartCheckpoint(t, dstClient, dstBucket, dstKey, uploadID, "resume_fail_streak_exceeded"); err != nil {
+					log.Printf("Preserving multipart checkpoint for task %d/%d after abort failure on resume_fail_streak_exceeded: %v", t.JobID, t.ID, err)
+					if saveErr := saveMultipartCheckpoint(ckpt); saveErr != nil {
+						log.Printf("Failed to persist multipart checkpoint after abort failure for task %d/%d: %v", t.JobID, t.ID, saveErr)
+					}
+				}
+			} else if saveErr := saveMultipartCheckpoint(ckpt); saveErr != nil {
+				log.Printf("Failed to persist multipart checkpoint after transfer failure for task %d/%d: %v", t.JobID, t.ID, saveErr)
+			}
+		}
 		return firstErr
 	}
 
@@ -567,6 +955,12 @@ func transferFile(srcURL string, dstClient *s3.Client, dstBucket, dstKey string,
 		Bucket: aws.String(dstBucket), Key: aws.String(dstKey), UploadId: aws.String(uploadID),
 		MultipartUpload: &types.CompletedMultipartUpload{Parts: completedParts},
 	})
+	if err == nil {
+		log.Printf("Completed multipart upload for task %d/%d upload_id=%s completed_parts=%d", t.JobID, t.ID, uploadID, countCompletedParts(completedParts))
+		if clearErr := clearMultipartCheckpoint(t.JobID, t.ID); clearErr != nil {
+			log.Printf("Failed to clear multipart checkpoint after completion for task %d/%d: %v", t.JobID, t.ID, clearErr)
+		}
+	}
 	return err
 }
 

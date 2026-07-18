@@ -35,6 +35,8 @@ spec:
           value: "64"
         - name: TRANSFER_PART_CONCURRENCY
           value: "8"
+        - name: TRANSFER_RESUME_FAIL_STREAK_LIMIT
+          value: "2"
         ports:
         - containerPort: 9094
         volumeMounts:

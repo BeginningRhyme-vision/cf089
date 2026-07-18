@@ -2128,6 +2128,7 @@ func BatchUpdateTransfer(c *gin.Context) {
 
 	ctx := context.Background()
 	var keys []string
+	conflictCount := 0
 	for _, u := range updates {
 		keys = append(keys, fmt.Sprintf("tx:task:%d:%d", u.JobID, u.ID))
 	}
@@ -2154,6 +2155,12 @@ func BatchUpdateTransfer(c *gin.Context) {
 
 		var existing models.TransferTask
 		if err := json.Unmarshal([]byte(str), &existing); err != nil {
+			continue
+		}
+		if existing.RunToken != "" && u.RunToken != "" && existing.RunToken != u.RunToken {
+			conflictCount++
+			log.Printf("[BatchUpdateTransfer] ignored stale update for job=%d task=%d status=%s stale_run_token=%s current_run_token=%s",
+				u.JobID, u.ID, u.Status, u.RunToken, existing.RunToken)
 			continue
 		}
 
@@ -2210,6 +2217,10 @@ func BatchUpdateTransfer(c *gin.Context) {
 	_, err = pipe.Exec(ctx)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if conflictCount > 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "run_token_mismatch", "conflicts": conflictCount})
 		return
 	}
 
