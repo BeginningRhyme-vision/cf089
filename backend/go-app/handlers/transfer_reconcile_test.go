@@ -379,6 +379,86 @@ func TestTransferPoolInFlightRemovalKeepsOtherRunToken(t *testing.T) {
 	}
 }
 
+func TestRollbackClaimedTransferTaskRestoresPendingState(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+
+	oldRDB := database.RDB
+	database.RDB = client
+	defer func() {
+		_ = client.Close()
+		database.RDB = oldRDB
+	}()
+
+	ctx := context.Background()
+	original := models.TransferTask{
+		ID:       91,
+		JobID:    81,
+		Src:      "foo/bar/restore.bin",
+		Status:   "PENDING",
+		RunToken: "",
+		WorkerID: "",
+	}
+	claimed := original
+	claimed.Status = "RUNNING"
+	claimed.RunToken = "run-restore-1"
+	claimed.WorkerID = "worker-restore"
+
+	taskKey := fmt.Sprintf("tx:task:%d:%d", original.JobID, original.ID)
+	claimedJSON, err := json.Marshal(claimed)
+	if err != nil {
+		t.Fatalf("marshal claimed task: %v", err)
+	}
+	if err := client.Set(ctx, taskKey, claimedJSON, 0).Err(); err != nil {
+		t.Fatalf("seed claimed task: %v", err)
+	}
+	if err := client.SAdd(ctx, transferPoolInFlightKey(TransferPoolResume), transferPoolInFlightMember(claimed.JobID, claimed.ID, claimed.RunToken)).Err(); err != nil {
+		t.Fatalf("seed resume inflight: %v", err)
+	}
+	if err := client.ZAdd(ctx, transferClaimedRunningKey(), redis.Z{
+		Score:  1,
+		Member: transferClaimedRunningMember(claimed.JobID, claimed.ID, claimed.RunToken),
+	}).Err(); err != nil {
+		t.Fatalf("seed claimed running: %v", err)
+	}
+
+	if err := rollbackClaimedTransferTask(ctx, taskKey, original, claimed, true); err != nil {
+		t.Fatalf("rollback claim: %v", err)
+	}
+
+	raw, err := client.Get(ctx, taskKey).Result()
+	if err != nil {
+		t.Fatalf("load restored task: %v", err)
+	}
+	var restored models.TransferTask
+	if err := json.Unmarshal([]byte(raw), &restored); err != nil {
+		t.Fatalf("decode restored task: %v", err)
+	}
+	if restored.Status != "PENDING" {
+		t.Fatalf("expected restored status PENDING, got %s", restored.Status)
+	}
+	if restored.RunToken != "" {
+		t.Fatalf("expected restored run token to be empty, got %q", restored.RunToken)
+	}
+	if restored.WorkerID != "" {
+		t.Fatalf("expected restored worker id to be empty, got %q", restored.WorkerID)
+	}
+	if client.SIsMember(ctx, transferPoolInFlightKey(TransferPoolResume), transferPoolInFlightMember(claimed.JobID, claimed.ID, claimed.RunToken)).Val() {
+		t.Fatal("rollback should remove claimed inflight member")
+	}
+	if client.ZScore(ctx, transferClaimedRunningKey(), transferClaimedRunningMember(claimed.JobID, claimed.ID, claimed.RunToken)).Err() != redis.Nil {
+		t.Fatal("rollback should remove claimed running member")
+	}
+	hasCandidate, err := hasTransferResumeCandidate(ctx, original.JobID, original.ID)
+	if err != nil {
+		t.Fatalf("check restored resume candidate: %v", err)
+	}
+	if !hasCandidate {
+		t.Fatal("rollback should restore resume candidate for resume pool claims")
+	}
+}
+
 func TestCleanupTransferJobRuntimeStateRemovesRuntimeMarkers(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	mr := miniredis.RunT(t)

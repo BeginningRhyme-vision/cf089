@@ -334,6 +334,7 @@ func claimTransferTask(ctx context.Context, task models.TransferTask, workerID, 
 	if current.Status != "PENDING" {
 		return models.TransferTask{}, false, nil
 	}
+	original := current
 
 	now := time.Now().UTC()
 	current.Status = "RUNNING"
@@ -374,11 +375,33 @@ func claimTransferTask(ctx context.Context, task models.TransferTask, workerID, 
 		WHERE job_id = ?
 	`
 	if err := database.DB.Exec(query, current.JobID).Error; err != nil {
+		restoreResumeCandidate := normalizeTransferPoolType(poolType) == TransferPoolResume
+		if rollbackErr := rollbackClaimedTransferTask(ctx, taskKey, original, current, restoreResumeCandidate); rollbackErr != nil {
+			log.Printf("[TransferClaim] failed to rollback claim for job=%d task=%d run_token=%s after db error: %v",
+				current.JobID, current.ID, current.RunToken, rollbackErr)
+		}
 		return models.TransferTask{}, false, err
 	}
 
 	log.Printf("[TransferClaim] job=%d task=%d worker=%s pool=%s run_token=%s", current.JobID, current.ID, workerID, normalizeTransferPoolType(poolType), current.RunToken)
 	return current, true, nil
+}
+
+func rollbackClaimedTransferTask(ctx context.Context, taskKey string, original, claimed models.TransferTask, restoreResumeCandidate bool) error {
+	data, err := json.Marshal(original)
+	if err != nil {
+		return err
+	}
+
+	pipe := database.RDB.Pipeline()
+	pipe.Set(ctx, taskKey, data, 0)
+	removeTransferTaskFromAllPoolInFlight(pipe, ctx, claimed.JobID, claimed.ID, claimed.RunToken)
+	pipe.ZRem(ctx, transferClaimedRunningKey(), transferClaimedRunningMember(claimed.JobID, claimed.ID, claimed.RunToken))
+	if restoreResumeCandidate {
+		setTransferResumeCandidate(pipe, ctx, original.JobID, original.ID)
+	}
+	_, err = pipe.Exec(ctx)
+	return err
 }
 
 func touchTransferRunningLastSeen(pipe redis.Pipeliner, ctx context.Context, task models.TransferTask) {

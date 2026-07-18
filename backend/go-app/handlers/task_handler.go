@@ -2159,6 +2159,7 @@ func AcquireTransferTasks(c *gin.Context) {
 				claimed, ok, err := claimTransferTask(ctx, t, req.WorkerID, poolType)
 				if err != nil {
 					log.Printf("[AcquireTransferTasks] failed to claim task %d/%d for worker %s: %v", t.JobID, t.ID, req.WorkerID, err)
+					deferred = append(deferred, t)
 					continue
 				}
 				if !ok {
