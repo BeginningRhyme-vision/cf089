@@ -1826,24 +1826,43 @@ func triggerTxRefill(jobID int64) {
 	}
 }
 
-func recoverDeferredTransferTask(ctx context.Context, jobID int64, ch chan models.TransferTask, task models.TransferTask) {
-	select {
-	case ch <- task:
+func recoverDeferredTransferTasks(ctx context.Context, jobID int64, tasks []models.TransferTask) {
+	if len(tasks) == 0 {
 		return
-	default:
 	}
 
-	// If the local buffer was refilled concurrently, fall back to offset rewind so
-	// the pending task can be rediscovered by a future refill instead of vanishing.
+	rewindTo := int64(0)
+	minTaskID := tasks[0].ID
+	maxTaskID := tasks[0].ID
+	for _, task := range tasks[1:] {
+		if task.ID < minTaskID {
+			minTaskID = task.ID
+		}
+		if task.ID > maxTaskID {
+			maxTaskID = task.ID
+		}
+	}
+
+	if isJobSharded(ctx, jobID) && minTaskID > 1 {
+		rewindTo = minTaskID - 1
+	}
+
 	offsetKey := fmt.Sprintf("tx:job:%d:offset", jobID)
-	if err := database.RDB.Set(ctx, offsetKey, 0, 0).Err(); err != nil {
-		log.Printf("[AcquireTransferTasks] failed to rewind offset for deferred task %d/%d after requeue contention: %v",
-			task.JobID, task.ID, err)
+	if currentOffset, err := database.RDB.Get(ctx, offsetKey).Int64(); err == nil && currentOffset >= 0 && currentOffset < rewindTo {
+		rewindTo = currentOffset
+	}
+
+	// If the local buffer was refilled concurrently, rewind once to the earliest
+	// contended task so the pending slice can be rediscovered without repeatedly
+	// restarting from the beginning of the job.
+	if err := database.RDB.Set(ctx, offsetKey, rewindTo, 0).Err(); err != nil {
+		log.Printf("[AcquireTransferTasks] failed to rewind offset for deferred tasks job=%d count=%d range=%d-%d after requeue contention: %v",
+			jobID, len(tasks), minTaskID, maxTaskID, err)
 		return
 	}
 	triggerTxRefill(jobID)
-	log.Printf("[AcquireTransferTasks] rewound offset for deferred task %d/%d because buffer requeue was contended",
-		task.JobID, task.ID)
+	log.Printf("[AcquireTransferTasks] rewound offset for deferred tasks job=%d count=%d range=%d-%d to=%d because buffer requeue was contended",
+		jobID, len(tasks), minTaskID, maxTaskID, rewindTo)
 }
 func fillTxJobBuffer(jobID int64) {
 	ctx := context.Background()
@@ -2181,13 +2200,15 @@ func AcquireTransferTasks(c *gin.Context) {
 			}
 		}
 
+		var contendedDeferred []models.TransferTask
 		for _, deferredTask := range deferred {
 			select {
 			case ch <- deferredTask:
 			default:
-				recoverDeferredTransferTask(ctx, jid, ch, deferredTask)
+				contendedDeferred = append(contendedDeferred, deferredTask)
 			}
 		}
+		recoverDeferredTransferTasks(ctx, jid, contendedDeferred)
 	}
 	c.JSON(http.StatusOK, tasks)
 }

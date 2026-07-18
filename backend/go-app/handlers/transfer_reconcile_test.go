@@ -536,7 +536,7 @@ func TestCleanupTransferJobRuntimeStateRemovesRuntimeMarkers(t *testing.T) {
 	}
 }
 
-func TestRecoverDeferredTransferTaskRewindsOffsetWhenBufferIsContended(t *testing.T) {
+func TestRecoverDeferredTransferTasksRewindsOffsetToEarliestContendedTask(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	mr := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
@@ -555,17 +555,26 @@ func TestRecoverDeferredTransferTaskRewindsOffsetWhenBufferIsContended(t *testin
 		t.Fatalf("seed offset: %v", err)
 	}
 
-	ch := make(chan models.TransferTask, 1)
-	ch <- models.TransferTask{ID: 1, JobID: jobID}
+	bucketKey := getTaskBucketKey(jobID, 1)
+	if err := client.ZAdd(ctx, bucketKey,
+		redis.Z{Score: 321, Member: "321"},
+		redis.Z{Score: 322, Member: "322"},
+	).Err(); err != nil {
+		t.Fatalf("seed sharded bucket: %v", err)
+	}
 
-	recoverDeferredTransferTask(ctx, jobID, ch, models.TransferTask{ID: 2, JobID: jobID})
+	recoverDeferredTransferTasks(ctx, jobID, []models.TransferTask{
+		{ID: 330, JobID: jobID},
+		{ID: 322, JobID: jobID},
+		{ID: 400, JobID: jobID},
+	})
 
 	offset, err := client.Get(ctx, offsetKey).Result()
 	if err != nil {
 		t.Fatalf("load rewound offset: %v", err)
 	}
-	if offset != "0" {
-		t.Fatalf("expected offset rewind to 0, got %s", offset)
+	if offset != "321" {
+		t.Fatalf("expected offset rewind to earliest contended task, got %s", offset)
 	}
 }
 
