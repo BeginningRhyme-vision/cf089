@@ -1332,6 +1332,84 @@ func TestBatchUpdateTransferRejectsRunTokenMismatch(t *testing.T) {
 	}
 }
 
+func TestBatchUpdateTransferSchedulesAutoRetryForFailedUpdate(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+
+	oldRDB := database.RDB
+	database.RDB = client
+	defer func() {
+		_ = client.Close()
+		database.RDB = oldRDB
+	}()
+
+	t.Setenv("TRANSFER_AUTO_RETRY_FAILED_ENABLED", "true")
+	t.Setenv("TRANSFER_AUTO_RETRY_FAILED_COOLDOWN_SECONDS", "15")
+
+	ctx := context.Background()
+	task := models.TransferTask{
+		ID:           42,
+		JobID:        18,
+		Src:          "foo/bar/f.mp4",
+		RunToken:     "run-failed-token",
+		Status:       "FAILED",
+		WorkerID:     "worker-live",
+		ErrorMessage: "old error",
+	}
+	seedTransferTaskForHandlerTest(t, ctx, client, task)
+
+	pipe := client.Pipeline()
+	setTransferResumeCandidate(pipe, ctx, task.JobID, task.ID)
+	pipe.SAdd(ctx, transferPoolInFlightKey(TransferPoolResume), transferPoolInFlightMember(task.JobID, task.ID, task.RunToken))
+	pipe.ZAdd(ctx, transferRunningLastSeenKey(), redis.Z{
+		Score:  float64(time.Now().Unix()),
+		Member: transferRunningLastSeenMember(task.JobID, task.ID, task.RunToken),
+	})
+	if _, err := pipe.Exec(ctx); err != nil {
+		t.Fatalf("seed transfer runtime markers: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/transfer-tasks/update", mustJSONBody(t, []map[string]interface{}{
+		{
+			"id":            task.ID,
+			"job_id":        task.JobID,
+			"status":        "FAILED",
+			"run_token":     task.RunToken,
+			"error_message": `transfer service status 502: {"error":{"code":"NetworkConnectionLost"}}`,
+		},
+	}))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(rec)
+	c.Request = req
+
+	BatchUpdateTransfer(c)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("unexpected status: %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	scheduled, err := isTransferAutoRetryScheduled(ctx, task.JobID, task.ID)
+	if err != nil {
+		t.Fatalf("check auto retry scheduled: %v", err)
+	}
+	if !scheduled {
+		t.Fatal("expected failed transfer update to schedule auto retry")
+	}
+	if client.ZScore(ctx, transferAutoRetryDueKey(), transferAutoRetryMember(task.JobID, task.ID)).Err() != nil {
+		t.Fatal("expected failed transfer update to add due queue member")
+	}
+	if client.ZScore(ctx, transferResumeCandidateIndexKey(), transferResumeCandidateMember(task.JobID, task.ID)).Err() != redis.Nil {
+		t.Fatal("expected failed transfer update to clear resume candidate")
+	}
+	if client.SIsMember(ctx, transferPoolInFlightKey(TransferPoolResume), transferPoolInFlightMember(task.JobID, task.ID, task.RunToken)).Val() {
+		t.Fatal("expected failed transfer update to clear resume inflight member")
+	}
+	if client.ZScore(ctx, transferRunningLastSeenKey(), transferRunningLastSeenMember(task.JobID, task.ID, task.RunToken)).Err() != redis.Nil {
+		t.Fatal("expected failed transfer update to clear running last seen member")
+	}
+}
+
 func TestRecordTransferTaskCompensationStoresRunTokenKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	mr := miniredis.RunT(t)

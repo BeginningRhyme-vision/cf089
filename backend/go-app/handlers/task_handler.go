@@ -2351,8 +2351,12 @@ func BatchUpdateTransfer(c *gin.Context) {
 		if newStatus == "COMPLETED" || newStatus == "FAILED" {
 			clearTransferResumeCandidate(pipe, ctx, existing.JobID, existing.ID)
 			removeTransferTaskFromAllPoolInFlight(pipe, ctx, existing.JobID, existing.ID, existing.RunToken)
+			clearTransferAutoRetrySchedule(pipe, ctx, existing.JobID, existing.ID)
 			if newStatus == "COMPLETED" {
 				pipe.Del(ctx, transferMultipartCheckpointKey(existing.JobID, existing.ID))
+			}
+			if newStatus == "FAILED" {
+				scheduleTransferAutoRetryAfterFailure(pipe, ctx, existing)
 			}
 			if existing.RunToken != "" {
 				pipe.ZRem(ctx, transferClaimedRunningKey(), transferClaimedRunningMember(existing.JobID, existing.ID, existing.RunToken))
