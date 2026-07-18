@@ -587,10 +587,11 @@ func saveMultipartCheckpoint(ckpt *multipartCheckpoint) error {
 	return nil
 }
 
-func clearMultipartCheckpoint(jobID, taskID int64) error {
-	payload := map[string]int64{
-		"job_id":  jobID,
-		"task_id": taskID,
+func clearMultipartCheckpoint(t TransferTask) error {
+	payload := map[string]any{
+		"job_id":    t.JobID,
+		"task_id":   t.ID,
+		"run_token": t.RunToken,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {
@@ -913,7 +914,7 @@ func transferFile(t TransferTask, srcURL string, dstClient *s3.Client, dstBucket
 			}
 		case isMultipartUploadNotFound(listErr):
 			log.Printf("Multipart checkpoint upload missing for task %d/%d, clearing stale upload_id=%s", t.JobID, t.ID, ckpt.UploadID)
-			if clearErr := clearMultipartCheckpoint(t.JobID, t.ID); clearErr != nil {
+			if clearErr := clearMultipartCheckpoint(t); clearErr != nil {
 				log.Printf("Failed to clear stale multipart checkpoint for task %d/%d: %v", t.JobID, t.ID, clearErr)
 			}
 			ckpt = nil
@@ -1063,7 +1064,7 @@ func transferFile(t TransferTask, srcURL string, dstClient *s3.Client, dstBucket
 	})
 	if err == nil {
 		log.Printf("Completed multipart upload for task %d/%d upload_id=%s completed_parts=%d", t.JobID, t.ID, uploadID, countCompletedParts(completedParts))
-		if clearErr := clearMultipartCheckpoint(t.JobID, t.ID); clearErr != nil {
+		if clearErr := clearMultipartCheckpoint(t); clearErr != nil {
 			log.Printf("Failed to clear multipart checkpoint after completion for task %d/%d: %v", t.JobID, t.ID, clearErr)
 		}
 	}

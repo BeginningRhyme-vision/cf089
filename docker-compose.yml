@@ -41,6 +41,7 @@ services:
       context: ./backend/go-app
     environment:
       - TRANSFER_MULTIPART_CHECKPOINT_TTL_HOURS=72
+      - TRANSFER_RESUME_RESERVED_WORKERS=0
     ports:
       - "8080:8080"
     volumes:

@@ -28,6 +28,8 @@ spec:
         env:
         - name: TRANSFER_MULTIPART_CHECKPOINT_TTL_HOURS
           value: "72"
+        - name: TRANSFER_RESUME_RESERVED_WORKERS
+          value: "0"
         ports:
         - containerPort: 8080
         volumeMounts:

@@ -245,11 +245,21 @@ func cleanupTransferCompletionPending(ctx context.Context, member string, jobID,
 }
 
 func cleanupTransferClaimedRunning(ctx context.Context, member string) {
-	database.RDB.ZRem(ctx, transferClaimedRunningKey(), member)
+	pipe := database.RDB.Pipeline()
+	pipe.ZRem(ctx, transferClaimedRunningKey(), member)
+	if jobID, taskID, runToken, err := parseTransferRuntimeMember(member); err == nil {
+		removeTransferTaskFromAllPoolInFlight(pipe, ctx, jobID, taskID, runToken)
+	}
+	_, _ = pipe.Exec(ctx)
 }
 
 func cleanupTransferRunningLastSeen(ctx context.Context, member string) {
-	database.RDB.ZRem(ctx, transferRunningLastSeenKey(), member)
+	pipe := database.RDB.Pipeline()
+	pipe.ZRem(ctx, transferRunningLastSeenKey(), member)
+	if jobID, taskID, runToken, err := parseTransferRuntimeMember(member); err == nil {
+		removeTransferTaskFromAllPoolInFlight(pipe, ctx, jobID, taskID, runToken)
+	}
+	_, _ = pipe.Exec(ctx)
 }
 
 func transferCompletionEvidenceExists(ctx context.Context, job models.TransferJob, detail transferTaskCompensationDetail) (bool, error) {
@@ -371,6 +381,8 @@ func applyTransferTaskTerminalUpdate(ctx context.Context, task models.TransferTa
 
 	pipe := database.RDB.Pipeline()
 	pipe.Set(ctx, fmt.Sprintf("tx:task:%d:%d", task.JobID, task.ID), data, 0)
+	clearTransferResumeCandidate(pipe, ctx, task.JobID, task.ID)
+	removeTransferTaskFromAllPoolInFlight(pipe, ctx, task.JobID, task.ID, task.RunToken)
 	if terminalStatus == "COMPLETED" {
 		pipe.Del(ctx, transferMultipartCheckpointKey(task.JobID, task.ID))
 	}

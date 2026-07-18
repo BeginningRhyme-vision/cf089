@@ -225,12 +225,17 @@ func ListPendingTransferJobs(c *gin.Context) {
 
 func RetryTransferTasksLogic(jobID int, initialStatus models.JobStatus) {
 	ctx := context.Background()
+	var job models.TransferJob
+	if err := database.DB.Preload("Metadata").Where("job_id = ?", jobID).First(&job).Error; err != nil {
+		log.Printf("[RetryFailedTransferTasks] failed to load transfer job %d: %v", jobID, err)
+		return
+	}
 
 	// 探测任务模式
 	if isJobSharded(ctx, int64(jobID)) {
-		retryShardedTransferTasks(ctx, jobID, initialStatus) // 【新】分片重试
+		retryShardedTransferTasks(ctx, job, initialStatus) // 【新】分片重试
 	} else {
-		retryLegacyTransferTasks(jobID, initialStatus) // 【旧】原有逻辑
+		retryLegacyTransferTasks(job, initialStatus) // 【旧】原有逻辑
 	}
 }
 
@@ -255,7 +260,8 @@ func shouldRetryTransferTask(task models.TransferTask) bool {
 
 // 【旧逻辑】保持原样，专门处理旧任务
 // 【新逻辑】处理分片任务
-func retryShardedTransferTasks(ctx context.Context, jobID int, initialStatus models.JobStatus) {
+func retryShardedTransferTasks(ctx context.Context, job models.TransferJob, initialStatus models.JobStatus) {
+	jobID := int(job.JobID)
 	resetCount := 0
 	skippedCount := 0
 
@@ -318,9 +324,19 @@ func retryShardedTransferTasks(ctx context.Context, jobID int, initialStatus mod
 
 						data, _ := json.Marshal(task)
 						pipe.Set(ctx, batchKeys[k], data, 0)
+						checkpoint, loadErr := loadTransferMultipartCheckpointRecord(ctx, task.JobID, task.ID)
+						if loadErr != nil {
+							log.Printf("[RetryFailedTransferTasks] failed to load checkpoint for job=%d task=%d while refreshing resume candidate: %v", task.JobID, task.ID, loadErr)
+							clearTransferResumeCandidate(pipe, ctx, task.JobID, task.ID)
+						} else if transferTaskCanUseCheckpoint(job, task, checkpoint) {
+							setTransferResumeCandidate(pipe, ctx, task.JobID, task.ID)
+						} else {
+							clearTransferResumeCandidate(pipe, ctx, task.JobID, task.ID)
+						}
 						hasUpdates = true
 						resetCount++
 					} else if task.Status == "FAILED" {
+						clearTransferResumeCandidate(pipe, ctx, task.JobID, task.ID)
 						skippedCount++
 					}
 				}
@@ -346,8 +362,9 @@ func retryShardedTransferTasks(ctx context.Context, jobID int, initialStatus mod
 		log.Printf("[RetryFailedTransferTasks] job %d skipped %d SourceNotFound transfer tasks", jobID, skippedCount)
 	}
 }
-func retryLegacyTransferTasks(jobID int, initialStatus models.JobStatus) {
+func retryLegacyTransferTasks(job models.TransferJob, initialStatus models.JobStatus) {
 	ctx := context.Background()
+	jobID := int(job.JobID)
 	jobKey := fmt.Sprintf("tx:job:%d:tasks", jobID)
 
 	batchSize := 1000
@@ -393,9 +410,19 @@ func retryLegacyTransferTasks(jobID int, initialStatus models.JobStatus) {
 
 					data, _ := json.Marshal(task)
 					pipe.Set(ctx, keys[i], data, 0)
+					checkpoint, loadErr := loadTransferMultipartCheckpointRecord(ctx, task.JobID, task.ID)
+					if loadErr != nil {
+						log.Printf("[RetryFailedTransferTasks] failed to load checkpoint for job=%d task=%d while refreshing legacy resume candidate: %v", task.JobID, task.ID, loadErr)
+						clearTransferResumeCandidate(pipe, ctx, task.JobID, task.ID)
+					} else if transferTaskCanUseCheckpoint(job, task, checkpoint) {
+						setTransferResumeCandidate(pipe, ctx, task.JobID, task.ID)
+					} else {
+						clearTransferResumeCandidate(pipe, ctx, task.JobID, task.ID)
+					}
 					hasUpdates = true
 					resetCount++
 				} else if task.Status == "FAILED" {
+					clearTransferResumeCandidate(pipe, ctx, task.JobID, task.ID)
 					skippedCount++
 				}
 			}
@@ -827,6 +854,8 @@ func cleanupTransferJobRedis(ctx context.Context, job models.TransferJob) {
 
 	// 2.4 清理新格式的 Task 详情 Key
 
+	cleanupTransferJobRuntimeState(ctx, pipe, int64(jobID), taskIDs)
+
 	_, err := pipe.Exec(ctx)
 	if err != nil {
 		fmt.Printf("Error cleaning up redis for job %d: %v\n", jobID, err)
@@ -834,6 +863,72 @@ func cleanupTransferJobRedis(ctx context.Context, job models.TransferJob) {
 
 	// 3. 标记数据库
 	database.DB.Model(&models.TransferJob{}).Where("job_id = ?", jobID).Update("redis_cleaned", true)
+}
+
+func cleanupTransferJobRuntimeState(ctx context.Context, pipe redis.Pipeliner, jobID int64, taskIDs []int64) {
+	if pipe == nil || jobID <= 0 || len(taskIDs) == 0 {
+		return
+	}
+
+	taskIDSet := make(map[int64]struct{}, len(taskIDs))
+	for _, taskID := range taskIDs {
+		taskIDSet[taskID] = struct{}{}
+		clearTransferResumeCandidate(pipe, ctx, jobID, taskID)
+		removeTransferTaskFromAllPoolInFlight(pipe, ctx, jobID, taskID, "")
+	}
+
+	cleanupRuntimeZSetMembers := func(key string, parser func(string) (int64, int64, string, error), extra func(int64, int64, string)) {
+		members, err := database.RDB.ZRange(ctx, key, 0, -1).Result()
+		if err != nil {
+			log.Printf("[TransferJobCleanup] failed to scan runtime zset %s for job=%d: %v", key, jobID, err)
+			return
+		}
+		for _, member := range members {
+			memberJobID, taskID, runToken, err := parser(member)
+			if err != nil {
+				continue
+			}
+			if memberJobID != jobID {
+				continue
+			}
+			if _, ok := taskIDSet[taskID]; !ok {
+				continue
+			}
+			pipe.ZRem(ctx, key, member)
+			if extra != nil {
+				extra(memberJobID, taskID, runToken)
+			}
+		}
+	}
+
+	cleanupRuntimeSetMembers := func(key string) {
+		members, err := database.RDB.SMembers(ctx, key).Result()
+		if err != nil {
+			log.Printf("[TransferJobCleanup] failed to scan runtime set %s for job=%d: %v", key, jobID, err)
+			return
+		}
+		for _, member := range members {
+			memberJobID, taskID, _, err := parseTransferPoolInFlightMember(member)
+			if err != nil {
+				continue
+			}
+			if memberJobID != jobID {
+				continue
+			}
+			if _, ok := taskIDSet[taskID]; !ok {
+				continue
+			}
+			pipe.SRem(ctx, key, member)
+		}
+	}
+
+	cleanupRuntimeZSetMembers(transferClaimedRunningKey(), parseTransferRuntimeMember, nil)
+	cleanupRuntimeZSetMembers(transferRunningLastSeenKey(), parseTransferRuntimeMember, nil)
+	cleanupRuntimeZSetMembers(transferCompletionPendingKey(), parseTransferCompletionPendingMember, func(memberJobID, taskID int64, runToken string) {
+		pipe.Del(ctx, transferCompletionCompensationKey(memberJobID, taskID, runToken))
+	})
+	cleanupRuntimeSetMembers(transferPoolInFlightKey(TransferPoolDefault))
+	cleanupRuntimeSetMembers(transferPoolInFlightKey(TransferPoolResume))
 }
 
 // StartPeriodicCleanup starts a background goroutine to clean up Redis keys for completed jobs

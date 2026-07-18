@@ -1825,6 +1825,26 @@ func triggerTxRefill(jobID int64) {
 		}(jobID)
 	}
 }
+
+func recoverDeferredTransferTask(ctx context.Context, jobID int64, ch chan models.TransferTask, task models.TransferTask) {
+	select {
+	case ch <- task:
+		return
+	default:
+	}
+
+	// If the local buffer was refilled concurrently, fall back to offset rewind so
+	// the pending task can be rediscovered by a future refill instead of vanishing.
+	offsetKey := fmt.Sprintf("tx:job:%d:offset", jobID)
+	if err := database.RDB.Set(ctx, offsetKey, 0, 0).Err(); err != nil {
+		log.Printf("[AcquireTransferTasks] failed to rewind offset for deferred task %d/%d after requeue contention: %v",
+			task.JobID, task.ID, err)
+		return
+	}
+	triggerTxRefill(jobID)
+	log.Printf("[AcquireTransferTasks] rewound offset for deferred task %d/%d because buffer requeue was contended",
+		task.JobID, task.ID)
+}
 func fillTxJobBuffer(jobID int64) {
 	ctx := context.Background()
 	// 统一使用旧 Key 格式做锁（兼容性好）
@@ -2059,6 +2079,28 @@ func AcquireTransferTasks(c *gin.Context) {
 
 	tasks := []models.TransferTask{}
 	ctx := context.Background()
+	maxWorkers := getTransferMaxWorkers()
+	reservedWorkers := getTransferResumeReservedWorkers(maxWorkers)
+
+	defaultInFlight, err := countTransferPoolInFlight(ctx, TransferPoolDefault)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "count default inflight: " + err.Error()})
+		return
+	}
+	resumeInFlight, err := countTransferPoolInFlight(ctx, TransferPoolResume)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "count resume inflight: " + err.Error()})
+		return
+	}
+	pendingResumeCount, err := countPendingTransferResumeCandidates(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "count pending resume backlog: " + err.Error()})
+		return
+	}
+	defaultCap := computeTransferDefaultCap(maxWorkers, reservedWorkers, pendingResumeCount)
+
+	log.Printf("[AcquireTransferTasks] worker=%s limit=%d max_workers=%d reserved=%d pending_resume=%d default_inflight=%d resume_inflight=%d default_cap=%d",
+		req.WorkerID, req.Limit, maxWorkers, reservedWorkers, pendingResumeCount, defaultInFlight, resumeInFlight, defaultCap)
 
 	bufferMutex.RLock()
 	var jobIDs []int64
@@ -2094,11 +2136,27 @@ func AcquireTransferTasks(c *gin.Context) {
 			triggerTxRefill(jid)
 		}
 
+		var deferred []models.TransferTask
 	loop:
 		for len(tasks) < req.Limit {
 			select {
 			case t := <-ch:
-				claimed, ok, err := claimTransferTask(ctx, t, req.WorkerID)
+				poolType, clearedResumeCandidate, err := classifyTransferTaskPool(ctx, t)
+				if err != nil {
+					log.Printf("[AcquireTransferTasks] failed to classify task %d/%d for worker %s: %v", t.JobID, t.ID, req.WorkerID, err)
+					deferred = append(deferred, t)
+					continue
+				}
+				if clearedResumeCandidate && pendingResumeCount > 0 {
+					pendingResumeCount--
+					defaultCap = computeTransferDefaultCap(maxWorkers, reservedWorkers, pendingResumeCount)
+				}
+				if !canClaimTransferTask(poolType, maxWorkers, defaultInFlight, resumeInFlight, pendingResumeCount, reservedWorkers) {
+					deferred = append(deferred, t)
+					continue
+				}
+
+				claimed, ok, err := claimTransferTask(ctx, t, req.WorkerID, poolType)
 				if err != nil {
 					log.Printf("[AcquireTransferTasks] failed to claim task %d/%d for worker %s: %v", t.JobID, t.ID, req.WorkerID, err)
 					continue
@@ -2107,12 +2165,85 @@ func AcquireTransferTasks(c *gin.Context) {
 					continue
 				}
 				tasks = append(tasks, claimed)
+				switch poolType {
+				case TransferPoolResume:
+					resumeInFlight++
+					if pendingResumeCount > 0 {
+						pendingResumeCount--
+					}
+				default:
+					defaultInFlight++
+				}
+				defaultCap = computeTransferDefaultCap(maxWorkers, reservedWorkers, pendingResumeCount)
 			default:
 				break loop
 			}
 		}
+
+		for _, deferredTask := range deferred {
+			select {
+			case ch <- deferredTask:
+			default:
+				recoverDeferredTransferTask(ctx, jid, ch, deferredTask)
+			}
+		}
 	}
 	c.JSON(http.StatusOK, tasks)
+}
+
+func classifyTransferTaskPool(ctx context.Context, task models.TransferTask) (string, bool, error) {
+	isResumeCandidate, err := hasTransferResumeCandidate(ctx, task.JobID, task.ID)
+	if err != nil {
+		return "", false, err
+	}
+	if !isResumeCandidate {
+		return TransferPoolDefault, false, nil
+	}
+
+	var job models.TransferJob
+	if err := database.DB.Preload("Metadata").Where("job_id = ?", task.JobID).First(&job).Error; err != nil {
+		return "", false, err
+	}
+	checkpoint, err := loadTransferMultipartCheckpointRecord(ctx, task.JobID, task.ID)
+	if err != nil {
+		return "", false, err
+	}
+	if transferTaskCanUseCheckpoint(job, task, checkpoint) {
+		return TransferPoolResume, false, nil
+	}
+
+	pipe := database.RDB.Pipeline()
+	clearTransferResumeCandidate(pipe, ctx, task.JobID, task.ID)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return "", false, err
+	}
+	log.Printf("[AcquireTransferTasks] fallback task %d/%d from resume to default because checkpoint is no longer reusable", task.JobID, task.ID)
+	return TransferPoolDefault, true, nil
+}
+
+func computeTransferDefaultCap(maxWorkers, reservedWorkers, pendingResumeCount int) int {
+	if maxWorkers <= 0 {
+		return 0
+	}
+	if pendingResumeCount <= 0 {
+		return maxWorkers
+	}
+	defaultCap := maxWorkers - reservedWorkers
+	if defaultCap < 0 {
+		return 0
+	}
+	return defaultCap
+}
+
+func canClaimTransferTask(poolType string, maxWorkers, defaultInFlight, resumeInFlight, pendingResumeCount, reservedWorkers int) bool {
+	totalInFlight := defaultInFlight + resumeInFlight
+	if totalInFlight >= maxWorkers {
+		return false
+	}
+	if normalizeTransferPoolType(poolType) == TransferPoolResume {
+		return true
+	}
+	return defaultInFlight < computeTransferDefaultCap(maxWorkers, reservedWorkers, pendingResumeCount)
 }
 func BatchUpdateTransfer(c *gin.Context) {
 	var updates []models.TransferTask
@@ -2196,6 +2327,11 @@ func BatchUpdateTransfer(c *gin.Context) {
 		pipe.Set(ctx, taskKey, data, 0)
 
 		if newStatus == "COMPLETED" || newStatus == "FAILED" {
+			clearTransferResumeCandidate(pipe, ctx, existing.JobID, existing.ID)
+			removeTransferTaskFromAllPoolInFlight(pipe, ctx, existing.JobID, existing.ID, existing.RunToken)
+			if newStatus == "COMPLETED" {
+				pipe.Del(ctx, transferMultipartCheckpointKey(existing.JobID, existing.ID))
+			}
 			if existing.RunToken != "" {
 				pipe.ZRem(ctx, transferClaimedRunningKey(), transferClaimedRunningMember(existing.JobID, existing.ID, existing.RunToken))
 				pipe.ZRem(ctx, transferRunningLastSeenKey(), transferRunningLastSeenMember(existing.JobID, existing.ID, existing.RunToken))

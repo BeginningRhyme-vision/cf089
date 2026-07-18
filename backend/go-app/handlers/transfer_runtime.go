@@ -26,6 +26,12 @@ const (
 	TransferHeartbeatInterval             = 30 * time.Second
 	TransferActiveTouchInterval           = 5 * time.Second
 	DefaultTransferMultipartCheckpointTTL = 72 * time.Hour
+	DefaultTransferMaxWorkers             = 64
+	DefaultTransferResumeReservedWorkers  = 0
+	DefaultTransferMultipartThresholdMB   = 8
+	DefaultTransferMinPartSizeMB          = 5
+	TransferPoolDefault                   = "default"
+	TransferPoolResume                    = "resume"
 )
 
 func transferClaimedRunningKey() string {
@@ -44,12 +50,243 @@ func transferMultipartCheckpointKey(jobID, taskID int64) string {
 	return fmt.Sprintf("tx:mpu:ckpt:%d:%d", jobID, taskID)
 }
 
+func transferResumeCandidateKey(jobID, taskID int64) string {
+	return fmt.Sprintf("tx:resume:candidate:%d:%d", jobID, taskID)
+}
+
+func transferResumeCandidateIndexKey() string {
+	return "tx:resume:candidates"
+}
+
 func transferClaimedRunningMember(jobID, taskID int64, runToken string) string {
 	return fmt.Sprintf("%d:%d:%s", jobID, taskID, runToken)
 }
 
 func transferRunningLastSeenMember(jobID, taskID int64, runToken string) string {
 	return fmt.Sprintf("%d:%d:%s", jobID, taskID, runToken)
+}
+
+func transferResumeCandidateMember(jobID, taskID int64) string {
+	return fmt.Sprintf("%d:%d", jobID, taskID)
+}
+
+func transferPoolInFlightKey(poolType string) string {
+	switch normalizeTransferPoolType(poolType) {
+	case TransferPoolResume:
+		return "tx:pool:resume:inflight"
+	default:
+		return "tx:pool:default:inflight"
+	}
+}
+
+func transferLegacyPoolInFlightMember(jobID, taskID int64) string {
+	return fmt.Sprintf("%d:%d", jobID, taskID)
+}
+
+func transferPoolInFlightMember(jobID, taskID int64, runToken string) string {
+	runToken = strings.TrimSpace(runToken)
+	if runToken == "" {
+		return transferLegacyPoolInFlightMember(jobID, taskID)
+	}
+	return fmt.Sprintf("%d:%d:%s", jobID, taskID, runToken)
+}
+
+func parseTransferPoolInFlightMember(member string) (int64, int64, string, error) {
+	parts := strings.SplitN(member, ":", 3)
+	if len(parts) != 2 && len(parts) != 3 {
+		return 0, 0, "", fmt.Errorf("invalid transfer inflight member %q", member)
+	}
+	var jobID, taskID int64
+	if _, err := fmt.Sscanf(parts[0], "%d", &jobID); err != nil {
+		return 0, 0, "", fmt.Errorf("parse job id from %q: %w", member, err)
+	}
+	if _, err := fmt.Sscanf(parts[1], "%d", &taskID); err != nil {
+		return 0, 0, "", fmt.Errorf("parse task id from %q: %w", member, err)
+	}
+	runToken := ""
+	if len(parts) == 3 {
+		runToken = parts[2]
+	}
+	return jobID, taskID, runToken, nil
+}
+
+func normalizeTransferPoolType(poolType string) string {
+	if strings.EqualFold(strings.TrimSpace(poolType), TransferPoolResume) {
+		return TransferPoolResume
+	}
+	return TransferPoolDefault
+}
+
+func getTransferEnvInt(name string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return value
+}
+
+func getTransferMaxWorkers() int {
+	value := getTransferEnvInt("TRANSFER_MAX_WORKERS", DefaultTransferMaxWorkers)
+	if value <= 0 {
+		return DefaultTransferMaxWorkers
+	}
+	return value
+}
+
+func getTransferResumeReservedWorkers(maxWorkers int) int {
+	value := getTransferEnvInt("TRANSFER_RESUME_RESERVED_WORKERS", DefaultTransferResumeReservedWorkers)
+	if value < 0 {
+		return 0
+	}
+	if maxWorkers > 0 && value > maxWorkers {
+		return maxWorkers
+	}
+	return value
+}
+
+func setTransferResumeCandidate(pipe redis.Pipeliner, ctx context.Context, jobID, taskID int64) {
+	if pipe == nil || jobID <= 0 || taskID <= 0 {
+		return
+	}
+	ttl := transferMultipartCheckpointTTL()
+	expiresAt := time.Now().Add(ttl).Unix()
+	pipe.Set(ctx, transferResumeCandidateKey(jobID, taskID), "1", ttl)
+	pipe.ZAdd(ctx, transferResumeCandidateIndexKey(), redis.Z{
+		Score:  float64(expiresAt),
+		Member: transferResumeCandidateMember(jobID, taskID),
+	})
+}
+
+func clearTransferResumeCandidate(pipe redis.Pipeliner, ctx context.Context, jobID, taskID int64) {
+	if pipe == nil || jobID <= 0 || taskID <= 0 {
+		return
+	}
+	pipe.Del(ctx, transferResumeCandidateKey(jobID, taskID))
+	pipe.ZRem(ctx, transferResumeCandidateIndexKey(), transferResumeCandidateMember(jobID, taskID))
+}
+
+func hasTransferResumeCandidate(ctx context.Context, jobID, taskID int64) (bool, error) {
+	count, err := database.RDB.Exists(ctx, transferResumeCandidateKey(jobID, taskID)).Result()
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
+func countPendingTransferResumeCandidates(ctx context.Context) (int, error) {
+	count, err := database.RDB.ZCount(ctx, transferResumeCandidateIndexKey(), fmt.Sprintf("%d", time.Now().Unix()), "+inf").Result()
+	if err != nil {
+		return 0, err
+	}
+	return int(count), nil
+}
+
+func addTransferPoolInFlight(pipe redis.Pipeliner, ctx context.Context, poolType string, jobID, taskID int64, runToken string) {
+	if pipe == nil || jobID <= 0 || taskID <= 0 {
+		return
+	}
+	pipe.SAdd(ctx, transferPoolInFlightKey(poolType), transferPoolInFlightMember(jobID, taskID, runToken))
+}
+
+func removeTransferPoolInFlight(pipe redis.Pipeliner, ctx context.Context, poolType string, jobID, taskID int64, runToken string) {
+	if pipe == nil || jobID <= 0 || taskID <= 0 {
+		return
+	}
+	members := []interface{}{transferLegacyPoolInFlightMember(jobID, taskID)}
+	if strings.TrimSpace(runToken) != "" {
+		members = append(members, transferPoolInFlightMember(jobID, taskID, runToken))
+	}
+	pipe.SRem(ctx, transferPoolInFlightKey(poolType), members...)
+}
+
+func removeTransferTaskFromAllPoolInFlight(pipe redis.Pipeliner, ctx context.Context, jobID, taskID int64, runToken string) {
+	removeTransferPoolInFlight(pipe, ctx, TransferPoolDefault, jobID, taskID, runToken)
+	removeTransferPoolInFlight(pipe, ctx, TransferPoolResume, jobID, taskID, runToken)
+}
+
+func countTransferPoolInFlight(ctx context.Context, poolType string) (int, error) {
+	count, err := database.RDB.SCard(ctx, transferPoolInFlightKey(poolType)).Result()
+	if err != nil {
+		return 0, err
+	}
+	return int(count), nil
+}
+
+func transferMultipartThresholdBytes() int64 {
+	return int64(getTransferEnvInt("TRANSFER_MULTIPART_THRESHOLD_MB", DefaultTransferMultipartThresholdMB)) * 1024 * 1024
+}
+
+func transferMinPartSizeBytes() int64 {
+	return int64(getTransferEnvInt("TRANSFER_MIN_PART_SIZE_MB", DefaultTransferMinPartSizeMB)) * 1024 * 1024
+}
+
+func calculateTransferPartSize(size int64) int64 {
+	partSize := size / 10000
+	minPartSize := transferMinPartSizeBytes()
+	if partSize < minPartSize {
+		partSize = minPartSize
+	}
+	return partSize
+}
+
+func transferTaskCanUseCheckpoint(job models.TransferJob, task models.TransferTask, checkpoint *transferMultipartCheckpoint) bool {
+	if checkpoint == nil || strings.TrimSpace(checkpoint.UploadID) == "" {
+		return false
+	}
+	if strings.TrimSpace(task.Src) == "" || task.Size <= 0 {
+		return false
+	}
+	if task.Size < transferMultipartThresholdBytes() {
+		return false
+	}
+	if checkpoint.Size != task.Size {
+		return false
+	}
+
+	expectedDstBucket := getBucketFromEndpoint(job.Metadata.Endpoint)
+	expectedDstKey := buildTransferDestinationKey(job.DstDir, job.SrcDir, task.Src)
+	expectedPartSize := calculateTransferPartSize(task.Size)
+	expectedNumParts := int((task.Size-1)/expectedPartSize) + 1
+
+	if checkpoint.DstBucket != expectedDstBucket || checkpoint.DstKey != expectedDstKey {
+		return false
+	}
+	if checkpoint.PartSize != expectedPartSize || checkpoint.NumParts != expectedNumParts {
+		return false
+	}
+	return true
+}
+
+func loadCurrentTransferTaskForCheckpoint(ctx context.Context, jobID, taskID int64) (models.TransferTask, error) {
+	current, _, err := getCurrentTransferTask(ctx, jobID, taskID)
+	if err != nil {
+		return models.TransferTask{}, err
+	}
+	return current, nil
+}
+
+func validateTransferCheckpointRunToken(ctx context.Context, jobID, taskID int64, checkpointRunToken string) error {
+	current, err := loadCurrentTransferTaskForCheckpoint(ctx, jobID, taskID)
+	if err != nil {
+		if err == redis.Nil {
+			return nil
+		}
+		return err
+	}
+	if current.Status != "RUNNING" || strings.TrimSpace(current.RunToken) == "" {
+		return nil
+	}
+	if strings.TrimSpace(checkpointRunToken) == "" {
+		return fmt.Errorf("run_token is required for running task checkpoint mutation")
+	}
+	if current.RunToken != checkpointRunToken {
+		return fmt.Errorf("run token mismatch")
+	}
+	return nil
 }
 
 func parseTransferRuntimeMember(member string) (int64, int64, string, error) {
@@ -86,7 +323,7 @@ func getCurrentTransferTask(ctx context.Context, jobID, taskID int64) (models.Tr
 	return task, taskKey, nil
 }
 
-func claimTransferTask(ctx context.Context, task models.TransferTask, workerID string) (models.TransferTask, bool, error) {
+func claimTransferTask(ctx context.Context, task models.TransferTask, workerID, poolType string) (models.TransferTask, bool, error) {
 	current, taskKey, err := getCurrentTransferTask(ctx, task.JobID, task.ID)
 	if err != nil {
 		if err == redis.Nil {
@@ -114,6 +351,8 @@ func claimTransferTask(ctx context.Context, task models.TransferTask, workerID s
 
 	pipe := database.RDB.Pipeline()
 	pipe.Set(ctx, taskKey, data, 0)
+	clearTransferResumeCandidate(pipe, ctx, current.JobID, current.ID)
+	addTransferPoolInFlight(pipe, ctx, poolType, current.JobID, current.ID, current.RunToken)
 	pipe.ZAdd(ctx, transferClaimedRunningKey(), redis.Z{
 		Score:  float64(now.Unix()),
 		Member: transferClaimedRunningMember(current.JobID, current.ID, current.RunToken),
@@ -138,6 +377,7 @@ func claimTransferTask(ctx context.Context, task models.TransferTask, workerID s
 		return models.TransferTask{}, false, err
 	}
 
+	log.Printf("[TransferClaim] job=%d task=%d worker=%s pool=%s run_token=%s", current.JobID, current.ID, workerID, normalizeTransferPoolType(poolType), current.RunToken)
 	return current, true, nil
 }
 
@@ -323,7 +563,11 @@ func loadTransferMultipartCheckpointRecord(ctx context.Context, jobID, taskID in
 }
 
 func clearTransferMultipartCheckpointRecord(ctx context.Context, jobID, taskID int64) error {
-	return database.RDB.Del(ctx, transferMultipartCheckpointKey(jobID, taskID)).Err()
+	pipe := database.RDB.Pipeline()
+	pipe.Del(ctx, transferMultipartCheckpointKey(jobID, taskID))
+	clearTransferResumeCandidate(pipe, ctx, jobID, taskID)
+	_, err := pipe.Exec(ctx)
+	return err
 }
 
 func LoadTransferMultipartCheckpoint(c *gin.Context) {
@@ -387,6 +631,14 @@ func SaveTransferMultipartCheckpoint(c *gin.Context) {
 	}
 
 	ctx := context.Background()
+	if err := validateTransferCheckpointRunToken(ctx, checkpoint.JobID, checkpoint.TaskID, checkpoint.LastRunToken); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "run token mismatch") {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 	if err := database.RDB.Set(ctx, transferMultipartCheckpointKey(checkpoint.JobID, checkpoint.TaskID), data, transferMultipartCheckpointTTL()).Err(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -397,8 +649,9 @@ func SaveTransferMultipartCheckpoint(c *gin.Context) {
 
 func ClearTransferMultipartCheckpoint(c *gin.Context) {
 	type clearRequest struct {
-		JobID  int64 `json:"job_id"`
-		TaskID int64 `json:"task_id"`
+		JobID    int64  `json:"job_id"`
+		TaskID   int64  `json:"task_id"`
+		RunToken string `json:"run_token"`
 	}
 
 	var req clearRequest
@@ -412,7 +665,18 @@ func ClearTransferMultipartCheckpoint(c *gin.Context) {
 	}
 
 	ctx := context.Background()
-	if err := clearTransferMultipartCheckpointRecord(ctx, req.JobID, req.TaskID); err != nil {
+	if err := validateTransferCheckpointRunToken(ctx, req.JobID, req.TaskID, req.RunToken); err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "run token mismatch") {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	pipe := database.RDB.Pipeline()
+	pipe.Del(ctx, transferMultipartCheckpointKey(req.JobID, req.TaskID))
+	clearTransferResumeCandidate(pipe, ctx, req.JobID, req.TaskID)
+	if _, err := pipe.Exec(ctx); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
