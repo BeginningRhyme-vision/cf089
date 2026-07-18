@@ -36,6 +36,10 @@ spec:
         - name: TRANSFER_PART_CONCURRENCY
           value: "8"
         - name: TRANSFER_RESUME_FAIL_STREAK_LIMIT
+          value: "5"
+        - name: TRANSFER_LIST_PARTS_TIMEOUT_SECONDS
+          value: "60"
+        - name: TRANSFER_LIST_PARTS_RETRY_COUNT
           value: "2"
         ports:
         - containerPort: 9094

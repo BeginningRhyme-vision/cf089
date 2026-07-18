@@ -96,6 +96,8 @@ var (
 	taskBufferSize        int
 	partConcurrency       int
 	resumeFailStreakLimit int
+	listPartsTimeout      time.Duration
+	listPartsRetryCount   int
 	multipartThreshold    int64
 	minPartSize           int64
 
@@ -132,7 +134,10 @@ const (
 	DefaultTransferMaxConns      = 384
 	DefaultTransferTimeoutSec    = 120
 	DefaultTransferTLSHandshake  = 10
-	DefaultResumeFailStreakLimit = 2
+	DefaultResumeFailStreakLimit = 5
+	DefaultListPartsTimeoutSec   = 60
+	DefaultListPartsRetryCount   = 2
+	ListPartsRetryBackoffBase    = 3
 	WorkerHeartbeatInterval      = 30 * time.Second
 	ActiveTouchInterval          = 5 * time.Second
 	TransferAttemptLimit         = 2
@@ -170,6 +175,11 @@ func runTransfer() {
 	taskBufferSize = getEnvInt("TRANSFER_TASK_BUFFER", DefaultTaskBufferSize)
 	partConcurrency = getEnvInt("TRANSFER_PART_CONCURRENCY", DefaultPartConcurrency)
 	resumeFailStreakLimit = getEnvInt("TRANSFER_RESUME_FAIL_STREAK_LIMIT", DefaultResumeFailStreakLimit)
+	listPartsTimeout = time.Duration(getEnvInt("TRANSFER_LIST_PARTS_TIMEOUT_SECONDS", DefaultListPartsTimeoutSec)) * time.Second
+	listPartsRetryCount = getEnvInt("TRANSFER_LIST_PARTS_RETRY_COUNT", DefaultListPartsRetryCount)
+	if listPartsRetryCount < 0 {
+		listPartsRetryCount = 0
+	}
 	multipartThreshold = int64(getEnvInt("TRANSFER_MULTIPART_THRESHOLD_MB", DefaultMultipartThresholdMB)) * 1024 * 1024
 	minPartSize = int64(getEnvInt("TRANSFER_MIN_PART_SIZE_MB", DefaultMinPartSizeMB)) * 1024 * 1024
 	httpClient = &http.Client{
@@ -204,6 +214,7 @@ func runTransfer() {
 		Transport: &protocolLoggingRoundTripper{base: transferTransport, once: &transferProtoLog, label: "Transfer service"},
 	}
 	log.Printf("Transfer client config: force_http2=%t max_conns_per_host=%d timeout=%s", transferForceHTTP2, transferMaxConnsPerHost, transferTimeout)
+	log.Printf("ListParts config: timeout=%s retry_count=%d backoff_base=%d", listPartsTimeout, listPartsRetryCount, ListPartsRetryBackoffBase)
 
 	initSourceClient()
 	initStatsFlusher()
@@ -736,6 +747,103 @@ func isMultipartUploadNotFound(err error) bool {
 		strings.Contains(lower, "statuscode:404")
 }
 
+func isRetryableListPartsError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) {
+		if netErr.Timeout() {
+			return true
+		}
+		type temporary interface {
+			Temporary() bool
+		}
+		var tempErr temporary
+		if errors.As(err, &tempErr) && tempErr.Temporary() {
+			return true
+		}
+	}
+
+	lower := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(lower, "context deadline exceeded"),
+		strings.Contains(lower, "timeout"),
+		strings.Contains(lower, "i/o timeout"),
+		strings.Contains(lower, "connection reset"),
+		strings.Contains(lower, "connection refused"),
+		strings.Contains(lower, "connection aborted"),
+		strings.Contains(lower, "broken pipe"),
+		strings.Contains(lower, "unexpected eof"),
+		strings.Contains(lower, "server closed idle connection"),
+		strings.Contains(lower, "tls handshake timeout"),
+		strings.Contains(lower, "status code: 500"),
+		strings.Contains(lower, "status code: 502"),
+		strings.Contains(lower, "status code: 503"),
+		strings.Contains(lower, "status code: 504"),
+		strings.Contains(lower, "statuscode: 500"),
+		strings.Contains(lower, "statuscode: 502"),
+		strings.Contains(lower, "statuscode: 503"),
+		strings.Contains(lower, "statuscode: 504"),
+		strings.Contains(lower, "statuscode:500"),
+		strings.Contains(lower, "statuscode:502"),
+		strings.Contains(lower, "statuscode:503"),
+		strings.Contains(lower, "statuscode:504"):
+		return true
+	default:
+		return false
+	}
+}
+
+func listPartsRetryBackoff(retryNumber int) time.Duration {
+	if retryNumber < 1 {
+		retryNumber = 1
+	}
+	backoffSeconds := 1
+	for i := 0; i < retryNumber; i++ {
+		backoffSeconds *= ListPartsRetryBackoffBase
+	}
+	return time.Duration(backoffSeconds) * time.Second
+}
+
+func waitForListPartsRetry(backoff time.Duration) {
+	timer := time.NewTimer(backoff)
+	defer timer.Stop()
+	<-timer.C
+}
+
+func listUploadedPartsWithRetry(t TransferTask, dstClient *s3.Client, dstBucket, dstKey, uploadID string) (map[int32]types.CompletedPart, error) {
+	var lastErr error
+	maxAttempts := listPartsRetryCount + 1
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		listCtx, listCancel := context.WithTimeout(context.Background(), listPartsTimeout)
+		parts, err := listUploadedParts(listCtx, dstClient, dstBucket, dstKey, uploadID)
+		listCancel()
+		if err == nil {
+			return parts, nil
+		}
+
+		lastErr = err
+		if isMultipartUploadNotFound(err) || !isRetryableListPartsError(err) || attempt == maxAttempts {
+			return nil, lastErr
+		}
+
+		backoff := listPartsRetryBackoff(attempt)
+		log.Printf("Retrying ListParts for task %d/%d upload_id=%s after retryable error on attempt=%d/%d backoff=%s: %v",
+			t.JobID, t.ID, uploadID, attempt, maxAttempts, backoff, err)
+		waitForListPartsRetry(backoff)
+	}
+
+	return nil, lastErr
+}
+
 func isSourceHeadNotFound(err error) bool {
 	if err == nil {
 		return false
@@ -789,9 +897,7 @@ func transferFile(t TransferTask, srcURL string, dstClient *s3.Client, dstBucket
 	srcIdentity := buildSrcIdentity(srcURL, size, sourceETag)
 
 	if shouldReuseMultipartCheckpoint(ckpt, srcIdentity, dstBucket, dstKey, size, partSize, numParts) {
-		listCtx, listCancel := context.WithTimeout(context.Background(), 30*time.Second)
-		parts, listErr := listUploadedParts(listCtx, dstClient, dstBucket, dstKey, ckpt.UploadID)
-		listCancel()
+		parts, listErr := listUploadedPartsWithRetry(t, dstClient, dstBucket, dstKey, ckpt.UploadID)
 		switch {
 		case listErr == nil:
 			uploadID = ckpt.UploadID

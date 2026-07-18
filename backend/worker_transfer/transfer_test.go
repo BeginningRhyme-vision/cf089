@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -179,5 +181,68 @@ func TestBuildSrcIdentityIncludesETagWhenAvailable(t *testing.T) {
 	want := "https://src.example/object|123|etag-1"
 	if got != want {
 		t.Fatalf("buildSrcIdentity with etag = %q, want %q", got, want)
+	}
+}
+
+func TestIsRetryableListPartsError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "context deadline exceeded is retryable",
+			err:  context.DeadlineExceeded,
+			want: true,
+		},
+		{
+			name: "wrapped timeout is retryable",
+			err: &url.Error{
+				Op:  "Get",
+				URL: "https://example.com",
+				Err: context.DeadlineExceeded,
+			},
+			want: true,
+		},
+		{
+			name: "503 response is retryable",
+			err:  errors.New("operation error S3: ListParts, https response error StatusCode: 503"),
+			want: true,
+		},
+		{
+			name: "connection reset is retryable",
+			err:  errors.New("read tcp 10.0.0.1:12345->10.0.0.2:443: connection reset by peer"),
+			want: true,
+		},
+		{
+			name: "403 access denied is not retryable",
+			err:  errors.New("operation error S3: ListParts, https response error StatusCode: 403, api error AccessDenied"),
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRetryableListPartsError(tt.err); got != tt.want {
+				t.Fatalf("isRetryableListPartsError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestListPartsRetryBackoff(t *testing.T) {
+	tests := []struct {
+		retryNumber int
+		want        time.Duration
+	}{
+		{retryNumber: 1, want: 3 * time.Second},
+		{retryNumber: 2, want: 9 * time.Second},
+		{retryNumber: 0, want: 3 * time.Second},
+	}
+
+	for _, tt := range tests {
+		if got := listPartsRetryBackoff(tt.retryNumber); got != tt.want {
+			t.Fatalf("listPartsRetryBackoff(%d) = %s, want %s", tt.retryNumber, got, tt.want)
+		}
 	}
 }
