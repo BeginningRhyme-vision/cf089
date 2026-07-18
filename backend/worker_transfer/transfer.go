@@ -701,7 +701,7 @@ func abandonMultipartCheckpoint(t TransferTask, dstClient *s3.Client, dstBucket,
 		return fmt.Errorf("abort multipart upload_id=%s reason=%s: %w", uploadID, reason, err)
 	}
 	log.Printf("Aborted multipart upload for task %d/%d reason=%s upload_id=%s", t.JobID, t.ID, reason, uploadID)
-	if clearErr := clearMultipartCheckpoint(t.JobID, t.ID); clearErr != nil {
+	if clearErr := clearMultipartCheckpoint(t); clearErr != nil {
 		log.Printf("Aborted multipart upload for task %d/%d upload_id=%s but failed to clear checkpoint: %v",
 			t.JobID, t.ID, uploadID, clearErr)
 		return nil
