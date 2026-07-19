@@ -486,6 +486,29 @@ func TestTransferAcquireCapacityRules(t *testing.T) {
 	}
 }
 
+func TestShouldStopTransferAcquireAfterDeferred(t *testing.T) {
+	t.Parallel()
+
+	if shouldStopTransferAcquireAfterDeferred(127, 1024) {
+		t.Fatal("deferred streak below the soft limit should keep scanning")
+	}
+	if !shouldStopTransferAcquireAfterDeferred(128, 1024) {
+		t.Fatal("deferred streak at the soft limit should stop scanning")
+	}
+	if shouldStopTransferAcquireAfterDeferred(9, 10) {
+		t.Fatal("small request limits should not stop before reaching the request size")
+	}
+	if !shouldStopTransferAcquireAfterDeferred(10, 10) {
+		t.Fatal("request limit smaller than the soft limit should clamp the stop threshold")
+	}
+	if shouldStopTransferAcquireAfterDeferred(127, 0) {
+		t.Fatal("non-positive request limits should fall back to the global soft limit")
+	}
+	if !shouldStopTransferAcquireAfterDeferred(128, 0) {
+		t.Fatal("global soft limit should still apply when request limit is non-positive")
+	}
+}
+
 func TestTransferTaskCanUseCheckpoint(t *testing.T) {
 	t.Setenv("TRANSFER_MULTIPART_THRESHOLD_MB", "8")
 	t.Setenv("TRANSFER_MIN_PART_SIZE_MB", "5")

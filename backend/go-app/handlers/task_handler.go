@@ -49,9 +49,13 @@ const (
 	FetchBatchSize   = 100
 	BufferLowWater   = 100 // Refill when below this
 	TxFetchBatchSize = 1000
-	LockExpiration   = 30 * time.Second
-	DedupShards      = 256   // 去重 Hash 分成 256 片
-	TaskBucketSize   = 50000 // 任务 ZSet 每 5 万个 ID 分一个桶
+	// Stop deep-scanning a single transfer job buffer when we hit a long run of
+	// temporarily unclaimable tasks, to avoid building huge deferred slices that
+	// later contend with concurrent refill and trigger large offset rewinds.
+	TransferDeferredStreakSoftLimit = 128
+	LockExpiration                  = 30 * time.Second
+	DedupShards                     = 256   // 去重 Hash 分成 256 片
+	TaskBucketSize                  = 50000 // 任务 ZSet 每 5 万个 ID 分一个桶
 )
 
 // 获取 job 模式
@@ -2156,6 +2160,7 @@ func AcquireTransferTasks(c *gin.Context) {
 		}
 
 		var deferred []models.TransferTask
+		consecutiveDeferred := 0
 	loop:
 		for len(tasks) < req.Limit {
 			select {
@@ -2164,6 +2169,10 @@ func AcquireTransferTasks(c *gin.Context) {
 				if err != nil {
 					log.Printf("[AcquireTransferTasks] failed to classify task %d/%d for worker %s: %v", t.JobID, t.ID, req.WorkerID, err)
 					deferred = append(deferred, t)
+					consecutiveDeferred++
+					if shouldStopTransferAcquireAfterDeferred(consecutiveDeferred, req.Limit) {
+						break loop
+					}
 					continue
 				}
 				if clearedResumeCandidate && pendingResumeCount > 0 {
@@ -2172,6 +2181,10 @@ func AcquireTransferTasks(c *gin.Context) {
 				}
 				if !canClaimTransferTask(poolType, maxWorkers, defaultInFlight, resumeInFlight, pendingResumeCount, reservedWorkers) {
 					deferred = append(deferred, t)
+					consecutiveDeferred++
+					if shouldStopTransferAcquireAfterDeferred(consecutiveDeferred, req.Limit) {
+						break loop
+					}
 					continue
 				}
 
@@ -2179,11 +2192,16 @@ func AcquireTransferTasks(c *gin.Context) {
 				if err != nil {
 					log.Printf("[AcquireTransferTasks] failed to claim task %d/%d for worker %s: %v", t.JobID, t.ID, req.WorkerID, err)
 					deferred = append(deferred, t)
+					consecutiveDeferred++
+					if shouldStopTransferAcquireAfterDeferred(consecutiveDeferred, req.Limit) {
+						break loop
+					}
 					continue
 				}
 				if !ok {
 					continue
 				}
+				consecutiveDeferred = 0
 				tasks = append(tasks, claimed)
 				switch poolType {
 				case TransferPoolResume:
@@ -2266,6 +2284,17 @@ func canClaimTransferTask(poolType string, maxWorkers, defaultInFlight, resumeIn
 		return true
 	}
 	return defaultInFlight < computeTransferDefaultCap(maxWorkers, reservedWorkers, pendingResumeCount)
+}
+
+func shouldStopTransferAcquireAfterDeferred(consecutiveDeferred, reqLimit int) bool {
+	limit := TransferDeferredStreakSoftLimit
+	if reqLimit > 0 && reqLimit < limit {
+		limit = reqLimit
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	return consecutiveDeferred >= limit
 }
 func BatchUpdateTransfer(c *gin.Context) {
 	var updates []models.TransferTask
