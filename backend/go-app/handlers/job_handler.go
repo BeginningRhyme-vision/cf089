@@ -318,9 +318,7 @@ func retryShardedTransferTasks(ctx context.Context, job models.TransferJob, init
 						continue
 					}
 
-					task.Status = "PENDING"
-					task.UpdatedAt = time.Now()
-					task.ErrorMessage = ""
+					resetTransferTaskForRetry(&task, time.Now().UTC())
 
 					data, _ := json.Marshal(task)
 					pipe.Set(ctx, batchKeys[k], data, 0)
@@ -415,9 +413,7 @@ func retryLegacyTransferTasks(job models.TransferJob, initialStatus models.JobSt
 					continue
 				}
 
-				task.Status = "PENDING"
-				task.UpdatedAt = time.Now()
-				task.ErrorMessage = ""
+				resetTransferTaskForRetry(&task, time.Now().UTC())
 
 				data, _ := json.Marshal(task)
 				pipe.Set(ctx, keys[i], data, 0)

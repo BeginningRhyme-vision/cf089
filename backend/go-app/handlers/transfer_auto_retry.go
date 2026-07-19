@@ -159,6 +159,22 @@ func shouldRetryTransferTask(task models.TransferTask) bool {
 	return !isTransferPermanentSourceNotFound(task.ErrorMessage)
 }
 
+func resetTransferTaskForRetry(task *models.TransferTask, now time.Time) {
+	if task == nil {
+		return
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	task.Status = "PENDING"
+	task.UpdatedAt = now
+	task.ErrorMessage = ""
+	task.RunToken = ""
+	task.WorkerID = ""
+	task.StartedAt = time.Time{}
+	task.CompletedAt = time.Time{}
+}
+
 func refreshTransferRetryPoolCandidate(ctx context.Context, job models.TransferJob, task models.TransferTask, pipe redis.Pipeliner, logPrefix string) {
 	checkpoint, loadErr := loadTransferMultipartCheckpointRecord(ctx, task.JobID, task.ID)
 	if loadErr != nil {
@@ -336,9 +352,7 @@ func processTransferAutoRetryMember(ctx context.Context, member string) error {
 func retrySingleTransferTask(ctx context.Context, taskKey string, job models.TransferJob, task models.TransferTask, reason string) error {
 	now := time.Now().UTC()
 	updated := task
-	updated.Status = "PENDING"
-	updated.UpdatedAt = now
-	updated.ErrorMessage = ""
+	resetTransferTaskForRetry(&updated, now)
 
 	data, err := json.Marshal(updated)
 	if err != nil {

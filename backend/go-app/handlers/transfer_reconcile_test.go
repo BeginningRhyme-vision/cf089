@@ -1410,6 +1410,46 @@ func TestBatchUpdateTransferSchedulesAutoRetryForFailedUpdate(t *testing.T) {
 	}
 }
 
+func TestResetTransferTaskForRetryClearsPreviousAttemptFields(t *testing.T) {
+	now := time.Date(2026, time.July, 18, 23, 55, 0, 0, time.UTC)
+	task := models.TransferTask{
+		ID:           2540,
+		JobID:        84,
+		Src:          "video/sample.mp4",
+		Status:       "FAILED",
+		ErrorMessage: "transfer service status 502",
+		RunToken:     "old-run-token",
+		WorkerID:     "worker-old",
+		StartedAt:    now.Add(-5 * time.Minute),
+		CompletedAt:  now.Add(-2 * time.Minute),
+		UpdatedAt:    now.Add(-1 * time.Minute),
+	}
+
+	resetTransferTaskForRetry(&task, now)
+
+	if task.Status != "PENDING" {
+		t.Fatalf("expected status PENDING, got %s", task.Status)
+	}
+	if task.ErrorMessage != "" {
+		t.Fatalf("expected error message cleared, got %q", task.ErrorMessage)
+	}
+	if task.RunToken != "" {
+		t.Fatalf("expected run token cleared, got %q", task.RunToken)
+	}
+	if task.WorkerID != "" {
+		t.Fatalf("expected worker id cleared, got %q", task.WorkerID)
+	}
+	if !task.StartedAt.IsZero() {
+		t.Fatalf("expected started_at cleared, got %v", task.StartedAt)
+	}
+	if !task.CompletedAt.IsZero() {
+		t.Fatalf("expected completed_at cleared, got %v", task.CompletedAt)
+	}
+	if !task.UpdatedAt.Equal(now) {
+		t.Fatalf("expected updated_at=%v, got %v", now, task.UpdatedAt)
+	}
+}
+
 func TestRecordTransferTaskCompensationStoresRunTokenKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	mr := miniredis.RunT(t)
