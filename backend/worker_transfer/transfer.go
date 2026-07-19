@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
@@ -125,22 +126,25 @@ var (
 )
 
 const (
-	WorkerID                     = "go-transfer-1"
-	DefaultConcurrentWorkers     = 64
-	DefaultTaskBufferSize        = 128
-	DefaultPartConcurrency       = 16
-	DefaultMultipartThresholdMB  = 8
-	DefaultMinPartSizeMB         = 5
-	DefaultTransferMaxConns      = 384
-	DefaultTransferTimeoutSec    = 120
-	DefaultTransferTLSHandshake  = 10
-	DefaultResumeFailStreakLimit = 5
-	DefaultListPartsTimeoutSec   = 60
-	DefaultListPartsRetryCount   = 2
-	ListPartsRetryBackoffBase    = 3
-	WorkerHeartbeatInterval      = 30 * time.Second
-	ActiveTouchInterval          = 5 * time.Second
-	TransferAttemptLimit         = 2
+	WorkerID                        = "go-transfer-1"
+	DefaultConcurrentWorkers        = 64
+	DefaultTaskBufferSize           = 128
+	DefaultPartConcurrency          = 16
+	DefaultMultipartThresholdMB     = 8
+	DefaultMinPartSizeMB            = 5
+	DefaultTransferMaxConns         = 384
+	DefaultTransferTimeoutSec       = 120
+	DefaultTransferTLSHandshake     = 10
+	DefaultResumeFailStreakLimit    = 5
+	DefaultListPartsTimeoutSec      = 60
+	DefaultListPartsRetryCount      = 2
+	DefaultAcquireEmptyBackoffMinMs = 200
+	DefaultAcquireEmptyBackoffMaxMs = 800
+	DefaultAcquireErrorBackoffMs    = 2000
+	ListPartsRetryBackoffBase       = 3
+	WorkerHeartbeatInterval         = 30 * time.Second
+	ActiveTouchInterval             = 5 * time.Second
+	TransferAttemptLimit            = 2
 )
 
 func buildWorkerID() string {
@@ -236,12 +240,12 @@ func runTransfer() {
 			tasks, err := acquireTasks()
 			if err != nil {
 				log.Printf("Error acquiring tasks: %v", err)
-				time.Sleep(2 * time.Second)
+				time.Sleep(transferAcquireErrorBackoff())
 				continue
 			}
 
 			if len(tasks) == 0 {
-				time.Sleep(1 * time.Second)
+				time.Sleep(transferAcquireEmptyBackoff())
 				continue
 			}
 
@@ -264,6 +268,39 @@ func runTransfer() {
 		}()
 	}
 	wg.Wait()
+}
+
+func transferAcquireEmptyBackoff() time.Duration {
+	minBackoff, maxBackoff := getTransferAcquireEmptyBackoffRange()
+	if maxBackoff <= minBackoff {
+		return minBackoff
+	}
+	return minBackoff + time.Duration(rand.Int63n(int64(maxBackoff-minBackoff)))
+}
+
+func transferAcquireErrorBackoff() time.Duration {
+	backoffMs := getEnvInt("TRANSFER_ACQUIRE_ERROR_BACKOFF_MS", DefaultAcquireErrorBackoffMs)
+	if backoffMs <= 0 {
+		backoffMs = DefaultAcquireErrorBackoffMs
+	}
+	return time.Duration(backoffMs) * time.Millisecond
+}
+
+func getTransferAcquireEmptyBackoffRange() (time.Duration, time.Duration) {
+	minMs := getEnvInt("TRANSFER_ACQUIRE_EMPTY_BACKOFF_MIN_MS", DefaultAcquireEmptyBackoffMinMs)
+	maxMs := getEnvInt("TRANSFER_ACQUIRE_EMPTY_BACKOFF_MAX_MS", DefaultAcquireEmptyBackoffMaxMs)
+	if minMs <= 0 {
+		minMs = DefaultAcquireEmptyBackoffMinMs
+	}
+	if maxMs <= 0 {
+		maxMs = DefaultAcquireEmptyBackoffMaxMs
+	}
+	minBackoff := time.Duration(minMs) * time.Millisecond
+	maxBackoff := time.Duration(maxMs) * time.Millisecond
+	if maxBackoff <= minBackoff {
+		maxBackoff = minBackoff
+	}
+	return minBackoff, maxBackoff
 }
 
 func initStatsFlusher() {

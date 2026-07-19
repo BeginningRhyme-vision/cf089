@@ -52,10 +52,10 @@ const (
 	// Stop deep-scanning a single transfer job buffer when we hit a long run of
 	// temporarily unclaimable tasks, to avoid building huge deferred slices that
 	// later contend with concurrent refill and trigger large offset rewinds.
-	TransferDeferredStreakSoftLimit = 128
-	LockExpiration                  = 30 * time.Second
-	DedupShards                     = 256   // 去重 Hash 分成 256 片
-	TaskBucketSize                  = 50000 // 任务 ZSet 每 5 万个 ID 分一个桶
+	DefaultTransferDeferredStreakSoftLimit = 128
+	LockExpiration                         = 30 * time.Second
+	DedupShards                            = 256   // 去重 Hash 分成 256 片
+	TaskBucketSize                         = 50000 // 任务 ZSet 每 5 万个 ID 分一个桶
 )
 
 // 获取 job 模式
@@ -2287,7 +2287,7 @@ func canClaimTransferTask(poolType string, maxWorkers, defaultInFlight, resumeIn
 }
 
 func shouldStopTransferAcquireAfterDeferred(consecutiveDeferred, reqLimit int) bool {
-	limit := TransferDeferredStreakSoftLimit
+	limit := getTransferDeferredStreakSoftLimit()
 	if reqLimit > 0 && reqLimit < limit {
 		limit = reqLimit
 	}
@@ -2295,6 +2295,14 @@ func shouldStopTransferAcquireAfterDeferred(consecutiveDeferred, reqLimit int) b
 		limit = 1
 	}
 	return consecutiveDeferred >= limit
+}
+
+func getTransferDeferredStreakSoftLimit() int {
+	value := getTransferEnvInt("TRANSFER_DEFERRED_STREAK_SOFT_LIMIT", DefaultTransferDeferredStreakSoftLimit)
+	if value <= 0 {
+		return DefaultTransferDeferredStreakSoftLimit
+	}
+	return value
 }
 func BatchUpdateTransfer(c *gin.Context) {
 	var updates []models.TransferTask

@@ -246,3 +246,51 @@ func TestListPartsRetryBackoff(t *testing.T) {
 		}
 	}
 }
+
+func TestTransferAcquireEmptyBackoffRange(t *testing.T) {
+	minBackoff, maxBackoff := getTransferAcquireEmptyBackoffRange()
+
+	for i := 0; i < 200; i++ {
+		got := transferAcquireEmptyBackoff()
+		if got < minBackoff {
+			t.Fatalf("backoff=%s below min=%s", got, minBackoff)
+		}
+		if got >= maxBackoff {
+			t.Fatalf("backoff=%s should stay below max=%s", got, maxBackoff)
+		}
+	}
+}
+
+func TestTransferAcquireEmptyBackoffRangeFromEnv(t *testing.T) {
+	t.Setenv("TRANSFER_ACQUIRE_EMPTY_BACKOFF_MIN_MS", "300")
+	t.Setenv("TRANSFER_ACQUIRE_EMPTY_BACKOFF_MAX_MS", "1000")
+
+	minBackoff, maxBackoff := getTransferAcquireEmptyBackoffRange()
+	if minBackoff != 300*time.Millisecond {
+		t.Fatalf("min backoff=%s, want %s", minBackoff, 300*time.Millisecond)
+	}
+	if maxBackoff != 1000*time.Millisecond {
+		t.Fatalf("max backoff=%s, want %s", maxBackoff, 1000*time.Millisecond)
+	}
+
+	for i := 0; i < 200; i++ {
+		got := transferAcquireEmptyBackoff()
+		if got < minBackoff {
+			t.Fatalf("env backoff=%s below min=%s", got, minBackoff)
+		}
+		if got >= maxBackoff {
+			t.Fatalf("env backoff=%s should stay below max=%s", got, maxBackoff)
+		}
+	}
+}
+
+func TestTransferAcquireErrorBackoffFromEnv(t *testing.T) {
+	if got := transferAcquireErrorBackoff(); got != 2*time.Second {
+		t.Fatalf("default error backoff=%s, want %s", got, 2*time.Second)
+	}
+
+	t.Setenv("TRANSFER_ACQUIRE_ERROR_BACKOFF_MS", "2500")
+	if got := transferAcquireErrorBackoff(); got != 2500*time.Millisecond {
+		t.Fatalf("env error backoff=%s, want %s", got, 2500*time.Millisecond)
+	}
+}
