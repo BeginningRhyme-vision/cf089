@@ -31,7 +31,7 @@ DEST_UPLOAD_TIMEOUT_SECONDS = "180"
 # SOURCE_SECRET_ACCESS_KEY = "source_secret_key"
 
 [placement]
-region = "aws:ap-southeast-1"
+mode = "smart"
 
 [observability]
 enabled = false
