@@ -1,9 +1,13 @@
 import React, { useEffect, useMemo, useState } from 'react';
-import { Table, Button, Modal, Form, Input, Select, Checkbox, Tag, message, Space, Popconfirm, Card, Row, Col } from 'antd';
+import { Table, Button, Modal, Form, Input, Select, Checkbox, Tag, message, Space, Popconfirm, Card, Row, Col, Tooltip } from 'antd';
 import { PlayCircleOutlined, StopOutlined, ReloadOutlined, PlusOutlined, DeleteOutlined, EyeOutlined } from '@ant-design/icons';
 import api from '../api';
 
 const { Option } = Select;
+// Keep the duplication flow intact, but disable the entry by default.
+// Flip this to `true` when the "duplicate from details" action needs to be restored.
+const ENABLE_TRANSFER_JOB_DUPLICATION = false;
+const DUPLICATE_TRANSFER_JOB_DISABLED_REASON = '当前业务已停用该入口，如需恢复请联系管理员开启。';
 
 const cellStyle = {
   maxWidth: 180,
@@ -338,6 +342,9 @@ const JobList = () => {
 
   const handleDuplicateJob = () => {
     if (!selectedJob) return;
+    if (!ENABLE_TRANSFER_JOB_DUPLICATION) {
+      return;
+    }
     const payload = {
       metadata_id: selectedJob.metadata_id,
       src_dir: selectedJob.src_dir,
@@ -594,7 +601,18 @@ const JobList = () => {
         title={
           <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
             {selectedJob && (
-              <Button type="primary" size="small" onClick={handleDuplicateJob}>新建复制任务</Button>
+              <Tooltip title={ENABLE_TRANSFER_JOB_DUPLICATION ? '' : DUPLICATE_TRANSFER_JOB_DISABLED_REASON}>
+                <span>
+                  <Button
+                    type="primary"
+                    size="small"
+                    onClick={handleDuplicateJob}
+                    disabled={!ENABLE_TRANSFER_JOB_DUPLICATION}
+                  >
+                    新建复制任务
+                  </Button>
+                </span>
+              </Tooltip>
             )}
             <span>Job Details</span>
           </div>
