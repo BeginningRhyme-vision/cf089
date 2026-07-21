@@ -409,43 +409,14 @@ func retrySingleTransferTask(ctx context.Context, taskKey string, job models.Tra
 		offsetBefore = 0
 		offsetBeforeErr = nil
 	}
-	offsetAfter := offsetBefore
-	rewound := false
 	if offsetBeforeErr == nil {
 		if rewindTo, shouldRewind := computeTransferRetryRewindOffset(offsetBefore, updated.ID, isJobSharded(ctx, updated.JobID)); shouldRewind {
 			if err := database.RDB.Set(ctx, offsetKey, rewindTo, 0).Err(); err != nil {
 				log.Printf("[TransferAutoRetry] failed to rewind offset for job=%d task=%d after %s retry reset: %v", updated.JobID, updated.ID, reason, err)
-			} else {
-				offsetAfter = rewindTo
-				rewound = true
 			}
 		}
 	} else {
 		log.Printf("[TransferAutoRetry] failed to read offset before retry rewind for job=%d task=%d after %s retry reset: %v", updated.JobID, updated.ID, reason, offsetBeforeErr)
-	}
-	if rewound && shouldReportTransferDebug(fmt.Sprintf("auto-retry-reset:%d", updated.JobID), 1500*time.Millisecond) {
-		reportTransferDebugEvent(
-			"pre-fix",
-			"A",
-			"transfer_auto_retry.go:retrySingleTransferTask",
-			"[DEBUG] auto retry rewound transfer offset",
-			map[string]interface{}{
-				"job_id":             updated.JobID,
-				"task_id":            updated.ID,
-				"reason":             reason,
-				"offset_key":         offsetKey,
-				"offset_before":      offsetBefore,
-				"offset_after":       offsetAfter,
-				"offset_before_error": func() string {
-					if offsetBeforeErr == nil {
-						return ""
-					}
-					return offsetBeforeErr.Error()
-				}(),
-				"task_status_before": task.Status,
-				"task_status_after":  updated.Status,
-			},
-		)
 	}
 	triggerTxRefill(updated.JobID)
 	log.Printf("[TransferAutoRetry] reset task job=%d task=%d to pending via %s retry", updated.JobID, updated.ID, reason)

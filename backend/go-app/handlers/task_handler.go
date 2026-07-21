@@ -1913,16 +1913,6 @@ func fillShardedTxBuffer(ctx context.Context, jobID int64) {
 	}).Result()
 
 	if err != nil {
-		if shouldReportTransferDebug(fmt.Sprintf("fill-sharded-error:%d", jobID), 2*time.Second) {
-			reportTransferDebugEvent("pre-fix", "C", "task_handler.go:fillShardedTxBuffer", "[DEBUG] sharded refill redis read failed", map[string]interface{}{
-				"job_id":     jobID,
-				"offset_key": offsetKey,
-				"last_task":  lastTaskID,
-				"start_id":   startID,
-				"bucket_key": bucketKey,
-				"error":      err.Error(),
-			})
-		}
 		return
 	}
 
@@ -1937,30 +1927,9 @@ func fillShardedTxBuffer(ctx context.Context, jobID int64) {
 			Count:  int64(TxFetchBatchSize),
 			Offset: 0,
 		}).Result()
-		if shouldReportTransferDebug(fmt.Sprintf("fill-sharded-empty:%d", jobID), 1500*time.Millisecond) {
-			reportTransferDebugEvent("pre-fix", "C", "task_handler.go:fillShardedTxBuffer", "[DEBUG] sharded refill advanced to next bucket", map[string]interface{}{
-				"job_id":         jobID,
-				"offset_key":     offsetKey,
-				"last_task":      lastTaskID,
-				"start_id":       startID,
-				"first_bucket":   bucketKey,
-				"next_bucket":    nextBucketKey,
-				"next_start_id":  nextStartID,
-				"next_ids_count": len(ids),
-			})
-		}
 	}
 
 	if len(ids) == 0 {
-		if shouldReportTransferDebug(fmt.Sprintf("fill-sharded-noids:%d", jobID), 1500*time.Millisecond) {
-			reportTransferDebugEvent("pre-fix", "C", "task_handler.go:fillShardedTxBuffer", "[DEBUG] sharded refill found no ids", map[string]interface{}{
-				"job_id":     jobID,
-				"offset_key": offsetKey,
-				"last_task":  lastTaskID,
-				"start_id":   startID,
-				"bucket_key": bucketKey,
-			})
-		}
 		return
 	}
 
@@ -1972,21 +1941,6 @@ func fillShardedTxBuffer(ctx context.Context, jobID int64) {
 
 	jsonList, err := database.RDB.MGet(ctx, keys...).Result()
 	if err != nil {
-		if shouldReportTransferDebug(fmt.Sprintf("fill-sharded-mget-error:%d", jobID), 2*time.Second) {
-			reportTransferDebugEvent("pre-fix", "D", "task_handler.go:fillShardedTxBuffer", "[DEBUG] sharded refill mget failed", map[string]interface{}{
-				"job_id":     jobID,
-				"offset_key": offsetKey,
-				"start_id":   startID,
-				"ids_count":  len(ids),
-				"sample_task": func() string {
-					if len(keys) == 0 {
-						return ""
-					}
-					return keys[0]
-				}(),
-				"error": err.Error(),
-			})
-		}
 		return
 	}
 
@@ -2048,20 +2002,6 @@ FINISH:
 			database.RDB.Set(ctx, offsetKey, maxID, 0)
 		}
 	}
-	if shouldReportTransferDebug(fmt.Sprintf("fill-sharded-summary:%d", jobID), 1200*time.Millisecond) {
-		reportTransferDebugEvent("pre-fix", "C", "task_handler.go:fillShardedTxBuffer", "[DEBUG] sharded refill summary", map[string]interface{}{
-			"job_id":       jobID,
-			"offset_key":   offsetKey,
-			"last_task":    lastTaskID,
-			"start_id":     startID,
-			"ids_count":    len(ids),
-			"processed":    processed,
-			"max_id":       maxID,
-			"buffer_len":   func() int { return len(ch) }(),
-			"buffer_cap":   cap(ch),
-			"offset_after": maxID,
-		})
-	}
 }
 func fillLeagcyTxJobBuffer(jobID int64) {
 	ctx := context.Background()
@@ -2086,21 +2026,6 @@ func fillLeagcyTxJobBuffer(jobID int64) {
 
 	ids, err := database.RDB.ZRange(ctx, jobKey, start, stop).Result()
 	if err != nil || len(ids) == 0 {
-		if shouldReportTransferDebug(fmt.Sprintf("fill-legacy-empty:%d", jobID), 1500*time.Millisecond) {
-			data := map[string]interface{}{
-				"job_id":     jobID,
-				"offset_key": offsetKey,
-				"offset":     offset,
-				"job_key":    jobKey,
-				"start":      start,
-				"stop":       stop,
-				"ids_count":  len(ids),
-			}
-			if err != nil {
-				data["error"] = err.Error()
-			}
-			reportTransferDebugEvent("pre-fix", "C", "task_handler.go:fillLeagcyTxJobBuffer", "[DEBUG] legacy refill returned no ids", data)
-		}
 		return
 	}
 
@@ -2111,22 +2036,6 @@ func fillLeagcyTxJobBuffer(jobID int64) {
 
 	jsonList, err := database.RDB.MGet(ctx, keys...).Result()
 	if err != nil {
-		if shouldReportTransferDebug(fmt.Sprintf("fill-legacy-mget-error:%d", jobID), 2*time.Second) {
-			reportTransferDebugEvent("pre-fix", "D", "task_handler.go:fillLeagcyTxJobBuffer", "[DEBUG] legacy refill mget failed", map[string]interface{}{
-				"job_id":     jobID,
-				"offset_key": offsetKey,
-				"offset":     offset,
-				"job_key":    jobKey,
-				"ids_count":  len(ids),
-				"sample_task": func() string {
-					if len(keys) == 0 {
-						return ""
-					}
-					return keys[0]
-				}(),
-				"error": err.Error(),
-			})
-		}
 		return
 	}
 
@@ -2170,20 +2079,6 @@ FINISH:
 	if processed > 0 {
 		newOffset := offset + int64(processed)
 		database.RDB.Set(ctx, offsetKey, newOffset, 0)
-		if shouldReportTransferDebug(fmt.Sprintf("fill-legacy-summary:%d", jobID), 1200*time.Millisecond) {
-			reportTransferDebugEvent("pre-fix", "C", "task_handler.go:fillLeagcyTxJobBuffer", "[DEBUG] legacy refill summary", map[string]interface{}{
-				"job_id":        jobID,
-				"offset_key":    offsetKey,
-				"offset_before": offset,
-				"job_key":       jobKey,
-				"ids_count":     len(ids),
-				"processed":     processed,
-				"pushed":        count,
-				"buffer_len":    func() int { return len(ch) }(),
-				"buffer_cap":    cap(ch),
-				"offset_after":  newOffset,
-			})
-		}
 	}
 }
 
@@ -2236,20 +2131,6 @@ func AcquireTransferTasks(c *gin.Context) {
 	}
 	bufferMutex.RUnlock()
 
-	if shouldReportTransferDebug(fmt.Sprintf("acquire-entry:%s", req.WorkerID), 1200*time.Millisecond) {
-		reportTransferDebugEvent("pre-fix", "B", "task_handler.go:AcquireTransferTasks", "[DEBUG] acquire transfer entry", map[string]interface{}{
-			"worker_id":        req.WorkerID,
-			"limit":            req.Limit,
-			"max_workers":      maxWorkers,
-			"reserved_workers": reservedWorkers,
-			"pending_resume":   pendingResumeCount,
-			"default_inflight": defaultInFlight,
-			"resume_inflight":  resumeInFlight,
-			"default_cap":      defaultCap,
-			"job_buffer_count": len(jobIDs),
-		})
-	}
-
 	if len(jobIDs) == 0 {
 		c.JSON(http.StatusOK, tasks)
 		return
@@ -2279,7 +2160,6 @@ func AcquireTransferTasks(c *gin.Context) {
 
 		var deferred []models.TransferTask
 		consecutiveDeferred := 0
-		claimedFromJob := 0
 	loop:
 		for len(tasks) < req.Limit {
 			select {
@@ -2289,15 +2169,6 @@ func AcquireTransferTasks(c *gin.Context) {
 					log.Printf("[AcquireTransferTasks] failed to classify task %d/%d for worker %s: %v", t.JobID, t.ID, req.WorkerID, err)
 					deferred = append(deferred, t)
 					consecutiveDeferred++
-					if shouldReportTransferDebug(fmt.Sprintf("acquire-classify-error:%d", jid), 1500*time.Millisecond) {
-						reportTransferDebugEvent("pre-fix", "D", "task_handler.go:AcquireTransferTasks", "[DEBUG] acquire classify failed", map[string]interface{}{
-							"job_id":               jid,
-							"worker_id":            req.WorkerID,
-							"task_id":              t.ID,
-							"consecutive_deferred": consecutiveDeferred,
-							"error":                err.Error(),
-						})
-					}
 					if shouldStopTransferAcquireAfterDeferred(consecutiveDeferred, req.Limit) {
 						break loop
 					}
@@ -2310,20 +2181,6 @@ func AcquireTransferTasks(c *gin.Context) {
 				if !canClaimTransferTask(poolType, maxWorkers, defaultInFlight, resumeInFlight, pendingResumeCount, reservedWorkers) {
 					deferred = append(deferred, t)
 					consecutiveDeferred++
-					if shouldReportTransferDebug(fmt.Sprintf("acquire-cap-block:%d:%s", jid, normalizeTransferPoolType(poolType)), 1200*time.Millisecond) {
-						reportTransferDebugEvent("pre-fix", "B", "task_handler.go:AcquireTransferTasks", "[DEBUG] acquire blocked by pool capacity", map[string]interface{}{
-							"job_id":               jid,
-							"worker_id":            req.WorkerID,
-							"task_id":              t.ID,
-							"pool_type":            normalizeTransferPoolType(poolType),
-							"pending_resume":       pendingResumeCount,
-							"default_inflight":     defaultInFlight,
-							"resume_inflight":      resumeInFlight,
-							"default_cap":          defaultCap,
-							"reserved_workers":     reservedWorkers,
-							"consecutive_deferred": consecutiveDeferred,
-						})
-					}
 					if shouldStopTransferAcquireAfterDeferred(consecutiveDeferred, req.Limit) {
 						break loop
 					}
@@ -2335,16 +2192,6 @@ func AcquireTransferTasks(c *gin.Context) {
 					log.Printf("[AcquireTransferTasks] failed to claim task %d/%d for worker %s: %v", t.JobID, t.ID, req.WorkerID, err)
 					deferred = append(deferred, t)
 					consecutiveDeferred++
-					if shouldReportTransferDebug(fmt.Sprintf("acquire-claim-error:%d", jid), 1500*time.Millisecond) {
-						reportTransferDebugEvent("pre-fix", "D", "task_handler.go:AcquireTransferTasks", "[DEBUG] acquire claim failed", map[string]interface{}{
-							"job_id":               jid,
-							"worker_id":            req.WorkerID,
-							"task_id":              t.ID,
-							"pool_type":            normalizeTransferPoolType(poolType),
-							"consecutive_deferred": consecutiveDeferred,
-							"error":                err.Error(),
-						})
-					}
 					if shouldStopTransferAcquireAfterDeferred(consecutiveDeferred, req.Limit) {
 						break loop
 					}
@@ -2355,7 +2202,6 @@ func AcquireTransferTasks(c *gin.Context) {
 				}
 				consecutiveDeferred = 0
 				tasks = append(tasks, claimed)
-				claimedFromJob++
 				switch poolType {
 				case TransferPoolResume:
 					resumeInFlight++
@@ -2379,29 +2225,7 @@ func AcquireTransferTasks(c *gin.Context) {
 				contendedDeferred = append(contendedDeferred, deferredTask)
 			}
 		}
-		if shouldReportTransferDebug(fmt.Sprintf("acquire-job-summary:%d:%s", jid, req.WorkerID), 1200*time.Millisecond) {
-			reportTransferDebugEvent("pre-fix", "B", "task_handler.go:AcquireTransferTasks", "[DEBUG] acquire job loop summary", map[string]interface{}{
-				"job_id":             jid,
-				"worker_id":          req.WorkerID,
-				"claimed_from_job":   claimedFromJob,
-				"deferred_count":     len(deferred),
-				"contended_deferred": len(contendedDeferred),
-				"buffer_len_after":   len(ch),
-				"buffer_cap":         cap(ch),
-				"default_inflight":   defaultInFlight,
-				"resume_inflight":    resumeInFlight,
-				"pending_resume":     pendingResumeCount,
-				"default_cap":        defaultCap,
-				"returned_total":     len(tasks),
-			})
-		}
 		recoverDeferredTransferTasks(ctx, jid, contendedDeferred)
-	}
-	if shouldReportTransferDebug(fmt.Sprintf("acquire-exit:%s", req.WorkerID), 1200*time.Millisecond) {
-		reportTransferDebugEvent("pre-fix", "B", "task_handler.go:AcquireTransferTasks", "[DEBUG] acquire transfer exit", map[string]interface{}{
-			"worker_id":      req.WorkerID,
-			"returned_total": len(tasks),
-		})
 	}
 	c.JSON(http.StatusOK, tasks)
 }
