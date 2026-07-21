@@ -421,22 +421,7 @@ func processTask(t TransferTask) {
 
 	log.Printf("Processing Task %d (Job %d): %s -> %s", t.ID, t.JobID, t.Src, dstDir)
 
-	// 1. Resolve Dst Client
-	sk := job.Metadata.SKEncrypted
-	if strings.HasPrefix(sk, "enc_") {
-		sk = strings.TrimPrefix(sk, "enc_")
-	}
-
-	dstClient, err := createDestS3Client(job.Metadata.Endpoint, job.Metadata.AK, sk)
-	if err != nil {
-		log.Printf("Dst client init failed for task %d: %v", t.ID, err)
-		updateTaskStatus(t, "FAILED", "Dst client init failed")
-		updateJobStats(t.JobID, 0, 1)
-		TasksTransferred.WithLabelValues("failed").Inc()
-		return
-	}
-
-	// 2. Resolve Paths
+	// 1. Resolve Paths
 	srcKey := t.Src
 	relKey := buildRelativeKey(srcDir, srcKey)
 
@@ -449,9 +434,27 @@ func processTask(t TransferTask) {
 		}
 	}
 
-	// 3. Get Object Info (Size) from Src
+	// 2. Resolve Buckets / Clients on Demand
 	srcBucket := getBucketFromEndpoint(cfg.Storage.Src.Endpoint)
 	dstBucket := getBucketFromEndpoint(job.Metadata.Endpoint)
+	sk := job.Metadata.SKEncrypted
+	if strings.HasPrefix(sk, "enc_") {
+		sk = strings.TrimPrefix(sk, "enc_")
+	}
+	var dstClient *s3.Client
+	ensureDstClient := func() (*s3.Client, error) {
+		if dstClient != nil {
+			return dstClient, nil
+		}
+		client, err := createDestS3Client(job.Metadata.Endpoint, job.Metadata.AK, sk)
+		if err != nil {
+			return nil, err
+		}
+		dstClient = client
+		return dstClient, nil
+	}
+
+	// 3. Get Object Info (Size) from Src
 	head, err := srcClient.HeadObject(context.TODO(), &s3.HeadObjectInput{
 		Bucket: aws.String(srcBucket),
 		Key:    aws.String(srcKey),
@@ -461,7 +464,10 @@ func processTask(t TransferTask) {
 		errMsg := "HeadObject failed: " + err.Error()
 		if isSourceHeadNotFound(err) {
 			log.Printf("Task %d/%d source object missing at %s/%s; cleaning multipart artifacts before marking FAILED", t.JobID, t.ID, srcBucket, srcKey)
-			if cleanupErr := cleanupMultipartArtifactsForTask(t, dstClient, dstBucket, dstKey); cleanupErr != nil {
+			client, initErr := ensureDstClient()
+			if initErr != nil {
+				errMsg = "SourceMissing cleanup failed: dst client init failed: " + initErr.Error()
+			} else if cleanupErr := cleanupMultipartArtifactsForTask(t, client, dstBucket, dstKey); cleanupErr != nil {
 				errMsg = "SourceMissing cleanup failed: " + cleanupErr.Error()
 			} else {
 				errMsg = "SourceNotFound: source head returned 404"
@@ -481,6 +487,15 @@ func processTask(t TransferTask) {
 		if err := updateTaskStatus(t, "FAILED", errMsg); err != nil {
 			log.Printf("Failed to mark zero-byte task %d/%d as FAILED: %v", t.JobID, t.ID, err)
 		}
+		updateJobStats(t.JobID, 0, 1)
+		TasksTransferred.WithLabelValues("failed").Inc()
+		return
+	}
+
+	dstClient, err = ensureDstClient()
+	if err != nil {
+		log.Printf("Dst client init failed for task %d: %v", t.ID, err)
+		updateTaskStatus(t, "FAILED", "Dst client init failed")
 		updateJobStats(t.JobID, 0, 1)
 		TasksTransferred.WithLabelValues("failed").Inc()
 		return

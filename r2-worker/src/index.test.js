@@ -160,7 +160,10 @@ describe('Worker HTTP Handler', () => {
     expect(sourceClient.config.endpoint).toBe('https://source-bucket.s3.amazonaws.com');
   });
 
-  it('should shortcut zero-byte copy without source range fetch', async () => {
+  it('should shortcut zero-byte copy without source credentials or source range fetch', async () => {
+    delete env.SOURCE_ACCESS_KEY_ID;
+    delete env.SOURCE_SECRET_ACCESS_KEY;
+
     request = new Request('http://worker/initiate-copy', {
       method: 'POST',
       body: JSON.stringify({
@@ -176,6 +179,8 @@ describe('Worker HTTP Handler', () => {
 
     const sourceGetCall = mockFetchCalls.find((call) => call.options?.method === 'GET');
     expect(sourceGetCall).toBeUndefined();
+    const sourceClient = mockClients.find(c => c.config.accessKeyId === 'source-ak');
+    expect(sourceClient).toBeUndefined();
 
     const putCall = globalThis.fetch.mock.calls.find(([, opts]) => opts?.method === 'PUT');
     expect(putCall).toBeDefined();

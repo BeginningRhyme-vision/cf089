@@ -601,34 +601,6 @@ async function processMessage(task, env) {
       throw createTransferError(400, "InvalidSize", "request_validation", `Invalid transfer size: ${size}`, false);
     }
 
-    // Validate required environment variables for source
-    if (!env.SOURCE_ACCESS_KEY_ID || !env.SOURCE_SECRET_ACCESS_KEY) {
-      throw classifyConfigError("config", "Missing required environment variables: SOURCE_ACCESS_KEY_ID and SOURCE_SECRET_ACCESS_KEY must be set in wrangler.toml or as environment variables");
-    }
-
-    let r2KeyUrl = r2Key;
-    let sourceEndpoint = undefined;
-    if (typeof r2KeyUrl === "string" && r2KeyUrl.startsWith("s3://")) {
-      const withoutScheme = r2KeyUrl.slice("s3://".length);
-      const firstSlash = withoutScheme.indexOf("/");
-      if (firstSlash > 0) {
-        const bucket = withoutScheme.slice(0, firstSlash);
-        const key = withoutScheme.slice(firstSlash + 1);
-        sourceEndpoint = `https://${bucket}.s3.amazonaws.com`;
-        r2KeyUrl = `${sourceEndpoint}/${key}`;
-      }
-    }
-    const sourceUrl = new URL(r2KeyUrl);
-
-    // Initialize AwsClient for Source (Read)
-    const sourceAwsClient = new AwsClient({
-      accessKeyId: env.SOURCE_ACCESS_KEY_ID,
-      secretAccessKey: env.SOURCE_SECRET_ACCESS_KEY,
-      service: "s3",
-      region: "auto",
-      ...(sourceEndpoint ? { endpoint: sourceEndpoint } : {}),
-    });
-
     // Initialize AwsClient for Destination (Write)
     const s3Host = new URL(s3Url).hostname;
     const destAccessKey = env[s3Host + "_ak"] || env.AWS_ACCESS_KEY_ID;
@@ -662,6 +634,32 @@ async function processMessage(task, env) {
         console.log(`Zero-byte object shortcut copy for ${safeKey} part=${partNumber}`);
         uploadBody = new Uint8Array(0);
       } else {
+        if (!env.SOURCE_ACCESS_KEY_ID || !env.SOURCE_SECRET_ACCESS_KEY) {
+          throw classifyConfigError("config", "Missing required environment variables: SOURCE_ACCESS_KEY_ID and SOURCE_SECRET_ACCESS_KEY must be set in wrangler.toml or as environment variables");
+        }
+
+        let r2KeyUrl = r2Key;
+        let sourceEndpoint = undefined;
+        if (typeof r2KeyUrl === "string" && r2KeyUrl.startsWith("s3://")) {
+          const withoutScheme = r2KeyUrl.slice("s3://".length);
+          const firstSlash = withoutScheme.indexOf("/");
+          if (firstSlash > 0) {
+            const bucket = withoutScheme.slice(0, firstSlash);
+            const key = withoutScheme.slice(firstSlash + 1);
+            sourceEndpoint = `https://${bucket}.s3.amazonaws.com`;
+            r2KeyUrl = `${sourceEndpoint}/${key}`;
+          }
+        }
+        const sourceUrl = new URL(r2KeyUrl);
+
+        const sourceAwsClient = new AwsClient({
+          accessKeyId: env.SOURCE_ACCESS_KEY_ID,
+          secretAccessKey: env.SOURCE_SECRET_ACCESS_KEY,
+          service: "s3",
+          region: "auto",
+          ...(sourceEndpoint ? { endpoint: sourceEndpoint } : {}),
+        });
+
         let sourceResponse;
         const sourceFetchStartedAt = Date.now();
         try {

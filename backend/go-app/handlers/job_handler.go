@@ -246,6 +246,7 @@ func retryShardedTransferTasks(ctx context.Context, job models.TransferJob, init
 	resetCount := 0
 	skippedCount := 0
 	skippedAutoRetryScheduledCount := 0
+	minResetTaskID := int64(0)
 
 	// 遍历所有可能的 Bucket
 	// 由于我们不知道具体有多少个 Bucket，可以尝试遍历直到连续空 Bucket 出现，或者设置一个较大的安全上限
@@ -326,6 +327,9 @@ func retryShardedTransferTasks(ctx context.Context, job models.TransferJob, init
 					clearTransferAutoRetrySchedule(pipe, ctx, task.JobID, task.ID)
 					hasUpdates = true
 					resetCount++
+					if minResetTaskID == 0 || task.ID < minResetTaskID {
+						minResetTaskID = task.ID
+					}
 				}
 			}
 			if hasUpdates {
@@ -337,8 +341,7 @@ func retryShardedTransferTasks(ctx context.Context, job models.TransferJob, init
 	if resetCount > 0 {
 		database.DB.Exec("UPDATE transfer_jobs SET failed_count = failed_count - ?, pending_count = pending_count + ? WHERE job_id = ?", resetCount, resetCount, jobID)
 
-		// 重置新 Offset (不带 {})
-		database.RDB.Set(ctx, fmt.Sprintf("tx:job:%d:offset", jobID), 0, 0)
+		rewindTransferJobOffsetForManualRetry(ctx, int64(jobID), minResetTaskID, true)
 
 		if initialStatus == models.StatusCompleted || initialStatus == models.StatusFailed {
 			database.DB.Model(&models.TransferJob{JobID: uint(jobID)}).Update("status", models.StatusPending)
@@ -352,6 +355,38 @@ func retryShardedTransferTasks(ctx context.Context, job models.TransferJob, init
 		log.Printf("[RetryFailedTransferTasks] job %d skipped %d auto-scheduled transfer tasks", jobID, skippedAutoRetryScheduledCount)
 	}
 }
+
+func rewindTransferJobOffsetForManualRetry(ctx context.Context, jobID, minTaskID int64, sharded bool) {
+	offsetKey := fmt.Sprintf("tx:job:%d:offset", jobID)
+	if !sharded {
+		if err := database.RDB.Set(ctx, offsetKey, 0, 0).Err(); err != nil {
+			log.Printf("[RetryFailedTransferTasks] failed to rewind legacy offset for job=%d: %v", jobID, err)
+		}
+		return
+	}
+	if minTaskID <= 0 {
+		return
+	}
+
+	offsetBefore, err := database.RDB.Get(ctx, offsetKey).Int64()
+	if err == redis.Nil {
+		offsetBefore = 0
+		err = nil
+	}
+	if err != nil {
+		log.Printf("[RetryFailedTransferTasks] failed to read sharded offset before manual rewind for job=%d min_task_id=%d: %v", jobID, minTaskID, err)
+		return
+	}
+
+	rewindTo, shouldRewind := computeTransferRetryRewindOffset(offsetBefore, minTaskID, true)
+	if !shouldRewind {
+		return
+	}
+	if err := database.RDB.Set(ctx, offsetKey, rewindTo, 0).Err(); err != nil {
+		log.Printf("[RetryFailedTransferTasks] failed to rewind sharded offset for job=%d min_task_id=%d to=%d: %v", jobID, minTaskID, rewindTo, err)
+	}
+}
+
 func retryLegacyTransferTasks(job models.TransferJob, initialStatus models.JobStatus) {
 	ctx := context.Background()
 	jobID := int(job.JobID)
@@ -437,7 +472,7 @@ func retryLegacyTransferTasks(job models.TransferJob, initialStatus models.JobSt
 	if resetCount > 0 {
 		database.DB.Exec("UPDATE transfer_jobs SET failed_count = failed_count - ?, pending_count = pending_count + ? WHERE job_id = ?", resetCount, resetCount, jobID)
 
-		database.RDB.Set(ctx, fmt.Sprintf("tx:job:%d:offset", jobID), 0, 0)
+		rewindTransferJobOffsetForManualRetry(ctx, int64(jobID), 0, false)
 
 		if initialStatus == models.StatusCompleted || initialStatus == models.StatusFailed {
 			database.DB.Model(&models.TransferJob{JobID: uint(jobID)}).Update("status", models.StatusPending)

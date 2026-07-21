@@ -1503,6 +1503,66 @@ func TestComputeTransferRetryRewindOffsetLegacyPreservesSafeFullRewind(t *testin
 	}
 }
 
+func TestRewindTransferJobOffsetForManualRetryShardedUsesEarliestResetTask(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+
+	oldRDB := database.RDB
+	database.RDB = client
+	defer func() {
+		_ = client.Close()
+		database.RDB = oldRDB
+	}()
+
+	ctx := context.Background()
+	jobID := int64(88)
+	offsetKey := fmt.Sprintf("tx:job:%d:offset", jobID)
+	if err := client.Set(ctx, offsetKey, "130999", 0).Err(); err != nil {
+		t.Fatalf("seed offset: %v", err)
+	}
+
+	rewindTransferJobOffsetForManualRetry(ctx, jobID, 127244, true)
+
+	got, err := client.Get(ctx, offsetKey).Int64()
+	if err != nil {
+		t.Fatalf("load offset: %v", err)
+	}
+	if got != 127243 {
+		t.Fatalf("expected manual retry rewind to 127243, got %d", got)
+	}
+}
+
+func TestRewindTransferJobOffsetForManualRetryShardedSkipsWhenOffsetAlreadyBehindTask(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+
+	oldRDB := database.RDB
+	database.RDB = client
+	defer func() {
+		_ = client.Close()
+		database.RDB = oldRDB
+	}()
+
+	ctx := context.Background()
+	jobID := int64(89)
+	offsetKey := fmt.Sprintf("tx:job:%d:offset", jobID)
+	if err := client.Set(ctx, offsetKey, "6000", 0).Err(); err != nil {
+		t.Fatalf("seed offset: %v", err)
+	}
+
+	rewindTransferJobOffsetForManualRetry(ctx, jobID, 127244, true)
+
+	got, err := client.Get(ctx, offsetKey).Int64()
+	if err != nil {
+		t.Fatalf("load offset: %v", err)
+	}
+	if got != 6000 {
+		t.Fatalf("expected manual retry rewind to keep offset 6000, got %d", got)
+	}
+}
+
 func TestRecordTransferTaskCompensationStoresRunTokenKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	mr := miniredis.RunT(t)
