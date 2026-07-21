@@ -175,6 +175,23 @@ func resetTransferTaskForRetry(task *models.TransferTask, now time.Time) {
 	task.CompletedAt = time.Time{}
 }
 
+func computeTransferRetryRewindOffset(currentOffset, taskID int64, sharded bool) (int64, bool) {
+	if sharded {
+		target := taskID - 1
+		if target < 0 {
+			target = 0
+		}
+		if currentOffset <= target {
+			return 0, false
+		}
+		return target, true
+	}
+	if currentOffset <= 0 {
+		return 0, false
+	}
+	return 0, true
+}
+
 func refreshTransferRetryPoolCandidate(ctx context.Context, job models.TransferJob, task models.TransferTask, pipe redis.Pipeliner, logPrefix string) {
 	checkpoint, loadErr := loadTransferMultipartCheckpointRecord(ctx, task.JobID, task.ID)
 	if loadErr != nil {
@@ -392,10 +409,21 @@ func retrySingleTransferTask(ctx context.Context, taskKey string, job models.Tra
 		offsetBefore = 0
 		offsetBeforeErr = nil
 	}
-	if err := database.RDB.Set(ctx, fmt.Sprintf("tx:job:%d:offset", updated.JobID), 0, 0).Err(); err != nil {
-		log.Printf("[TransferAutoRetry] failed to rewind offset for job=%d task=%d after %s retry reset: %v", updated.JobID, updated.ID, reason, err)
+	offsetAfter := offsetBefore
+	rewound := false
+	if offsetBeforeErr == nil {
+		if rewindTo, shouldRewind := computeTransferRetryRewindOffset(offsetBefore, updated.ID, isJobSharded(ctx, updated.JobID)); shouldRewind {
+			if err := database.RDB.Set(ctx, offsetKey, rewindTo, 0).Err(); err != nil {
+				log.Printf("[TransferAutoRetry] failed to rewind offset for job=%d task=%d after %s retry reset: %v", updated.JobID, updated.ID, reason, err)
+			} else {
+				offsetAfter = rewindTo
+				rewound = true
+			}
+		}
+	} else {
+		log.Printf("[TransferAutoRetry] failed to read offset before retry rewind for job=%d task=%d after %s retry reset: %v", updated.JobID, updated.ID, reason, offsetBeforeErr)
 	}
-	if shouldReportTransferDebug(fmt.Sprintf("auto-retry-reset:%d", updated.JobID), 1500*time.Millisecond) {
+	if rewound && shouldReportTransferDebug(fmt.Sprintf("auto-retry-reset:%d", updated.JobID), 1500*time.Millisecond) {
 		reportTransferDebugEvent(
 			"pre-fix",
 			"A",
@@ -407,6 +435,7 @@ func retrySingleTransferTask(ctx context.Context, taskKey string, job models.Tra
 				"reason":             reason,
 				"offset_key":         offsetKey,
 				"offset_before":      offsetBefore,
+				"offset_after":       offsetAfter,
 				"offset_before_error": func() string {
 					if offsetBeforeErr == nil {
 						return ""

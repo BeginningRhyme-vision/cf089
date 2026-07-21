@@ -1473,6 +1473,36 @@ func TestResetTransferTaskForRetryClearsPreviousAttemptFields(t *testing.T) {
 	}
 }
 
+func TestComputeTransferRetryRewindOffsetShardedRewindsToTaskBoundary(t *testing.T) {
+	rewindTo, shouldRewind := computeTransferRetryRewindOffset(130999, 127244, true)
+	if !shouldRewind {
+		t.Fatal("expected sharded retry to rewind when offset is ahead of task")
+	}
+	if rewindTo != 127243 {
+		t.Fatalf("expected rewind target 127243, got %d", rewindTo)
+	}
+}
+
+func TestComputeTransferRetryRewindOffsetShardedSkipsWhenTaskIsAhead(t *testing.T) {
+	rewindTo, shouldRewind := computeTransferRetryRewindOffset(6000, 127244, true)
+	if shouldRewind {
+		t.Fatal("expected no sharded rewind when current offset is already behind task")
+	}
+	if rewindTo != 0 {
+		t.Fatalf("expected zero rewind target when no rewind is needed, got %d", rewindTo)
+	}
+}
+
+func TestComputeTransferRetryRewindOffsetLegacyPreservesSafeFullRewind(t *testing.T) {
+	rewindTo, shouldRewind := computeTransferRetryRewindOffset(321, 127244, false)
+	if !shouldRewind {
+		t.Fatal("expected legacy retry to preserve full rewind")
+	}
+	if rewindTo != 0 {
+		t.Fatalf("expected legacy rewind target 0, got %d", rewindTo)
+	}
+}
+
 func TestRecordTransferTaskCompensationStoresRunTokenKey(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	mr := miniredis.RunT(t)
