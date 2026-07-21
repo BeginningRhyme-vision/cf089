@@ -386,8 +386,37 @@ func retrySingleTransferTask(ctx context.Context, taskKey string, job models.Tra
 		return err
 	}
 
+	offsetKey := fmt.Sprintf("tx:job:%d:offset", updated.JobID)
+	offsetBefore, offsetBeforeErr := database.RDB.Get(ctx, offsetKey).Int64()
+	if offsetBeforeErr == redis.Nil {
+		offsetBefore = 0
+		offsetBeforeErr = nil
+	}
 	if err := database.RDB.Set(ctx, fmt.Sprintf("tx:job:%d:offset", updated.JobID), 0, 0).Err(); err != nil {
 		log.Printf("[TransferAutoRetry] failed to rewind offset for job=%d task=%d after %s retry reset: %v", updated.JobID, updated.ID, reason, err)
+	}
+	if shouldReportTransferDebug(fmt.Sprintf("auto-retry-reset:%d", updated.JobID), 1500*time.Millisecond) {
+		reportTransferDebugEvent(
+			"pre-fix",
+			"A",
+			"transfer_auto_retry.go:retrySingleTransferTask",
+			"[DEBUG] auto retry rewound transfer offset",
+			map[string]interface{}{
+				"job_id":             updated.JobID,
+				"task_id":            updated.ID,
+				"reason":             reason,
+				"offset_key":         offsetKey,
+				"offset_before":      offsetBefore,
+				"offset_before_error": func() string {
+					if offsetBeforeErr == nil {
+						return ""
+					}
+					return offsetBeforeErr.Error()
+				}(),
+				"task_status_before": task.Status,
+				"task_status_after":  updated.Status,
+			},
+		)
 	}
 	triggerTxRefill(updated.JobID)
 	log.Printf("[TransferAutoRetry] reset task job=%d task=%d to pending via %s retry", updated.JobID, updated.ID, reason)

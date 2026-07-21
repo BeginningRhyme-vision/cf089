@@ -1,14 +1,17 @@
 package handlers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"unbound-future-backend/database"
@@ -33,6 +36,97 @@ const (
 	TransferPoolDefault                   = "default"
 	TransferPoolResume                    = "resume"
 )
+
+var (
+	transferDebugEnvOnce    sync.Once
+	transferDebugEventURL   string
+	transferDebugSessionID  string
+	transferDebugEnvEnabled bool
+	transferDebugThrottle   sync.Map
+)
+
+// #region debug-point helper:default-pool-empty
+func loadTransferDebugEnv() (string, string, bool) {
+	transferDebugEnvOnce.Do(func() {
+		transferDebugEventURL = "http://127.0.0.1:7777/event"
+		transferDebugSessionID = "default-pool-empty"
+		if envURL := strings.TrimSpace(os.Getenv("DEBUG_SERVER_URL")); envURL != "" {
+			transferDebugEventURL = envURL
+		}
+		if envSessionID := strings.TrimSpace(os.Getenv("DEBUG_SESSION_ID")); envSessionID != "" {
+			transferDebugSessionID = envSessionID
+		}
+		raw, err := os.ReadFile(".dbg/default-pool-empty.env")
+		if err == nil {
+			for _, line := range strings.Split(string(raw), "\n") {
+				line = strings.TrimSpace(line)
+				if line == "" {
+					continue
+				}
+				if strings.HasPrefix(line, "DEBUG_SERVER_URL=") {
+					transferDebugEventURL = strings.TrimSpace(strings.TrimPrefix(line, "DEBUG_SERVER_URL="))
+					continue
+				}
+				if strings.HasPrefix(line, "DEBUG_SESSION_ID=") {
+					transferDebugSessionID = strings.TrimSpace(strings.TrimPrefix(line, "DEBUG_SESSION_ID="))
+				}
+			}
+		}
+		transferDebugEnvEnabled = transferDebugEventURL != "" && transferDebugSessionID != ""
+	})
+	return transferDebugEventURL, transferDebugSessionID, transferDebugEnvEnabled
+}
+
+func shouldReportTransferDebug(key string, interval time.Duration) bool {
+	if strings.TrimSpace(key) == "" || interval <= 0 {
+		return true
+	}
+	now := time.Now().UnixNano()
+	if previous, ok := transferDebugThrottle.Load(key); ok {
+		last, ok := previous.(int64)
+		if ok && now-last < interval.Nanoseconds() {
+			return false
+		}
+	}
+	transferDebugThrottle.Store(key, now)
+	return true
+}
+
+func reportTransferDebugEvent(runID, hypothesisID, location, msg string, data map[string]interface{}) {
+	eventURL, sessionID, enabled := loadTransferDebugEnv()
+	if !enabled {
+		return
+	}
+	payload := map[string]interface{}{
+		"sessionId":    sessionID,
+		"runId":        runID,
+		"hypothesisId": hypothesisID,
+		"location":     location,
+		"msg":          msg,
+		"data":         data,
+		"ts":           time.Now().UnixMilli(),
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	req, err := http.NewRequest(http.MethodPost, eventURL, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	defer cancel()
+	req = req.WithContext(ctx)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return
+	}
+	defer resp.Body.Close()
+	_, _ = io.Copy(io.Discard, resp.Body)
+}
+
+// #endregion
 
 func transferClaimedRunningKey() string {
 	return "tx:running:claimed"
