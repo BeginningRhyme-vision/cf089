@@ -294,3 +294,20 @@ func TestTransferAcquireErrorBackoffFromEnv(t *testing.T) {
 		t.Fatalf("env error backoff=%s, want %s", got, 2500*time.Millisecond)
 	}
 }
+
+func TestGetEnvBoolTransferAllowZeroSizeFile(t *testing.T) {
+	t.Setenv("TRANSFER_ALLOW_ZERO_SIZE_FILE", "false")
+	if got := getEnvBool("TRANSFER_ALLOW_ZERO_SIZE_FILE", true); got {
+		t.Fatal("expected false when TRANSFER_ALLOW_ZERO_SIZE_FILE=false")
+	}
+
+	t.Setenv("TRANSFER_ALLOW_ZERO_SIZE_FILE", "true")
+	if got := getEnvBool("TRANSFER_ALLOW_ZERO_SIZE_FILE", false); !got {
+		t.Fatal("expected true when TRANSFER_ALLOW_ZERO_SIZE_FILE=true")
+	}
+
+	t.Setenv("TRANSFER_ALLOW_ZERO_SIZE_FILE", "invalid")
+	if got := getEnvBool("TRANSFER_ALLOW_ZERO_SIZE_FILE", true); !got {
+		t.Fatal("expected invalid boolean env to fall back to default=true")
+	}
+}

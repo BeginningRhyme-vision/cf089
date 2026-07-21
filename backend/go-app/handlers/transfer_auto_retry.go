@@ -90,13 +90,15 @@ func transferAutoRetryPollInterval() time.Duration {
 	return time.Duration(seconds) * time.Second
 }
 
-func isTransferPermanentSourceNotFound(msg string) bool {
+func isTransferPermanentFailure(msg string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(msg))
 	if normalized == "" {
 		return false
 	}
 	return strings.Contains(normalized, "sourcenotfound") ||
-		strings.Contains(normalized, "source fetch returned 404")
+		strings.Contains(normalized, "source fetch returned 404") ||
+		strings.Contains(normalized, "zerosizedisabled") ||
+		strings.Contains(normalized, "zero-byte transfer disabled by config")
 }
 
 func setTransferAutoRetryScheduled(pipe redis.Pipeliner, ctx context.Context, jobID, taskID int64, dueAt time.Time) {
@@ -156,7 +158,7 @@ func shouldRetryTransferTask(task models.TransferTask) bool {
 	if task.Status != "FAILED" {
 		return false
 	}
-	return !isTransferPermanentSourceNotFound(task.ErrorMessage)
+	return !isTransferPermanentFailure(task.ErrorMessage)
 }
 
 func resetTransferTaskForRetry(task *models.TransferTask, now time.Time) {

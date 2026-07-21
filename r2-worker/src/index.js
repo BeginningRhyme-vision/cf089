@@ -597,6 +597,10 @@ async function processMessage(task, env) {
   let destUploadMsTotal = 0;
 
   try {
+    if (!Number.isFinite(size) || size < 0) {
+      throw createTransferError(400, "InvalidSize", "request_validation", `Invalid transfer size: ${size}`, false);
+    }
+
     // Validate required environment variables for source
     if (!env.SOURCE_ACCESS_KEY_ID || !env.SOURCE_SECRET_ACCESS_KEY) {
       throw classifyConfigError("config", "Missing required environment variables: SOURCE_ACCESS_KEY_ID and SOURCE_SECRET_ACCESS_KEY must be set in wrangler.toml or as environment variables");
@@ -652,64 +656,72 @@ async function processMessage(task, env) {
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       attemptsUsed = attempt;
-      let sourceResponse;
-      const sourceFetchStartedAt = Date.now();
-      try {
-        sourceResponse = await fetchWithTimeout((signal) => {
-          return sourceAwsClient.fetch(sourceUrl, {
-            method: 'GET',
-            headers: {
-              'Range': `bytes=${offset}-${offset + size - 1}`
-            },
-            signal,
-          });
-        }, sourceFetchTimeoutMs);
-        lastSourceFetchMs = elapsedMs(sourceFetchStartedAt);
-        sourceFetchMsTotal += lastSourceFetchMs;
-      } catch (error) {
-        lastSourceFetchMs = elapsedMs(sourceFetchStartedAt);
-        sourceFetchMsTotal += lastSourceFetchMs;
-        if (isAbortError(error)) {
-          error = createTransferError(
-            408,
-            "SourceTimeout",
-            "source_fetch",
-            `Source fetch timed out after ${Math.floor(sourceFetchTimeoutMs / 1000)}s`,
-            true,
-          );
+      let uploadBody;
+      if (size === 0) {
+        lastSourceFetchMs = 0;
+        console.log(`Zero-byte object shortcut copy for ${safeKey} part=${partNumber}`);
+        uploadBody = new Uint8Array(0);
+      } else {
+        let sourceResponse;
+        const sourceFetchStartedAt = Date.now();
+        try {
+          sourceResponse = await fetchWithTimeout((signal) => {
+            return sourceAwsClient.fetch(sourceUrl, {
+              method: 'GET',
+              headers: {
+                'Range': `bytes=${offset}-${offset + size - 1}`
+              },
+              signal,
+            });
+          }, sourceFetchTimeoutMs);
+          lastSourceFetchMs = elapsedMs(sourceFetchStartedAt);
+          sourceFetchMsTotal += lastSourceFetchMs;
+        } catch (error) {
+          lastSourceFetchMs = elapsedMs(sourceFetchStartedAt);
+          sourceFetchMsTotal += lastSourceFetchMs;
+          if (isAbortError(error)) {
+            error = createTransferError(
+              408,
+              "SourceTimeout",
+              "source_fetch",
+              `Source fetch timed out after ${Math.floor(sourceFetchTimeoutMs / 1000)}s`,
+              true,
+            );
+          }
+          const sourceErr = classifyFetchFailure("source_fetch", error);
+          if (sourceErr.retryable && attempt < maxAttempts) {
+            console.error(`Source download failed for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts} err=${sourceErr.message}`)
+            const retryDelayMs = backoffMs(attempt);
+            retryWaitMsTotal += retryDelayMs;
+            await sleep(retryDelayMs);
+            continue;
+          }
+          throw sourceErr;
         }
-        const sourceErr = classifyFetchFailure("source_fetch", error);
-        if (sourceErr.retryable && attempt < maxAttempts) {
-          console.error(`Source download failed for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts} err=${sourceErr.message}`)
-          const retryDelayMs = backoffMs(attempt);
-          retryWaitMsTotal += retryDelayMs;
-          await sleep(retryDelayMs);
-          continue;
-        }
-        throw sourceErr;
-      }
 
-      if (!sourceResponse.ok) {
-        const sourceErr = classifySourceResponseError("source_fetch", sourceResponse.status, sourceResponse.statusText || "");
-        if (sourceErr.retryable && attempt < maxAttempts) {
-          console.error(`Source download failed for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts} status=${sourceResponse.status}`)
-          const retryDelayMs = getRetryDelayMs(attempt, sourceResponse.headers);
-          retryWaitMsTotal += retryDelayMs;
-          await sleep(retryDelayMs);
-          continue;
+        if (!sourceResponse.ok) {
+          const sourceErr = classifySourceResponseError("source_fetch", sourceResponse.status, sourceResponse.statusText || "");
+          if (sourceErr.retryable && attempt < maxAttempts) {
+            console.error(`Source download failed for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts} status=${sourceResponse.status}`)
+            const retryDelayMs = getRetryDelayMs(attempt, sourceResponse.headers);
+            retryWaitMsTotal += retryDelayMs;
+            await sleep(retryDelayMs);
+            continue;
+          }
+          throw sourceErr;
         }
-        throw sourceErr;
-      }
 
-      if (!sourceResponse.body) {
-        if (attempt < maxAttempts) {
-          console.error(`Source response missing body for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts}`)
-          const retryDelayMs = backoffMs(attempt);
-          retryWaitMsTotal += retryDelayMs;
-          await sleep(retryDelayMs);
-          continue;
+        if (!sourceResponse.body) {
+          if (attempt < maxAttempts) {
+            console.error(`Source response missing body for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts}`)
+            const retryDelayMs = backoffMs(attempt);
+            retryWaitMsTotal += retryDelayMs;
+            await sleep(retryDelayMs);
+            continue;
+          }
+          throw createTransferError(502, "SourceBodyMissing", "source_fetch", "Source response has no body", true);
         }
-        throw createTransferError(502, "SourceBodyMissing", "source_fetch", "Source response has no body", true);
+        uploadBody = sourceResponse.body;
       }
 
       let signedRequest;
@@ -731,7 +743,7 @@ async function processMessage(task, env) {
         s3Response = await fetchWithTimeout((signal) => {
           return fetch(uploadUrl.toString(), {
             method: "PUT",
-            body: sourceResponse.body,
+            body: uploadBody,
             headers: signedRequest.headers,
             signal,
           });

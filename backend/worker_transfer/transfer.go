@@ -96,6 +96,7 @@ var (
 	workerCount           int
 	taskBufferSize        int
 	partConcurrency       int
+	allowZeroSizeFile     bool
 	resumeFailStreakLimit int
 	listPartsTimeout      time.Duration
 	listPartsRetryCount   int
@@ -132,6 +133,7 @@ const (
 	DefaultPartConcurrency          = 16
 	DefaultMultipartThresholdMB     = 8
 	DefaultMinPartSizeMB            = 5
+	DefaultAllowZeroSizeFile        = false
 	DefaultTransferMaxConns         = 384
 	DefaultTransferTimeoutSec       = 120
 	DefaultTransferTLSHandshake     = 10
@@ -178,6 +180,7 @@ func runTransfer() {
 	workerCount = getEnvInt("TRANSFER_MAX_WORKERS", DefaultConcurrentWorkers)
 	taskBufferSize = getEnvInt("TRANSFER_TASK_BUFFER", DefaultTaskBufferSize)
 	partConcurrency = getEnvInt("TRANSFER_PART_CONCURRENCY", DefaultPartConcurrency)
+	allowZeroSizeFile = getEnvBool("TRANSFER_ALLOW_ZERO_SIZE_FILE", DefaultAllowZeroSizeFile)
 	resumeFailStreakLimit = getEnvInt("TRANSFER_RESUME_FAIL_STREAK_LIMIT", DefaultResumeFailStreakLimit)
 	listPartsTimeout = time.Duration(getEnvInt("TRANSFER_LIST_PARTS_TIMEOUT_SECONDS", DefaultListPartsTimeoutSec)) * time.Second
 	listPartsRetryCount = getEnvInt("TRANSFER_LIST_PARTS_RETRY_COUNT", DefaultListPartsRetryCount)
@@ -219,6 +222,7 @@ func runTransfer() {
 	}
 	log.Printf("Transfer client config: force_http2=%t max_conns_per_host=%d timeout=%s", transferForceHTTP2, transferMaxConnsPerHost, transferTimeout)
 	log.Printf("ListParts config: timeout=%s retry_count=%d backoff_base=%d", listPartsTimeout, listPartsRetryCount, ListPartsRetryBackoffBase)
+	log.Printf("Zero-size transfer config: allow_zero_size_file=%t", allowZeroSizeFile)
 
 	initSourceClient()
 	initStatsFlusher()
@@ -470,6 +474,17 @@ func processTask(t TransferTask) {
 	}
 	size := aws.ToInt64(head.ContentLength)
 	sourceETag := aws.ToString(head.ETag)
+
+	if size == 0 && !allowZeroSizeFile {
+		errMsg := "ZeroSizeDisabled: zero-byte transfer disabled by config"
+		log.Printf("Task %d/%d skipped zero-byte object %s/%s because TRANSFER_ALLOW_ZERO_SIZE_FILE=false", t.JobID, t.ID, srcBucket, srcKey)
+		if err := updateTaskStatus(t, "FAILED", errMsg); err != nil {
+			log.Printf("Failed to mark zero-byte task %d/%d as FAILED: %v", t.JobID, t.ID, err)
+		}
+		updateJobStats(t.JobID, 0, 1)
+		TasksTransferred.WithLabelValues("failed").Inc()
+		return
+	}
 
 	// 4. Construct Public/Virtual-Hosted URLs for Transfer Service (Matches r2s3.go logic)
 	srcUrl, err := constructVirtualHostURL(cfg.Storage.Src.Endpoint, srcBucket, srcKey)

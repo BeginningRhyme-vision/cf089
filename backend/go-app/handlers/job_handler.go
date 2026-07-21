@@ -346,7 +346,7 @@ func retryShardedTransferTasks(ctx context.Context, job models.TransferJob, init
 	}
 
 	if skippedCount > 0 {
-		log.Printf("[RetryFailedTransferTasks] job %d skipped %d SourceNotFound transfer tasks", jobID, skippedCount)
+		log.Printf("[RetryFailedTransferTasks] job %d skipped %d non-retryable transfer tasks", jobID, skippedCount)
 	}
 	if skippedAutoRetryScheduledCount > 0 {
 		log.Printf("[RetryFailedTransferTasks] job %d skipped %d auto-scheduled transfer tasks", jobID, skippedAutoRetryScheduledCount)
@@ -445,7 +445,7 @@ func retryLegacyTransferTasks(job models.TransferJob, initialStatus models.JobSt
 	}
 
 	if skippedCount > 0 {
-		log.Printf("[RetryFailedTransferTasks] job %d skipped %d SourceNotFound transfer tasks", jobID, skippedCount)
+		log.Printf("[RetryFailedTransferTasks] job %d skipped %d non-retryable transfer tasks", jobID, skippedCount)
 	}
 	if skippedAutoRetryScheduledCount > 0 {
 		log.Printf("[RetryFailedTransferTasks] job %d skipped %d auto-scheduled legacy transfer tasks", jobID, skippedAutoRetryScheduledCount)

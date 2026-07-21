@@ -186,6 +186,7 @@ services:
       - TRANSFER_LIST_PARTS_RETRY_COUNT=2
       - TRANSFER_DEST_S3_TIMEOUT_SECONDS=60
       - TRANSFER_SERVICE_TIMEOUT_SECONDS=180
+      - TRANSFER_ALLOW_ZERO_SIZE_FILE=false
     volumes:
       - ./config/config.yaml:/app/config.yaml
     depends_on:

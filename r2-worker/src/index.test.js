@@ -160,6 +160,49 @@ describe('Worker HTTP Handler', () => {
     expect(sourceClient.config.endpoint).toBe('https://source-bucket.s3.amazonaws.com');
   });
 
+  it('should shortcut zero-byte copy without source range fetch', async () => {
+    request = new Request('http://worker/initiate-copy', {
+      method: 'POST',
+      body: JSON.stringify({
+        r2Key: 'https://account.r2.cloudflarestorage.com/bucket/empty.txt',
+        s3Url: 'https://target-bucket.oss.com/empty.txt',
+        size: 0,
+        offset: 0,
+      }),
+    });
+
+    const response = await worker.fetch(request, env, ctx);
+    expect(response.status).toBe(200);
+
+    const sourceGetCall = mockFetchCalls.find((call) => call.options?.method === 'GET');
+    expect(sourceGetCall).toBeUndefined();
+
+    const putCall = globalThis.fetch.mock.calls.find(([, opts]) => opts?.method === 'PUT');
+    expect(putCall).toBeDefined();
+    expect(putCall[1].headers['Content-Length']).toBe('0');
+    expect(putCall[1].body).toBeInstanceOf(Uint8Array);
+    expect(putCall[1].body).toHaveLength(0);
+  });
+
+  it('should reject negative transfer sizes', async () => {
+    request = new Request('http://worker/initiate-copy', {
+      method: 'POST',
+      body: JSON.stringify({
+        r2Key: 'https://account.r2.cloudflarestorage.com/bucket/video.mp4',
+        s3Url: 'https://target-bucket.oss.com/video.mp4',
+        size: -1,
+        offset: 0,
+      }),
+    });
+
+    const response = await worker.fetch(request, env, ctx);
+    expect(response.status).toBe(400);
+
+    const body = await response.json();
+    expect(body.error.code).toBe('InvalidSize');
+    expect(body.error.retryable).toBe(false);
+  });
+
   it('should log stage timing for successful copy requests', async () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
