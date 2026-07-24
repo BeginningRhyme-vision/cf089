@@ -424,6 +424,146 @@ describe('Worker HTTP Handler', () => {
     globalThis.setTimeout = originalSetTimeout;
   });
 
+  it('should retry when reading a retryable destination error body loses the connection', async () => {
+    let putAttempts = 0;
+    globalThis.fetch = vi.fn(async (_url, options) => {
+      if (options?.method === 'PUT') {
+        putAttempts += 1;
+        if (putAttempts === 1) {
+          return {
+            ok: false,
+            status: 503,
+            text: async () => {
+              throw new Error('Network connection lost.');
+            },
+            headers: {
+              get: () => null,
+            }
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          headers: {
+            get: (key) => (key === 'etag' || key === 'ETag') ? '"mock-etag"' : null,
+          }
+        };
+      }
+      return { ok: false, status: 404, text: async () => "Not Found" };
+    });
+
+    request = new Request('http://worker/initiate-copy', {
+      method: 'POST',
+      body: JSON.stringify({
+        r2Key: 'https://account.r2.cloudflarestorage.com/bucket/video.mp4',
+        s3Url: 'https://target-bucket.oss.com/video.mp4',
+        size: 100,
+        offset: 0,
+        uploadId: 'upload-123',
+        partNumber: 1,
+      }),
+    });
+
+    const response = await worker.fetch(request, env, ctx);
+    expect(response.status).toBe(200);
+    expect(putAttempts).toBe(2);
+  });
+
+  it('should not retry when reading a non-retryable destination error body loses the connection', async () => {
+    let putAttempts = 0;
+    globalThis.fetch = vi.fn(async (_url, options) => {
+      if (options?.method === 'PUT') {
+        putAttempts += 1;
+        return {
+          ok: false,
+          status: 404,
+          text: async () => {
+            throw new Error('Network connection lost.');
+          },
+          headers: {
+            get: () => null,
+          }
+        };
+      }
+      return { ok: false, status: 404, text: async () => "Not Found" };
+    });
+
+    request = new Request('http://worker/initiate-copy', {
+      method: 'POST',
+      body: JSON.stringify({
+        r2Key: 'https://account.r2.cloudflarestorage.com/bucket/video.mp4',
+        s3Url: 'https://target-bucket.oss.com/video.mp4',
+        size: 100,
+        offset: 0,
+        uploadId: 'upload-123',
+        partNumber: 1,
+      }),
+    });
+
+    const response = await worker.fetch(request, env, ctx);
+    expect(response.status).toBe(404);
+    expect(putAttempts).toBe(1);
+
+    const body = await response.json();
+    expect(body.error.code).toBe('DestNotFound');
+    expect(body.error.retryable).toBe(false);
+  });
+
+  it('should honor Retry-After when reading a retryable destination error body loses the connection', async () => {
+    const originalSetTimeout = globalThis.setTimeout;
+    const timeoutSpy = vi.spyOn(globalThis, 'setTimeout').mockImplementation((fn, ms, ...args) => {
+      fn(...args);
+      return 0;
+    });
+
+    let putAttempts = 0;
+    globalThis.fetch = vi.fn(async (_url, options) => {
+      if (options?.method === 'PUT') {
+        putAttempts += 1;
+        if (putAttempts === 1) {
+          return {
+            ok: false,
+            status: 429,
+            text: async () => {
+              throw new Error('Network connection lost.');
+            },
+            headers: {
+              get: (key) => (key === 'Retry-After' || key === 'retry-after') ? '6' : null,
+            }
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          headers: {
+            get: (key) => (key === 'etag' || key === 'ETag') ? '"mock-etag"' : null,
+          }
+        };
+      }
+      return { ok: false, status: 404, text: async () => "Not Found" };
+    });
+
+    request = new Request('http://worker/initiate-copy', {
+      method: 'POST',
+      body: JSON.stringify({
+        r2Key: 'https://account.r2.cloudflarestorage.com/bucket/video.mp4',
+        s3Url: 'https://target-bucket.oss.com/video.mp4',
+        size: 100,
+        offset: 0,
+        uploadId: 'upload-123',
+        partNumber: 1,
+      }),
+    });
+
+    const response = await worker.fetch(request, env, ctx);
+    expect(response.status).toBe(200);
+    expect(putAttempts).toBe(2);
+    expect(timeoutSpy).toHaveBeenCalledWith(expect.any(Function), 6000);
+
+    timeoutSpy.mockRestore();
+    globalThis.setTimeout = originalSetTimeout;
+  });
+
   it('should fall back to exponential backoff when Retry-After is invalid', async () => {
     const originalSetTimeout = globalThis.setTimeout;
     const originalRandom = Math.random;

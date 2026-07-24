@@ -772,7 +772,20 @@ async function processMessage(task, env) {
       }
 
       if (!s3Response.ok) {
-        const errorText = await s3Response.text();
+        let errorText;
+        try {
+          errorText = await s3Response.text();
+        } catch (error) {
+          const destErr = classifyDestinationResponseError(s3Response.status, error?.message || String(error));
+          if (destErr.retryable && attempt < maxAttempts) {
+            console.error(`Upload failed for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts} status=${s3Response.status} err=${destErr.message}`)
+            const retryDelayMs = getRetryDelayMs(attempt, s3Response.headers);
+            retryWaitMsTotal += retryDelayMs;
+            await sleep(retryDelayMs);
+            continue;
+          }
+          throw destErr;
+        }
         const destErr = classifyDestinationResponseError(s3Response.status, errorText);
         if (destErr.retryable && attempt < maxAttempts) {
           console.error(`Upload failed for ${safeKey} part=${partNumber} attempt=${attempt}/${maxAttempts} status=${s3Response.status} body=${errorText}`)
